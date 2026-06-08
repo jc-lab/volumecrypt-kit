@@ -10,19 +10,28 @@ High-level 구현 (JvckMetadata 을 이용한 기본 구현) 이 가능합니다
 
 ### OS Volume (시스템 볼륨)
 
-- UEFI 로더가 부팅 전에 Block IO를 후킹하고 ACPI 핸들오버로 키를 드라이버에 전달합니다.
-- 드라이버는 부팅 시 핸드오버된 데이터가 있으면 자동으로 볼륨에 attach됩니다.
+- metadata가 볼륨 안에 저장되므로 UEFI 로더는 ACPI 핸드오버로 **VMK만** 드라이버에 전달합니다.
+  (FVEK·encrypted_offset·지오메트리는 드라이버가 볼륨 footer metadata를 VMK로 복호화하여 복원합니다.)
+- 드라이버는 부팅 시 핸드오버된 VMK가 있으면 EFI 접근 없이 볼륨 footer metadata만 읽어 자동으로 attach됩니다.
+- OS Volume은 이미 파일시스템이 존재하는 기존 파티션이므로 볼륨 앞부분(header)에 metadata를 넣을 수 없습니다.
+  최초 암호화 시 파일시스템을 Shrink하여 볼륨 끝부분에 **2개의 footer metadata replica**를 저장합니다 (`use_header=0`, `use_footer=2`).
 
 샘플 구현 (JvckMetadata 사용):
 - `(EFI)/vck.json` 에 평문 VMK 와 로더 설정을 저장합니다.
-- 시스템 볼륨은 볼륨 header를 사용할 수 없으므로 JvckMetadata 복제본은 `(EFI)/sys1.vck`, `(EFI)/sys2.vck`에 저장합니다.
+- JvckMetadata replica는 OS 볼륨 끝부분 footer 영역에 저장합니다. 로더는 부팅 시 이를 Block IO로 읽어
+  VMK로 복호화한 뒤 FVEK와 encrypted_offset을 복원하고, `EFI_BLOCK_IO_PROTOCOL`을 후킹하여 OS 볼륨을
+  **투명하게(transparent) 암·복호화**합니다. 드라이버에는 VMK만 ACPI 핸드오버로 전달합니다.
 
 ### Data Volume (데이터 볼륨)
 
 - UEFI가 관여하지 않습니다.
-- OS 부팅 후 Go 애플리케이션이 `IOCTL_VCK_ATTACH`를 통해 볼륨 경로와 VMK 을 드라이버에 제공하여 암호화 레이어를 활성화합니다.
-- 새롭게 파티션을 생성 할 경우 UseHeader=1, UseFooter=2 을 사용하고, 기존 파티션을 암호화 할 경우 Shrink 하여 Metadata 공간을 확보하여 UseHeader=0, UseFooter=2 을 사용합니다.
-- 볼륨의 첫 4byte 을 보고 Metadata 존재 유무를 파악하고, 없을 경우 맨 뒤 섹터부터 최대 1MB 만큼까지 역순으로 Metadata 을 찾습니다.
+- OS 부팅 후 Go 애플리케이션이 `IOCTL_JVCK_ATTACH`를 통해 볼륨 경로와 VMK 을 드라이버에 제공하여 암호화 레이어를 활성화합니다.
+- **신규 파티션을 생성할 경우에만** 볼륨 앞부분(header)에 metadata를 넣을 수 있습니다 (`UseHeader=1`, `UseFooter=2`).
+  기존 파티션은 이미 파일시스템이 모든 섹터를 점유하여 앞부분 섹터를 옮길 수 없으므로, Shrink로 끝부분에만
+  Metadata 공간을 확보하고 header는 사용하지 않습니다 (`UseHeader=0`, `UseFooter=2`).
+- 볼륨의 첫 4byte 을 보고 header Metadata 존재 유무를 파악합니다. footer는 `[vendor specific data][Metadata]`
+  순서로 배치되어 Metadata 블록이 replica의 맨 끝(볼륨의 맨 끝)에 오므로, 볼륨 **마지막 섹터를 읽으면 즉시**
+  footer Metadata signature를 발견할 수 있습니다.
 
 ---
 
@@ -31,19 +40,21 @@ High-level 구현 (JvckMetadata 을 이용한 기본 구현) 이 가능합니다
 ```
 volumecrypt-kit/
 ├── lib/                         # Rust: 라이브러리 계층
-│   ├── common/                  # 공통 타입, 에러, msgpack 핸들오버 헬퍼, JVCK 기본 metadata 포맷 (JvckMetadata) 에 대한 구현들
+│   ├── common/                  # 공통 타입, 에러, msgpack 핸드오버 헬퍼, JVCK 기본 metadata 포맷 (JvckMetadata) 에 대한 구현들
 │   ├── driver/                  # 커널 드라이버 프레임워크 (WDK, 비동기 I/O, encrypted_offset)
-│   └── loader/                  # UEFI 로더 프레임워크 (Block IO 후킹, ACPI 핸들오버)
+│   └── loader/                  # UEFI 로더 프레임워크 (Block IO 후킹, ACPI 핸드오버)
 │
 ├── sdk/                         # Go: 유저스페이스 SDK
 │   └── vck/                     # 드라이버 IOCTL 클라이언트 라이브러리
 │
 ├── sample/                      # JVCK 기본 metadata 포맷 (JvckMetadata) 만을 사용하는 예제
-│   ├── common/                  # Rust: vck.json(VMK/loader 설정) 파싱, JVCK 메타데이터, 핸들오버 페이로드 정의
+│   ├── common/                  # Rust: vck.json(VMK/loader 설정) 파싱, JVCK 메타데이터, 핸드오버 페이로드 정의
+│   ├── crypto-test/             # Rust: 암호화 프리미티브(JVCK/AES-XTS/HKDF) 검증용 테스트 크레이트
 │   ├── driver/                  # Rust: VolumeProvider 구현체 (AES-XTS)
 │   ├── loader/                  # Rust: UEFI 로더 구현체
 │   └── app/                     # Go: 관리용 CLI (OS/Data 볼륨 attach·암호화·복호화·상태 조회)
 │
+├── testing/                     # VM 기반 테스트 자산 (test-foundry, OVMF, recipes 등) — 자세한 내용은 AGENTS.md 참조
 ├── Cargo.toml                   # Rust workspace
 ├── go.mod                       # Go module root (github.com/jc-lab/volumecrypt-kit)
 ├── go.sum
@@ -54,7 +65,7 @@ volumecrypt-kit/
 
 | 언어 | 범위 | 빌드 단위 |
 |---|---|---|
-| Rust | `lib/`, `sample/common`, `sample/driver`, `sample/loader` | Cargo workspace |
+| Rust | `lib/`, `sample/common`, `sample/crypto-test`, `sample/driver`, `sample/loader` | Cargo workspace |
 | Go | `sdk/`, `sample/app` | Go module (`go.mod`) |
 
 `go.mod` 루트 모듈 이름은 `github.com/jc-lab/volumecrypt-kit`이며,
@@ -72,8 +83,8 @@ volumecrypt-kit/
 
 - 공통 에러 타입 (`VckError`, `VckResult<T>`)
 - 볼륨 메타데이터 타입 (`VolumeId`, `SectorRange`, `EncryptedOffset`)
-- UEFI→Driver 핸들오버 추상화
-  - `HandoverPayload` 트레이트: `rmp-serde`를 통한 직렬화/역직렬화 인터페이스
+- UEFI→Driver 핸드오버 추상화
+  - `HandoverPayload` 트레이트: `messagepack-serde`(no_std)를 통한 직렬화/역직렬화 인터페이스
   - `AcpiHandoverWriter` (로더 측): `EfiRuntimeServicesData`로 msgpack 버퍼를 할당하고 커스텀 ACPI 테이블에 물리 주소를 기록
   - `AcpiHandoverReader` (드라이버 측): ACPI 테이블에서 물리 주소를 읽어 msgpack 버퍼를 역직렬화
 - 공통 상수 및 유틸리티
@@ -95,16 +106,21 @@ lib/common/
 **핵심 타입:**
 
 ```rust
-/// 점진적 암호화 진행 상태
+/// 점진적 암호화 진행 상태.
+///
+/// 모든 섹터 번호는 **데이터 영역(offset_sector) 기준 상대값**입니다.
+/// 즉 0 = 암호화 대상 영역의 첫 섹터이며, header/footer metadata 영역은 포함하지 않습니다.
+/// 필터 드라이버는 절대 LBA를 `relative = lba - offset_sector`로 환산하여 이 값과 비교합니다.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncryptedOffset {
-    /// 이 섹터 이전까지는 암호화 완료
+    /// 이 섹터 이전까지는 암호화 완료 (데이터 영역 상대 섹터 번호)
     pub sector: u64,
-    /// 전체 볼륨 섹터 수
+    /// 암호화 대상 총 섹터 수 (metadata 영역 제외, 데이터 영역 크기와 동일)
     pub total_sectors: u64,
 }
 
 impl EncryptedOffset {
+    /// `sector`는 데이터 영역 상대 섹터 번호입니다.
     pub fn is_encrypted(&self, sector: u64) -> bool {
         sector < self.sector
     }
@@ -113,7 +129,7 @@ impl EncryptedOffset {
     }
 }
 
-/// UEFI → Driver 핸들오버 페이로드 트레이트
+/// UEFI → Driver 핸드오버 페이로드 트레이트
 pub trait HandoverPayload: Serialize + DeserializeOwned {
     /// ACPI 테이블 서명 (4바이트, sample에서 지정)
     const ACPI_SIGNATURE: [u8; 4];
@@ -184,17 +200,22 @@ Go SDK는 `CreateFile("\\.\VolumeCryptKitSample", ...)` 으로 핸들을 열고
 ```rust
 // CTL_CODE(DeviceType=0x22, Function, Method=METHOD_BUFFERED, Access=FILE_ANY_ACCESS)
 // = (0x22 << 16) | (Function << 2)
-pub const IOCTL_VCK_GET_STATUS:    u32 = 0x0022_2000; // Function = 0x800
-pub const IOCTL_VCK_START_ENCRYPT: u32 = 0x0022_2004; // Function = 0x801
-pub const IOCTL_VCK_START_DECRYPT: u32 = 0x0022_2008; // Function = 0x802
-pub const IOCTL_VCK_GET_PROGRESS:  u32 = 0x0022_200c; // Function = 0x803
-pub const IOCTL_VCK_PAUSE:         u32 = 0x0022_2010; // Function = 0x804
-pub const IOCTL_VCK_ATTACH:        u32 = 0x0022_2014; // Function = 0x805 (Data Volume용)
-pub const IOCTL_VCK_DETACH:        u32 = 0x0022_2018; // Function = 0x806 (Data Volume용)
+pub const IOCTL_VCK_GET_STATUS:    u32 = 0x0022_2000; // Function = 0x800 (공통)
+pub const IOCTL_VCK_START_ENCRYPT: u32 = 0x0022_2004; // Function = 0x801 (공통)
+pub const IOCTL_VCK_START_DECRYPT: u32 = 0x0022_2008; // Function = 0x802 (공통)
+pub const IOCTL_VCK_GET_PROGRESS:  u32 = 0x0022_200c; // Function = 0x803 (공통)
+pub const IOCTL_VCK_PAUSE:         u32 = 0x0022_2010; // Function = 0x804 (공통)
+pub const IOCTL_JVCK_ATTACH:       u32 = 0x0022_2014; // Function = 0x805 (JVCK 포맷 전용, Data Volume)
+pub const IOCTL_VCK_DETACH:        u32 = 0x0022_2018; // Function = 0x806 (Data Volume용, 포맷 무관)
 ```
 
-**IOCTL 입출력 포맷:** 입력 버퍼와 출력 버퍼 모두 msgpack(`rmp-serde`)을 사용합니다.
-Go SDK와 Rust 드라이버 사이의 구조체 정의는 아래 sdk 섹션에서 설명합니다.
+`IOCTL_JVCK_ATTACH`는 JVCK 기본 포맷 전용 attach IOCTL입니다. 나머지 IOCTL(GET_STATUS,
+START_ENCRYPT, START_DECRYPT, GET_PROGRESS, PAUSE, DETACH)은 attach된 볼륨을 `volume_path`로
+지정해 동작하므로 포맷과 무관하게 공통으로 사용합니다. 자체 포맷을 쓰는 사용자는 attach만
+별도 IOCTL로 구현하고 나머지 공통 IOCTL은 그대로 재사용할 수 있습니다.
+
+**IOCTL 입출력 포맷:** 입력 버퍼와 출력 버퍼 모두 msgpack을 사용합니다 (Rust: `messagepack-serde`,
+Go: `github.com/vmihailenco/msgpack/v5`). Go SDK와 Rust 드라이버 사이의 구조체 정의는 아래 sdk 섹션에서 설명합니다.
 
 `IOCTL_VCK_GET_PROGRESS`는 **논블로킹 IOCTL**입니다. 드라이버는 현재 진행률 스냅샷을 즉시 반환합니다.
 Go SDK는 이를 goroutine에서 주기적으로 polling하여 채널 스트림으로 변환합니다.
@@ -210,29 +231,32 @@ IOCTL 디스패치는 요청을 처리하기 전에 `IoctlAuthorization::authori
 │                        OS Volume (System)                       │
 │                                                                 │
 │  [DriverEntry]                                                  │
-│    AcpiHandoverReader → VckHandoverPayload (key, enc_offset)    │
+│    AcpiHandoverReader → VckHandoverPayload (partition_guid, vmk) │
+│      → VMK를 보호 메모리로 복사 후 ACPI 버퍼 zeroize             │
 │         │                                                       │
 │  [PnP 볼륨 도착 알림]                                           │
-│    VolumeProvider::on_attach(AttachContext { source: Handover })│
-│         → IoConfig::AesXts 반환                              │
+│    VolumeProvider::on_attach(AttachContext { handover_data })   │
+│      → VMK로 볼륨 footer metadata 복호화                        │
+│        → FVEK·encrypted_offset·지오메트리 복원                  │
+│        → IoConfig::AesXts 반환                                  │
 │         → VolumeAttachRegistry에 등록                           │
 │         → 필터 드라이버 스택에 삽입                              │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
-│                       Data Volume (일반)                         │
+│                       Data Volume (일반, JVCK)                   │
 │                                                                 │
-│  [IOCTL_VCK_ATTACH 수신]                                        │
-│    VolumeAttachIoctlReq { volume_path, vmk 또는 key1/key2,       │
-│                           offset_sector, encrypted_sector,      │
-│                           total_sectors }                       │
+│  [IOCTL_JVCK_ATTACH 수신]                                       │
+│    JvckVolumeAttachReq { volume_path, vmk,                      │
+│                          use_header, use_footer, metadata_size }│
 │         │                                                       │
-│    lib/driver가 JVCK 또는 사용자 포맷으로 IoConfig 구성          │
-│    (VMK로 JVCK 메타데이터를 열거나, key1/key2 직접 제공)         │
+│    lib/driver: 볼륨에서 JVCK metadata(header/footer) 탐색·검증   │
+│      - 존재하면 VMK로 복호화 → FVEK·encrypted_offset 복원        │
+│      - 없으면(최초) 새 metadata 생성 후 기록                     │
 │         → VolumeAttachRegistry에 등록                           │
 │         → 필터 드라이버 스택에 삽입                              │
-│         ← VolumeAttachIoctlResp { offset_sector, total_sectors, │
-│                                   sector_size }                 │
+│         ← JvckVolumeAttachResp { offset_sector, total_sectors,  │
+│                                  sector_size }                  │
 └─────────────────────────────────────────────────────────────────┘
 
 두 경로 모두 VolumeAttachRegistry에 등록된 후에는
@@ -259,9 +283,9 @@ pub struct AttachedVolume {
 }
 
 pub enum AttachSource {
-    /// OS Volume: ACPI 핸들오버로 자동 attach
+    /// OS Volume: ACPI 핸드오버로 자동 attach
     Handover,
-    /// Data Volume: IOCTL_VCK_ATTACH로 런타임 attach
+    /// Data Volume: IOCTL_JVCK_ATTACH로 런타임 attach
     Ioctl,
 }
 ```
@@ -270,16 +294,25 @@ pub enum AttachSource {
 
 ```rust
 /// OS Volume의 부팅 시 attach 콜백. Data Volume은 사용하지 않습니다.
+///
+/// `Payload`는 연관 타입으로, 사용자가 자체 핸드오버 포맷을 정의할 수 있게 합니다.
+/// lib/driver는 이 타입으로 ACPI 핸드오버 버퍼를 직접 역직렬화하여 `AttachContext`에
+/// 구체 타입으로 전달하므로, sample에서 `dyn Any` downcast가 필요 없습니다.
 pub trait VolumeProvider: Send + Sync + 'static {
+    /// 핸드오버 페이로드 타입 (LoaderProvider::Payload와 동일 타입을 사용).
+    type Payload: HandoverPayload;
+
     /// 볼륨 attach 시 호출 (OS Volume 전용).
     /// IoConfig를 반환하여 암호화 방식을 결정합니다.
-    async fn on_attach(&self, ctx: &AttachContext<'_>) -> VckResult<IoConfig>;
+    async fn on_attach(&self, ctx: &AttachContext<'_, Self::Payload>) -> VckResult<IoConfig>;
 
     /// 볼륨 detach 시 호출 (OS Volume 전용).
     async fn on_detach(&self, ctx: &DetachContext<'_>) -> VckResult<()>;
 }
 
-/// Attach 시 반환하는 I/O 동작 설정
+/// Attach 시 반환하는 I/O 동작 설정.
+/// `offset_sector`는 데이터(암호화 대상) 영역 시작 절대 LBA이며, lib은 이를 기준으로
+/// `rel = lba - offset_sector`를 계산하고 metadata 영역 I/O는 passthrough합니다.
 pub enum IoConfig {
     /// 이 볼륨에는 필터를 attach하지 않고 그대로 통과
     Passthrough,
@@ -288,6 +321,7 @@ pub enum IoConfig {
     AesXts {
         key1: [u8; 32],
         key2: [u8; 32],
+        offset_sector: u64,
         encrypted_offset: EncryptedOffset,
         offset_store: Arc<dyn EncryptedOffsetStore>,
     },
@@ -295,24 +329,34 @@ pub enum IoConfig {
     /// 저수준: sample이 직접 Read/Write 훅 구현
     Custom {
         io_hooks: Arc<dyn IoHooks>,
+        offset_sector: u64,
         encrypted_offset: EncryptedOffset,
         offset_store: Arc<dyn EncryptedOffsetStore>,
     },
 }
 
-/// 저수준 I/O 훅 인터페이스
+/// 저수준 I/O 훅 인터페이스. `sector`는 데이터 영역(offset_sector) 기준 상대 섹터 번호입니다.
 pub trait IoHooks: Send + Sync + 'static {
     async fn read(&self, sector: u64, buf: &mut [u8]) -> VckResult<()>;
     async fn write(&self, sector: u64, buf: &[u8]) -> VckResult<()>;
 }
 
-pub struct AttachContext<'a> {
+/// 볼륨 식별자. 필터가 attach 대상을 식별하고 raw 섹터에 접근하는 데 사용합니다.
+pub struct VolumeId {
+    /// GPT 파티션 고유 GUID (핸드오버 partition_guid와 매칭)
+    pub partition_guid: Guid,
+    /// NT 디바이스 경로 (예: \Device\HarddiskVolume3). raw footer metadata 읽기/쓰기에 사용.
+    pub device_path: String,
+}
+
+pub struct AttachContext<'a, P: HandoverPayload> {
     pub volume_id:      &'a VolumeId,
     pub sector_size:    u32,
-    pub offset_sector:  u64,
-    pub total_sectors:  u64,
-    /// 핸들오버에서 읽어온 드라이버 전달 데이터
-    pub handover_data:  Option<&'a dyn Any>,
+    /// 볼륨(파티션) 전체 섹터 수 (raw capacity). 데이터 영역/footer 위치는 provider가
+    /// metadata를 읽어 계산하므로, lib은 raw 용량만 제공합니다.
+    pub volume_sectors: u64,
+    /// 핸드오버에서 읽어와 P로 역직렬화된 드라이버 전달 데이터
+    pub handover_data:  Option<&'a P>,
 }
 
 /// encrypted_offset의 지속 저장을 담당합니다.
@@ -344,7 +388,7 @@ fn dispatch_ioctl(ctx: &IoctlAuthContext<'_>) -> VckResult<IoctlResponse> {
         IOCTL_VCK_START_DECRYPT => handle_start_decrypt(ctx),
         IOCTL_VCK_GET_PROGRESS => handle_get_progress(ctx),
         IOCTL_VCK_PAUSE => handle_pause(ctx),
-        IOCTL_VCK_ATTACH => handle_attach(ctx),
+        IOCTL_JVCK_ATTACH => handle_jvck_attach(ctx),
         IOCTL_VCK_DETACH => handle_detach(ctx),
         _ => Err(VckError::InvalidIoctl),
     }
@@ -369,19 +413,26 @@ impl KernelExecutor {
 
 **encrypted_offset 상태 머신:**
 
+모든 비교는 데이터 영역 상대 섹터(`rel = lba - offset_sector`) 기준입니다.
+header/footer metadata 영역(데이터 영역 밖)에 대한 I/O는 암·복호화 없이 그대로 통과시킵니다.
+
 ```
 [볼륨 Attach]
      │
      ▼
 EncryptionEngine::new(encrypted_offset, total_sectors)
      │
-     ├─ Read(sector) ──────────────────────────────────────────────────────┐
-     │   sector < encrypted_offset  →  AES-XTS 복호화 후 반환              │
-     │   sector >= encrypted_offset →  평문 그대로 반환                    │
+     ├─ Read(lba) ─────────────────────────────────────────────────────────┐
+     │   lba가 metadata 영역      →  passthrough (평문 그대로)             │
+     │   rel = lba - offset_sector                                         │
+     │   rel < encrypted_offset   →  AES-XTS 복호화 후 반환                │
+     │   rel >= encrypted_offset  →  평문 그대로 반환                      │
      │                                                                     │
-     ├─ Write(sector) ─────────────────────────────────────────────────────┤
-     │   sector < encrypted_offset  →  AES-XTS 암호화 후 하위 드라이버로  │
-     │   sector >= encrypted_offset →  평문 그대로 하위 드라이버로         │
+     ├─ Write(lba) ────────────────────────────────────────────────────────┤
+     │   lba가 metadata 영역      →  passthrough (평문 그대로)             │
+     │   rel = lba - offset_sector                                         │
+     │   rel < encrypted_offset   →  AES-XTS 암호화 후 하위 드라이버로     │
+     │   rel >= encrypted_offset  →  평문 그대로 하위 드라이버로           │
      │                                                                     │
      └─ ProgressEncryption() ──────────────────────────────────────────────┘
          배치 단위로 encrypted_offset 이후 섹터를 읽어
@@ -393,29 +444,39 @@ EncryptionEngine::new(encrypted_offset, total_sectors)
 lib은 Data Volume과 OS Volume 모두에서 사용할 수 있는 기본 메타데이터 포맷을 제공합니다.
 사용자는 이 포맷을 그대로 쓰거나 `EncryptedOffsetStore`와 attach 로직을 직접 구현하여
 자기만의 포맷을 사용할 수 있습니다. 기본 JVCK 포맷을 사용할 경우 VMK 입력이 필요합니다.
-Data Volume은 header/footer replica를 사용할 수 있습니다. System Volume은 OS 볼륨 앞부분에
-header를 둘 수 없으므로 `(EFI)/sys1.vck`, `(EFI)/sys2.vck` 파일을 동일 내용 복제본으로 사용합니다.
+OS Volume과 Data Volume 모두 **볼륨 자체의 header/footer 영역**에 replica를 저장합니다 (EFI 파일을
+사용하지 않습니다). OS Volume은 기존 파일시스템이 존재하므로 header를 쓸 수 없고, 최초 암호화 시
+파일시스템을 Shrink하여 끝부분에 2개의 footer replica를 둡니다 (`use_header = 0`, `use_footer = 2`).
 
 드라이버에서 지정 가능한 기본 포맷 옵션은 다음과 같습니다.
 
 ```rust
 pub struct JvckMetadataOptions {
-    /// 볼륨 header 영역에 중복 저장할 metadata replica 개수
+    /// 볼륨 header 영역에 중복 저장할 metadata replica 개수 (신규 파티션만 가능)
     pub use_header: u32,
     /// 볼륨 footer 영역에 중복 저장할 metadata replica 개수
     pub use_footer: u32,
-    /// replica 하나의 크기. 최소 128KiB.
+    /// replica 하나의 영역 크기(벤더 데이터 포함). 최소 128KiB.
     pub metadata_size: u32,
 }
 ```
 
-`metadata_size`는 최소 128KiB입니다. Data Volume에서는 `use_header + use_footer >= 1`이어야 합니다.
-Header replica는 볼륨 시작부터 순서대로 배치하고, Footer replica는 볼륨 끝에서 역순으로
-배치합니다. 암호화 대상 데이터 영역은 header/footer metadata 영역을 제외한
-`offset_sector..offset_sector + total_sectors`입니다. System Volume에서는 `use_header = 0`,
-`use_footer = 0`으로 두고 `(EFI)/sys1.vck`, `(EFI)/sys2.vck` 파일 replica를 사용합니다.
+`metadata_size`는 replica 한 개가 차지하는 영역 전체 크기이며 최소 128KiB입니다.
+`use_header + use_footer >= 1`이어야 합니다. Header replica는 볼륨 시작부터 순서대로 배치하고,
+Footer replica는 볼륨 끝에서 역순으로 배치합니다. 암호화 대상 데이터 영역(=`total_sectors`)은
+header/footer replica 영역을 제외한 부분이며, 시작 절대 LBA는
+`offset_sector = use_header * metadata_size / sector_size` 입니다.
 
-Metadata 구조는 다음과 같습니다. 모든 숫자는 little endian이며, 모든 용량 단위는 bytes입니다. `Header CRC32`는 offset 0부터 507까지의 header 영역에 대해 계산합니다.
+**replica 내부 배치** — replica 한 개는 고정 512바이트 **Metadata 블록**과 나머지 **Vendor specific data**로
+구성됩니다. metadata를 찾는 과정을 단순화하기 위해 Vendor data는 Metadata와 분리하여 배치합니다.
+
+- Header replica: `[Metadata(512B)][Vendor specific data]` — Metadata가 replica의 맨 앞.
+- Footer replica: `[Vendor specific data][Metadata(512B)]` — Metadata가 replica의 맨 끝.
+
+이렇게 하면 footer의 마지막 replica Metadata가 볼륨의 맨 끝 512바이트에 위치하므로, 끝에서부터
+역순으로 스캔할 때 마지막 섹터에서 곧바로 `JVCK` signature를 만날 수 있습니다.
+
+Metadata 블록(512바이트) 구조는 다음과 같습니다. 모든 숫자는 little endian이며, 모든 용량 단위는 bytes입니다. `Header CRC32`는 offset 0부터 507까지의 영역에 대해 계산합니다.
 
 | Offset | Size | Description |
 | ------ | ---- | ----------- |
@@ -423,7 +484,7 @@ Metadata 구조는 다음과 같습니다. 모든 숫자는 little endian이며,
 | 4      | 8    | Vendor ID |
 | 12     | 2    | VCK Metadata Version |
 | 14     | 2    | Vendor Specific Version |
-| 16     | 4    | Metadata Size (offset 0부터 포함) |
+| 16     | 4    | Metadata Size (이 replica 영역 전체 크기, 벤더 데이터 포함) |
 | 20     | 4    | Sector Size (e.g. 512) |
 | 24     | 1    | Header replica count |
 | 25     | 1    | Footer replica count |
@@ -433,7 +494,9 @@ Metadata 구조는 다음과 같습니다. 모든 숫자는 little endian이며,
 | 176    | 32   | HMAC-SHA256(key = EncryptedMetadata_MAC_KEY, data = 암호화된 EncryptedMetadata) |
 | 208    | 300  | Reserved (zero) |
 | 508    | 4    | Header CRC32 |
-| 512    | end  | Vendor specific data |
+
+Vendor specific data는 Metadata 블록 **밖**에 위치하며(위 replica 내부 배치 참조), 크기는
+`metadata_size - 512`입니다.
 
 **EncryptedMetadata**는 AES-256-CBC(no padding)로 암호화하며,
 `EncryptedMetadata_ENC_KEY`, `EncryptedMetadata_ENC_IV`를 사용합니다. 고정 크기는 128바이트입니다.
@@ -441,7 +504,7 @@ Metadata 구조는 다음과 같습니다. 모든 숫자는 little endian이며,
 | Offset | Size | Description |
 | ------ | ---- | ----------- |
 | 0      | 4    | signature `JVCK` |
-| 4      | 12   | must zero (prevent POODLE) |
+| 4      | 12   | must zero (복호화 후 0이 아니면 VMK 불일치/손상으로 판정하는 무결성 검증 패턴) |
 | 16     | 8    | encrypted_offset |
 | 24     | 8    | reserved (zero) |
 | 32     | 32   | FVEK Key1 (encryption key) |
@@ -456,12 +519,14 @@ EncryptedMetadata_ENC_KEY = HKDF_SHA256(salt = Volume ID, ikm = VMK, info = "Enc
 EncryptedMetadata_ENC_IV  = HKDF_SHA256(salt = Volume ID, ikm = VMK, info = "EncryptedMetadata:IV",  length = 16)
 ```
 
-`JvckMetadataStore`는 `EncryptedOffsetStore`를 구현합니다. Data Volume에서는 header/footer replica를,
-System Volume에서는 `(EFI)/sys1.vck`, `(EFI)/sys2.vck` 파일 replica를 대상으로 동작합니다.
-`store()`는 모든 configured replica에 동일한 encrypted_offset을 기록하고, `load()`는 HMAC 검증에
-성공한 replica 중 정책상 가장 최신의 유효 metadata를 선택합니다. 기본 구현은 모든 replica가 같은
-값을 갖도록 유지하며, 서로 다른 값이 발견되면 가장 큰 `encrypted_offset`을 선택하되 운영 로그에
-replica mismatch를 남깁니다.
+`JvckMetadataStore`는 `EncryptedOffsetStore`를 구현하며, OS/Data Volume 모두 볼륨의 header/footer
+replica를 대상으로 동작합니다. `store()`는 모든 configured replica에 동일한 encrypted_offset을
+기록하고, `load()`는 HMAC 검증에 성공한 replica만 후보로 사용합니다.
+
+**복구 정책:** replica 간 `encrypted_offset` 값이 다르면(암호화 진행 중 강제 종료 등) **가장 큰
+값을 채택**합니다. 진행 방향상 더 큰 offset까지는 이미 암호화가 적용되었을 수 있으므로, 큰 값을
+택해야 평문을 암호문으로 오인하는 일이 없습니다. 불일치 발견 시 운영 로그에 replica mismatch를
+남기고, 채택한 값으로 모든 replica를 재동기화합니다.
 
 ---
 
@@ -473,7 +538,7 @@ UEFI 환경에서 동작하는 로더 프레임워크입니다. `uefi` crate 기
 
 - `LoaderProvider` 트레이트 정의 (로더가 sample에게 요구하는 인터페이스)
 - `EFI_BLOCK_IO_PROTOCOL` 및 `EFI_BLOCK_IO2_PROTOCOL` 후킹 엔진
-- UEFI→Driver 핸들오버 데이터 기록 (`AcpiHandoverWriter` 래퍼)
+- UEFI→Driver 핸드오버 데이터 기록 (`AcpiHandoverWriter` 래퍼)
 - 다음 OS 로더 체인로드 유틸리티
 
 ```
@@ -496,7 +561,7 @@ lib/loader/
 pub trait LoaderProvider: 'static {
     type Payload: HandoverPayload;
 
-    /// 로더 초기화 시 호출. 암호화 설정 및 핸들오버 페이로드 반환
+    /// 로더 초기화 시 호출. 암호화 설정 및 핸드오버 페이로드 반환
     fn on_init(&self, boot_services: &BootServices) -> VckResult<LoaderConfig<Self::Payload>>;
 
     /// Block IO Read 훅 (고수준 선택 시 lib가 AES-XTS 자동 처리)
@@ -507,7 +572,7 @@ pub trait LoaderProvider: 'static {
 }
 
 pub struct LoaderConfig<P: HandoverPayload> {
-    /// 드라이버로 전달할 핸들오버 데이터
+    /// 드라이버로 전달할 핸드오버 데이터
     pub handover_payload: P,
     /// 체인로드할 다음 EFI 바이너리 경로
     pub next_loader: DevicePath,
@@ -518,6 +583,8 @@ pub struct LoaderConfig<P: HandoverPayload> {
 pub struct LoaderCrypto {
     pub key1: [u8; 32],
     pub key2: [u8; 32],
+    /// 데이터(암호화 대상) 영역 시작 절대 LBA. 후킹된 Read에서 rel = lba - offset_sector 계산에 사용.
+    pub offset_sector: u64,
     pub encrypted_offset: EncryptedOffset,
 }
 ```
@@ -541,8 +608,10 @@ pub struct LoaderCrypto {
                 ▼
          후킹된 ReadBlocks(lba, buf)
                 │
-                ├─ lba < encrypted_offset  →  원본 Read 후 AES-XTS 복호화
-                └─ lba >= encrypted_offset →  원본 Read 그대로 반환
+                ├─ lba가 metadata 영역          →  원본 Read 그대로 반환 (passthrough)
+                │  rel = lba - offset_sector
+                ├─ rel < encrypted_offset       →  원본 Read 후 AES-XTS 복호화
+                └─ rel >= encrypted_offset      →  원본 Read 그대로 반환
 ```
 
 ---
@@ -569,12 +638,14 @@ module github.com/jc-lab/volumecrypt-kit
 go 1.22
 
 require (
-    golang.org/x/sys v0.x.x
-    github.com/vmihailenco/msgpack/v5 v5.x.x
+    github.com/spf13/cobra v1.8.1            // sample/app(CLI) 전용
+    github.com/vmihailenco/msgpack/v5 v5.4.1 // IOCTL msgpack
+    golang.org/x/sys v0.24.0                 // Win32 API
 )
 ```
 
-`sdk`는 `golang.org/x/sys/windows`만 외부 의존성으로 사용합니다.
+`sdk` 패키지 자체는 `golang.org/x/sys/windows`와 `github.com/vmihailenco/msgpack/v5`만 사용합니다.
+`github.com/spf13/cobra`는 `sample/app`(CLI)에서만 사용합니다.
 
 ### 타입 (types.go)
 
@@ -614,32 +685,25 @@ func (s *VolumeStatus) IsFullyEncrypted() bool {
 
 // ─── Data Volume: Attach / Detach ────────────────────────────────────────────
 
-// VolumeAttachRequest는 IOCTL_VCK_ATTACH 요청 구조체입니다.
-// Data Volume을 드라이버에 등록하고 암호화 레이어를 활성화합니다.
-type VolumeAttachRequest struct {
-    // Required. 볼륨 경로. 예: \\.\D:  또는  \\?\Volume{9b951408-f281-4b15-a72c-ffe44bbae057}\
-    VolumePath      string   `msgpack:"volume_path"`
-    // Optional(JVCK). 기본 JVCK 포맷을 사용할 때 필요한 VMK. 사용자 포맷 사용 시 비울 수 있습니다.
-    VMK             []byte   `msgpack:"vmk,omitempty"`
-    // Optional. 실제 암호화 대상 영역 시작 섹터. 자체 header가 있으면 그 이후를 지정.
-	// JVCK 포맷 사용시 불필요하며 암호화 영역은 offset=UseHeader*MetadataSize, size=capacity-offset-UseFooter*MetadataSize 임.
-    OffsetSector    uint64   `msgpack:"offset_sector"`
-    // Optional. 암호화 대상 영역 섹터 수. 0이면 offset 이후 footer 전까지 자동 감지.
-    TotalSectors    uint64   `msgpack:"total_sectors"`
-    // Optional. 이미 암호화된 섹터 수. 처음 암호화라면 0.
-    EncryptedSector uint64   `msgpack:"encrypted_sector"`
-    // Required. JVCK 기본 metadata 포맷 사용 여부 및 replica 설정.
-    UseJvckMetadata bool     `msgpack:"use_jvck_metadata"`
-    // Optional(JVCK)
-    UseHeader       uint32   `msgpack:"use_header"`
-    // Optional(JVCK)
-    UseFooter       uint32   `msgpack:"use_footer"`
-    // Optional(JVCK)
-    MetadataSize    uint32   `msgpack:"metadata_size"`
+// JvckVolumeAttachRequest는 IOCTL_JVCK_ATTACH 요청 구조체입니다.
+// JVCK 기본 포맷으로 Data Volume을 드라이버에 등록하고 암호화 레이어를 활성화합니다.
+// offset_sector/total_sectors/encrypted_sector 등은 JVCK metadata에서 복원되거나
+// (use_header/use_footer/metadata_size로) 계산되므로 요청에 포함하지 않습니다.
+type JvckVolumeAttachRequest struct {
+    // Required. 볼륨 경로. volume GUID 경로(\\?\Volume{...}\) 또는 드라이브 경로(C:\, \\.\D:) 모두 허용.
+    VolumePath   string `msgpack:"volume_path"`
+    // Required. JVCK metadata를 열기 위한 VMK.
+    VMK          []byte `msgpack:"vmk"`
+    // Required. header replica 개수. 신규 파티션만 1 이상 가능, 기존 파티션은 0.
+    UseHeader    uint32 `msgpack:"use_header"`
+    // Required. footer replica 개수. use_header + use_footer >= 1 이어야 함.
+    UseFooter    uint32 `msgpack:"use_footer"`
+    // Required. replica 한 개 영역 크기(벤더 데이터 포함). 최소 128KiB.
+    MetadataSize uint32 `msgpack:"metadata_size"`
 }
 
-// VolumeAttachResponse는 IOCTL_VCK_ATTACH 응답 구조체입니다.
-type VolumeAttachResponse struct {
+// JvckVolumeAttachResponse는 IOCTL_JVCK_ATTACH 응답 구조체입니다.
+type JvckVolumeAttachResponse struct {
     OffsetSector uint64 `msgpack:"offset_sector"`
     TotalSectors uint64 `msgpack:"total_sectors"` // 실제 암호화 대상 영역 섹터 수
     SectorSize   uint32 `msgpack:"sector_size"`
@@ -652,6 +716,13 @@ type VolumeDetachRequest struct {
 }
 
 // ─── 암호화 진행 제어 ─────────────────────────────────────────────────────────
+
+// volumeRequest는 volume_path만 전달하는 공통 요청 구조체입니다.
+// GetStatus / Pause / GetProgress IOCTL에서 사용합니다. (StartEncrypt/StartDecrypt는
+// 의미를 명확히 하기 위해 동일 형태의 EncryptRequest/DecryptRequest를 별도로 둡니다.)
+type volumeRequest struct {
+    VolumePath string `msgpack:"volume_path"`
+}
 
 // EncryptRequest는 IOCTL_VCK_START_ENCRYPT 요청 구조체입니다.
 // 키는 Attach 시 이미 설정되므로 포함하지 않습니다.
@@ -700,7 +771,7 @@ const (
     ioctlStartDecrypt = 0x0022_2008
     ioctlGetProgress  = 0x0022_200c
     ioctlPause        = 0x0022_2010
-    ioctlAttach       = 0x0022_2014 // Data Volume: 암호화 레이어 활성화
+    ioctlJvckAttach   = 0x0022_2014 // JVCK 포맷 Data Volume: 암호화 레이어 활성화
     ioctlDetach       = 0x0022_2018 // Data Volume: 암호화 레이어 해제
 )
 
@@ -768,13 +839,14 @@ func (c *Client) Close() error {
 
 // ─── Data Volume 전용 ─────────────────────────────────────────────────────────
 
-// Attach는 Data Volume에 암호화 레이어를 활성화합니다.
-// 기본 JVCK 포맷을 쓰면 VMK와 metadata replica 설정을 전달합니다.
-// 사용자 포맷을 쓰는 경우 key1/key2, offset_sector, encrypted_sector를 직접 전달할 수 있습니다.
-// 재부팅 후 재연결 시에는 JVCK 또는 사용자 EncryptedOffsetStore에서 encrypted_sector를 복원합니다.
-func (c *Client) Attach(req *VolumeAttachRequest) (*VolumeAttachResponse, error) {
-    return deviceControl[VolumeAttachRequest, VolumeAttachResponse](
-        c.handle, ioctlAttach, req,
+// Attach는 JVCK 포맷으로 Data Volume에 암호화 레이어를 활성화합니다.
+// VMK와 replica 설정(use_header/use_footer/metadata_size)을 전달합니다.
+// 재부팅 후 재연결 시에는 볼륨의 JVCK metadata에서 encrypted_offset을 복원합니다.
+// (자체 포맷을 쓰는 사용자는 별도 IOCTL과 EncryptedOffsetStore 구현을 사용하며,
+//  이 SDK가 노출하는 공통 IOCTL은 그대로 재사용할 수 있습니다.)
+func (c *Client) Attach(req *JvckVolumeAttachRequest) (*JvckVolumeAttachResponse, error) {
+    return deviceControl[JvckVolumeAttachRequest, JvckVolumeAttachResponse](
+        c.handle, ioctlJvckAttach, req,
     )
 }
 
@@ -792,14 +864,14 @@ func (c *Client) Detach(volumePath string) error {
 
 // GetStatus는 볼륨의 현재 암호화 상태를 조회합니다.
 func (c *Client) GetStatus(volumePath string) (*VolumeStatus, error) {
-    return deviceControl[statusRequest, VolumeStatus](
+    return deviceControl[volumeRequest, VolumeStatus](
         c.handle, ioctlGetStatus,
-        &statusRequest{VolumePath: volumePath},
+        &volumeRequest{VolumePath: volumePath},
     )
 }
 
 // StartEncrypt는 attach된 볼륨의 점진적 암호화를 시작합니다.
-// 키는 Attach(또는 OS Volume의 경우 ACPI 핸들오버)에서 이미 설정되어 있습니다.
+// 키는 Attach(또는 OS Volume의 경우 ACPI 핸드오버)에서 이미 설정되어 있습니다.
 func (c *Client) StartEncrypt(req *EncryptRequest) error {
     _, err := deviceControl[EncryptRequest, struct{}](
         c.handle, ioctlStartEncrypt, req,
@@ -817,9 +889,9 @@ func (c *Client) StartDecrypt(req *DecryptRequest) error {
 
 // Pause는 진행 중인 암·복호화를 일시 중지합니다.
 func (c *Client) Pause(volumePath string) error {
-    _, err := deviceControl[statusRequest, struct{}](
+    _, err := deviceControl[volumeRequest, struct{}](
         c.handle, ioctlPause,
-        &statusRequest{VolumePath: volumePath},
+        &volumeRequest{VolumePath: volumePath},
     )
     return err
 }
@@ -834,7 +906,7 @@ import "context"
 
 // WatchProgress는 암·복호화 진행률을 채널 스트림으로 반환합니다.
 // 내부적으로 goroutine에서 IOCTL_VCK_GET_PROGRESS를 주기적으로 polling합니다.
-// ctx 취소 또는 완료 상태 수신 시 채널이 닫힙니다.
+// ctx 취소, 완료(StateIdle), 또는 일시 중지(StatePaused) 상태 수신 시 채널이 닫힙니다.
 func (c *Client) WatchProgress(
     ctx context.Context,
     volumePath string,
@@ -845,14 +917,14 @@ func (c *Client) WatchProgress(
     go func() {
         defer close(evCh)
         defer close(errCh)
-        req := &statusRequest{VolumePath: volumePath}
+        req := &volumeRequest{VolumePath: volumePath}
         for {
             select {
             case <-ctx.Done():
                 return
             default:
             }
-            ev, err := deviceControl[statusRequest, ProgressEvent](
+            ev, err := deviceControl[volumeRequest, ProgressEvent](
                 c.handle, ioctlGetProgress, req,
             )
             if err != nil {
@@ -860,8 +932,8 @@ func (c *Client) WatchProgress(
                 return
             }
             evCh <- *ev
-            if ev.State == StateIdle {
-                // 암·복호화 완료 또는 일시 중지됨
+            if ev.State == StateIdle || ev.State == StatePaused {
+                // 암·복호화 완료(Idle) 또는 일시 중지(Paused) → polling 종료
                 return
             }
         }
@@ -888,45 +960,41 @@ sample 전용 공유 코드입니다.
 sample/common/
 ├── src/
 │   ├── lib.rs
-│   ├── config.rs       # VckConfig (vck.json VMK/loader/sys metadata 파일 파싱)
+│   ├── config.rs       # VckConfig (vck.json VMK/loader 설정 파싱)
 │   └── payload.rs      # VckHandoverPayload (HandoverPayload 구현)
 └── Cargo.toml
 ```
 
 **vck.json 구조:**
 
-개발 편의용 sample에서는 VMK와 다음 OS loader 경로, System Volume JVCK replica 파일 경로만 저장합니다.
+개발 편의용 sample에서는 VMK와 다음 OS loader 경로만 저장합니다.
+JvckMetadata replica는 OS 볼륨 footer에 있으므로 EFI 파일 경로는 더 이상 필요 없습니다.
 
 ```json
 {
   "partition_guid": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
   "vmk": "<base64-vmk>",
-  "osloader": "/EFI/Microsoft/Boot/msbootmgfw.os.efi",
-  "system_metadata_files": [
-    "sys1.vck",
-    "sys2.vck"
-  ],
-  "metadata_size": 131072
+  "osloader": "/EFI/Microsoft/Boot/msbootmgfw.os.efi"
 }
 ```
 
 `osloader` 필드가 없으면 기본값 `/EFI/Microsoft/Boot/msbootmgfw.os.efi`를 사용합니다.
-`system_metadata_files` 필드가 없으면 기본값은 `sys1.vck`, `sys2.vck`입니다.
-`system_metadata_files` 는 vck.json 과 동일한 볼륨(EFI)을 기준으로 합니다.
 
 **VckHandoverPayload:**
 
+metadata가 볼륨 footer에 저장되므로 핸드오버에는 **VMK와 대상 partition_guid만** 담습니다.
+드라이버는 이 VMK로 볼륨 footer metadata를 복호화하여 FVEK·encrypted_offset·지오메트리를 복원합니다.
+핸드오버 페이로드를 소비한 직후 로더/드라이버는 ACPI 버퍼와 지역 복사본의 VMK를 **zeroize**합니다
+(아래 "키 수명·zeroize" 참조).
+
 ```rust
-/// UEFI 로더 → 드라이버 핸들오버 페이로드
+/// UEFI 로더 → 드라이버 핸드오버 페이로드
 #[derive(Serialize, Deserialize)]
 pub struct VckHandoverPayload {
+    /// 대상 OS 볼륨 식별용 GPT 파티션 GUID
     pub partition_guid: Guid,
-    pub offset_sector: u64,
-    pub total_sectors: u64,
-    pub volume_id: [u8; 16],
+    /// 볼륨 footer metadata 복호화 및 FVEK 복원용 키
     pub vmk: Vec<u8>,
-    pub system_metadata_files: Vec<String>,
-    pub metadata_size: u32,
 }
 
 impl HandoverPayload for VckHandoverPayload {
@@ -934,6 +1002,10 @@ impl HandoverPayload for VckHandoverPayload {
     const ACPI_OEM_ID:    [u8; 6] = *b"SAMPLE";
 }
 ```
+
+**키 수명·zeroize:** ACPI 핸드오버 버퍼는 `EfiRuntimeServicesData`에 평문 VMK를 담으므로,
+드라이버는 부팅 시 VMK를 자체 보호 메모리로 복사한 뒤 ACPI 버퍼를 즉시 zeroize하고, 로더 측
+지역 변수(VMK·FVEK)도 사용 후 zeroize합니다. FVEK는 핸드오버에 싣지 않습니다.
 
 ---
 
@@ -955,32 +1027,34 @@ sample/driver/
 pub struct VckVolumeProvider;
 
 impl VolumeProvider for VckVolumeProvider {
-    async fn on_attach(&self, ctx: &AttachContext<'_>) -> VckResult<IoConfig> {
-        // 1. 핸들오버 데이터에서 VckHandoverPayload 추출
-        let payload: &VckHandoverPayload = ctx.handover_data
-            .and_then(|d| d.downcast_ref())
-            .ok_or(VckError::NoHandoverData)?;
+    type Payload = VckHandoverPayload;
+
+    async fn on_attach(&self, ctx: &AttachContext<'_, VckHandoverPayload>) -> VckResult<IoConfig> {
+        // 1. 핸드오버 페이로드 확보 (lib/driver가 이미 VckHandoverPayload로 역직렬화)
+        let payload = ctx.handover_data.ok_or(VckError::NoHandoverData)?;
 
         // 2. 파티션 GUID 확인
         if ctx.volume_id.partition_guid != payload.partition_guid {
             return Ok(IoConfig::Passthrough);
         }
 
-        // 3. System Volume JVCK 파일 replica를 VMK로 열어 FVEK와 encrypted_offset 복원
-        let store = JvckMetadataStore::open_system_files(
+        // 3. 볼륨 footer metadata를 VMK로 열어 FVEK·encrypted_offset·지오메트리 복원.
+        //    동일 store가 encrypted_offset 영속화(footer replica 갱신)도 담당.
+        let store = JvckMetadataStore::open_volume(
             ctx.volume_id,
+            ctx.sector_size,
+            ctx.volume_sectors,
             &payload.vmk,
-            &payload.system_metadata_files,
-            payload.metadata_size,
         )?;
         let meta = store.load_metadata()?;
 
         Ok(IoConfig::AesXts {
             key1: meta.fvek_key1,
             key2: meta.fvek_key2,
+            offset_sector: store.offset_sector(),
             encrypted_offset: EncryptedOffset {
                 sector: meta.encrypted_offset,
-                total_sectors: ctx.total_sectors,
+                total_sectors: store.data_sector_count(),
             },
             offset_store: Arc::new(store),
         })
@@ -1024,37 +1098,35 @@ impl LoaderProvider for VckLoaderProvider {
     type Payload = VckHandoverPayload;
 
     fn on_init(&self, boot_services: &BootServices) -> VckResult<LoaderConfig<Self::Payload>> {
-        // 1. (EFI)/vck.json에서 VMK와 System Volume metadata 파일 경로 읽기
+        // 1. (EFI)/vck.json에서 VMK와 다음 OS loader 경로 읽기
         let config = VckConfig::load_from_esp(boot_services)?;
 
-        // 2. 핸들오버 페이로드 구성
-        let store = JvckMetadataStore::open_system_files_uefi(
+        // 2. 대상 OS 볼륨을 Block IO로 열고 footer metadata replica를 읽어 VMK로 복호화
+        let store = JvckMetadataStore::open_volume_footer_uefi(
+            boot_services,
             config.partition_guid,
             &config.vmk,
-            &config.system_metadata_files,
-            config.metadata_size,
         )?;
         let meta = store.load_metadata()?;
 
+        // 3. 핸드오버에는 VMK와 partition_guid만 싣는다. (FVEK/지오메트리는 드라이버가
+        //    동일 footer metadata를 VMK로 다시 복호화하여 복원)
         let payload = VckHandoverPayload {
-            partition_guid:    config.partition_guid,
-            offset_sector:     store.offset_sector(),
-            total_sectors:     store.data_sector_count(),
-            volume_id:         meta.volume_id,
-            vmk:                   config.vmk.clone(),
-            system_metadata_files: config.system_metadata_files.clone(),
-            metadata_size:         config.metadata_size,
+            partition_guid: config.partition_guid,
+            vmk:            config.vmk.clone(),
         };
 
+        // 4. 로더 자신의 transparent 복호화용 LoaderCrypto는 방금 읽은 metadata에서 구성
         Ok(LoaderConfig {
             handover_payload: payload,
             next_loader:      config.osloader_device_path(boot_services)?,
             crypto: Some(LoaderCrypto {
                 key1:             meta.fvek_key1,
                 key2:             meta.fvek_key2,
+                offset_sector:    store.offset_sector(),
                 encrypted_offset: EncryptedOffset {
                     sector:        meta.encrypted_offset,
-                    total_sectors: payload.total_sectors,
+                    total_sectors: store.data_sector_count(),
                 },
             }),
         })
@@ -1092,13 +1164,12 @@ vck-app status  --volume \\.\C:
 **data-volume attach 예시 (기본 JVCK 포맷):**
 
 ```go
-if _, err := client.Attach(&vck.VolumeAttachRequest{
-    VolumePath:      volumeFlag,
-    VMK:             vmk,
-    UseJvckMetadata: true,
-    UseHeader:       useHeaderFlag,
-    UseFooter:       useFooterFlag,
-    MetadataSize:    metadataSizeFlag,
+if _, err := client.Attach(&vck.JvckVolumeAttachRequest{
+    VolumePath:   volumeFlag,
+    VMK:          vmk,
+    UseHeader:    useHeaderFlag,
+    UseFooter:    useFooterFlag,
+    MetadataSize: metadataSizeFlag,
 }); err != nil {
     return err
 }
@@ -1186,23 +1257,26 @@ var statusCmd = &cobra.Command{
       │  EFI Boot Entry → sample/loader
       ▼
 [sample/loader]
-  1. (EFI)/vck.json에서 VMK와 System Volume metadata 파일 경로 읽기
-  2. lib/common: VMK로 (EFI)/sys1.vck, (EFI)/sys2.vck replica를 열어 FVEK와 encrypted_offset 복원
-  3. lib/loader: EFI_BLOCK_IO_PROTOCOL 후킹 (AES-XTS 복호화 레이어 삽입)
-  4. lib/loader: VckHandoverPayload → msgpack 직렬화
-                 EfiRuntimeServicesData 메모리 할당
-                 ACPI 테이블(VCKD) 추가 (물리 주소 기록)
+  1. (EFI)/vck.json에서 VMK와 다음 OS loader 경로 읽기
+  2. lib/loader: 대상 OS 볼륨을 Block IO로 열어 footer metadata replica 읽기
+     lib/common: VMK로 복호화 → FVEK, encrypted_offset, 지오메트리 복원
+  3. lib/loader: EFI_BLOCK_IO_PROTOCOL 후킹 → OS 볼륨 데이터 영역 투명(transparent) 암·복호화
+  4. lib/loader: VckHandoverPayload(partition_guid, vmk) → msgpack 직렬화
+                 EfiRuntimeServicesData 메모리 할당, ACPI 테이블(VCKD) 추가 (물리 주소 기록)
+                 로더 지역 FVEK/VMK 사본 사용 후 zeroize
   5. msbootmgfw.os.efi 체인로드 → Windows Boot Manager 기동
       │
       ▼
 [Windows Kernel Boot]
   sample/driver DriverEntry
-  1. lib/driver: ACPI 테이블(VCKD) 탐색
-  2. msgpack 역직렬화 → VckHandoverPayload
-  3. VMK로 (EFI)/sys1.vck, (EFI)/sys2.vck replica를 열어 FVEK와 encrypted_offset 복원
-  4. 시스템 볼륨 필터 드라이버 attach
-  5. VckVolumeProvider::on_attach → IoConfig::AesXts 반환
-  5. 이후 모든 볼륨 I/O: lib/driver가 비동기 파이프라인으로 처리
+  1. lib/driver: ACPI 테이블(VCKD) 탐색 → VckHandoverPayload(partition_guid, vmk) 역직렬화
+     VMK를 보호 메모리로 복사 후 ACPI 버퍼 zeroize (EFI 접근 없음)
+  2. PnP 볼륨 도착 → VckVolumeProvider::on_attach
+     VMK로 볼륨 footer metadata 복호화 → FVEK·encrypted_offset·지오메트리 복원
+     → IoConfig::AesXts 반환
+  3. 시스템 볼륨 필터 드라이버 attach, VolumeAttachRegistry 등록
+  4. 이후 모든 볼륨 I/O: lib/driver가 비동기 파이프라인으로 처리
+     (encrypted_offset 영속화 시에만 볼륨 footer replica를 VMK 파생 키로 갱신)
       │
       ▼
 [Windows 정상 부팅 완료]
@@ -1239,16 +1313,21 @@ var statusCmd = &cobra.Command{
 
 ### Rust (Cargo)
 
+> 의존성의 단일 진실 공급원(SSOT)은 `Cargo.toml`입니다. 아래 표는 설명용이며 버전은 `Cargo.toml`을 따릅니다.
+
 | 크레이트 | 용도 |
 |---|---|
-| `wdk` / `wdk-sys` | Windows 커널 드라이버 개발 |
-| `uefi` | UEFI 애플리케이션 개발 |
-| `rmp-serde` | UEFI↔Driver msgpack 직렬화 |
-| `serde` / `rmp-serde` | 직렬화 파생 매크로, 핸들오버 및 IOCTL msgpack 포맷 |
-| `aes` + `xts-mode` | AES-XTS 암호화 |
+| `wdk` / `wdk-sys` | Windows 커널 드라이버 개발 (driver crate 전용) |
+| `uefi` | UEFI 애플리케이션 개발 (loader crate 전용) |
+| `messagepack-serde` | UEFI↔Driver / IOCTL msgpack 직렬화 (no_std) |
+| `serde` | 직렬화 파생 매크로 (no_std, alloc) |
+| `aes` + `xts-mode` | AES-XTS 볼륨 암호화 |
+| `cbc` + `cipher` | JVCK EncryptedMetadata AES-256-CBC 처리 |
 | `sha2` / `hmac` / `hkdf` | JVCK 메타데이터 HMAC 및 키 파생 |
-| `cbc` | JVCK EncryptedMetadata AES-256-CBC 처리 |
-| `log` / `uefi-logger` | 로깅 추상화 |
+| `crc32fast` | JVCK Metadata 블록 Header CRC32 |
+| `uuid` | JVCK Volume ID (UUIDv4) |
+| `spin` | no_std 환경 Mutex (커널/UEFI 공용) |
+| `irql` | 커널 IRQL 관리 |
 | `thiserror` | 에러 타입 정의 (no_std 호환) |
 
 ### Go (go.mod)
@@ -1264,7 +1343,7 @@ var statusCmd = &cobra.Command{
 ## 주요 설계 원칙
 
 **최소 sample 원칙:** sample의 각 crate는 트레이트 구현과 설정 로딩만 담당합니다.
-I/O 라우팅, 암·복호화 파이프라인, 핸들오버 직렬화, ACPI 조작 등 모든 메커니즘은 lib에 위치합니다.
+I/O 라우팅, 암·복호화 파이프라인, 핸드오버 직렬화, ACPI 조작 등 모든 메커니즘은 lib에 위치합니다.
 
 **Go/Rust 언어 경계:** 커널 코드(driver, loader)는 Rust+WDK로 구현하고,
 유저스페이스 관리 도구(app)는 Go로 구현합니다. 두 언어 간 인터페이스는
@@ -1275,12 +1354,18 @@ Rust 관점에서의 동일한 명세입니다.
 **두 가지 I/O 경로:** `IoConfig::Passthrough`를 반환하면 해당 볼륨은 attach하지 않습니다.
 `IoConfig::AesXts`(고수준)을 반환하면 lib이 모든 암·복호화를 처리합니다.
 `IoConfig::Custom`(저수준)을 반환하면 sample의 `IoHooks` 구현이 섹터 단위로 직접 처리합니다.
+`IoConfig::Custom`/`IoHooks`는 Rust 트레이트이므로 컴파일타임에 결정됩니다. 따라서 저수준 커스텀
+포맷은 자체 `VolumeProvider`(OS Volume)나 자체 attach IOCTL(Data Volume)을 구현해 사용하며,
+`sdk`가 노출하는 `IOCTL_JVCK_ATTACH`/`JvckVolumeAttachRequest`는 JVCK 기본 포맷 전용입니다.
 
 **비동기 설계:** 드라이버 레이어의 모든 I/O는 IRP completion callback 기반의 커널 전용 비동기 실행기를 통해 처리됩니다. 스레드 블로킹 없이 고성능 병렬 암·복호화를 달성합니다.
 Go app의 `WatchProgress`는 goroutine에서 논블로킹 진행률 IOCTL을 polling하여 Go 채널 스트림으로 변환합니다.
 
-**핸들오버 확장성:** ACPI 테이블 서명과 msgpack 페이로드 구조는 sample에서 결정합니다.
-lib은 직렬화·ACPI 기록·읽기 헬퍼만 제공하므로 다른 sample이 독립적인 핸들오버 스킴을 가질 수 있습니다.
+**핸드오버 확장성:** ACPI 테이블 서명과 msgpack 페이로드 구조는 sample에서 결정합니다.
+`LoaderProvider::Payload`와 `VolumeProvider::Payload`를 동일한 `HandoverPayload` 구현 타입으로
+지정하면, lib/loader는 그 타입으로 직렬화하고 lib/driver는 그 타입으로 역직렬화하여
+`AttachContext`에 구체 타입으로 전달합니다(`dyn Any` downcast 불필요). lib은 직렬화·ACPI
+기록·읽기 헬퍼만 제공하므로 다른 sample이 독립적인 핸드오버 스킴을 가질 수 있습니다.
 
 **점진적 암호화 안전성:** 암호화 중 전원이 꺼지더라도 `EncryptedOffsetStore`가 `encrypted_offset`을 영속적으로 관리하므로
 재부팅 후 중단된 지점부터 재개할 수 있습니다. 기본 JVCK 구현은 header/footer replica에 중복 저장하며,
