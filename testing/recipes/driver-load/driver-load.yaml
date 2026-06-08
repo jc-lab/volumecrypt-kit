@@ -1,0 +1,98 @@
+# Copyright 2026 JC-Lab
+# SPDX-License-Identifier: Apache-2.0
+
+name: "driver-load"
+description: "Load the sample driver and verify the control device responds"
+
+qemu:
+  extra_args:
+    - "-chardev"
+    - "file,id=debugout,path=${{ output.dir }}/debug.log"
+    - "-device"
+    - "isa-debugcon,iobase=0xe9,chardev=debugout"
+
+steps:
+  - action: wait-boot
+    timeout: 120s
+    params:
+      retry_interval: 5s
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-sample-driver.sys"
+      dst: "C:\\Temp\\vck-sample-driver.sys"
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-app.exe"
+      dst: "C:\\Temp\\vck-app.exe"
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "sc create VolumeCryptKitSample type= kernel start= demand binPath= C:\\Temp\\vck-sample-driver.sys"
+      expect_exit_code: 0
+  
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "verifier.exe"
+      args:
+        - "/volatile"
+        - "/adddriver"
+        - "vck-sample-driver.sys"
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "sc start VolumeCryptKitSample"
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'C:\\Temp' -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'D:\\' -ErrorAction SilentlyContinue"
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe status"
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 3000s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "ping -n 1000 127.0.0.1"
+      expect_exit_code: 0
+
+  - action: shutdown
+    timeout: 120s
+
+# Panic 발생 시 진단 수집
+panic:
+  steps:
+    # Guest 메모리 덤프 (크래시 분석용)
+    - action: dump
+      timeout: 300s
+      params:
+        format: "win-dmp"
+        output: "${{ output.dir}}/memory.dmp"
+    - action: shutdown
+      timeout: 1s

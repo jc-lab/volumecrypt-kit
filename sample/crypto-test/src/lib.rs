@@ -12,11 +12,13 @@ extern crate alloc;
 
 use core::panic::PanicInfo;
 
+use wdk_alloc::WdkAllocator;
 use wdk_sys::{DRIVER_OBJECT, NTSTATUS, PCUNICODE_STRING};
 
 mod tests;
 
-// TODO(crypto-test): set the kernel global allocator.
+#[global_allocator]
+static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
 
 /// # Safety
 /// Called by the kernel with valid pointers.

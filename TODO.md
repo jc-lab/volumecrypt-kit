@@ -27,9 +27,11 @@
 
 ## 0. 선행 작업 (cross-cutting, 다른 작업의 전제)
 
-- [ ] **커널 global allocator**: `sample/driver/src/lib.rs`, `sample/crypto-test/src/lib.rs`에
-  `#[global_allocator]` 설정 필요(예: `wdk-alloc::WdkAllocator`). `Cargo.toml`에 `wdk-alloc` 의존성 추가 +
-  `Cargo.lock` 갱신. (현재 `// TODO(...) global allocator` 주석만 있음)
+- [x] **커널 global allocator**: `sample/driver/src/lib.rs`, `sample/crypto-test/src/lib.rs`에
+  `#[global_allocator]` 설정 완료(`wdk-alloc::WdkAllocator`). 각 드라이버 crate에
+  `wdk-build`/`wdk-alloc` 의존성과 `package.metadata.wdk.driver-model = "WDM"` 추가,
+  `.cargo/config.toml`/`Makefile` WEDK 빌드 경로 정리. `make build-driver`,
+  `make build-crypto-test-driver` 서명까지 통과.
 - [x] ~~**AES-XTS tweak 규약 확정**~~ — 해결: `lib/common/src/xts.rs::XtsVolumeCipher`로 단일화.
   tweak = **데이터영역 상대 섹터(`rel = lba - offset_sector`)**. loader/driver 모두 이 cipher 사용.
   (`lib/driver/src/crypto/aes_xts.rs`가 위임, 호스트 라운드트립 테스트 통과)
@@ -80,11 +82,11 @@
   (IRP 완료 콜백 → `CryptoPipeline`).
 - [ ] `lib/driver/src/executor.rs::KernelExecutor` — `spawn`/`block_on`
   (IRP completion waker + `ExWorkItem` 워커).
-- [ ] `lib/driver/src/ioctl/dispatch.rs` — `handle_get_status`/`start_encrypt`/`start_decrypt`/
-  `get_progress`(논블로킹)/`pause`/`jvck_attach`/`detach`. msgpack 디코드/인코드는
-  `ioctl/types.rs` 구조체 사용.
-- [ ] `lib/driver/src/device.rs::ControlDevice` — `create`(`IoCreateDevice` + `IoCreateSymbolicLink`,
-  `DEVICE_NAME`/`SYMLINK_NAME`) / `destroy`.
+- [ ] `lib/driver/src/ioctl/dispatch.rs` — `handle_jvck_attach`/`detach` 미구현.
+  `handle_get_status`/`start_encrypt`/`start_decrypt`/`get_progress`(논블로킹)/`pause`와
+  msgpack 디코드/인코드는 구현 완료; 나머지 attach/detach 배선이 필요.
+- [x] `lib/driver/src/device.rs::ControlDevice` — `create`(`IoCreateDevice` + `IoCreateSymbolicLink`,
+  `DEVICE_NAME`/`SYMLINK_NAME`) / `destroy` 구현 완료. `DO_BUFFERED_IO` 설정 및 unload 시 삭제 경로 포함.
 - [ ] `lib/driver/src/handover.rs::read_handover::<P>()` — ACPI 테이블 영역 획득 후
   `AcpiHandoverReader::find_and_decode`. 성공 시 VMK 보호 메모리 복사 + ACPI 버퍼 zeroize.
 - [ ] `lib/driver/src/provider.rs` — `AccessToken` 실제 토큰 래핑.
@@ -112,8 +114,10 @@
 
 ## 4. 샘플 드라이버 — `sample/driver`
 
-- [ ] `sample/driver/src/lib.rs::DriverEntry` — 컨트롤 디바이스 생성 → `read_handover` →
-  PnP 알림 등록(OS 볼륨 도착 시 `on_attach`) → `IRP_MJ_DEVICE_CONTROL` → `ioctl::dispatch`.
+- [ ] `sample/driver/src/lib.rs::DriverEntry` — 최소 제어 경로는 구현 완료:
+  컨트롤 디바이스 생성/언로드, `IRP_MJ_CREATE`/`CLOSE`/`CLEANUP`, `IRP_MJ_DEVICE_CONTROL`
+  → `ioctl::dispatch` 배선. 남은 작업은 `read_handover`, PnP 알림 등록(OS 볼륨 도착 시 `on_attach`),
+  attach registry 실제 채우기. `make test-vm-driver-load` 현재 통과.
 - [ ] `sample/driver/src/provider.rs::require_administrator` — 요청자 토큰의
   BUILTIN\Administrators 멤버십 검사. (`on_attach`/`authorize` 골격은 완료, 내부 store 호출은 §1·§2 의존)
 
@@ -136,6 +140,10 @@
 - [ ] `sample/app/cmd/attach.go` — base64 VMK 디코딩/검증 보강(현재 TODO 주석).
 - [ ] `sample/app/cmd/status.go` — `EncryptionState`에 `String()` 추가하여 상태명 출력(현재 정수 출력).
 - [ ] (선택) `sdk`에 비-windows 빌드 스텁 추가 여부 결정(현재 `//go:build windows`).
+- [ ] `sample/app` OS Volume 최초 암호화 준비 — app에서 filesystem shrink, EFI `bootmgfw.os.efi`
+  복사, `(EFI)/vck.json` 생성까지 구현 완료. 현재는 `os-volume encrypt --prepare-only`와
+  VM recipe(`make test-vm-os-volume-prepare`)로 검증 가능. 실제 암호화 시작은 커널의
+  OS Volume attach/handover 경로 구현 후 자동 연결됨.
 
 > 정의된 심볼: `Client`(`Open`/`Close`/`Attach`/`Detach`/`GetStatus`/`StartEncrypt`/`StartDecrypt`/
 > `Pause`/`WatchProgress`), `deviceControl[Req,Resp]`, IOCTL 상수(`ioctlJvckAttach` 등),
@@ -151,7 +159,10 @@
   (`testing/recipes/driver-load/`는 존재)
 - [ ] `testing/images/make-volume-d.ps1`로 만든 `D:\`(10GB)에서 Data Volume attach→encrypt→상태
   end-to-end 시나리오 recipe(`test-vm-data-volume`).
-- [ ] OS Volume 최초 암호화의 파일시스템 Shrink 단계(`sample/app`에서 Windows VDS/diskpart 호출) 설계·구현.
+- [ ] OS Volume 최초 암호화의 파일시스템 shrink 고도화:
+  현재 `sdk.ShrinkVolumeTail()`에서 `FSCTL_SHRINK_VOLUME`와 필요 시 `FSCTL_MOVE_FILE`
+  기반 tail cluster relocation을 수행한다. 실제 시스템 파일/고정 파일이 많은 경우의
+  예외 경로와 재시도 정책은 계속 보강 필요.
 
 ---
 

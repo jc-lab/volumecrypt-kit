@@ -42,3 +42,20 @@ invoke_driver_build() {
 ## 6. 구조(아키텍쳐) 변경
 
 - 중간에 아키텍쳐 변경 시 ARCH.md 와 TODO.md 에서 관련 부분 또한 수정해야 합니다.
+
+## 7. 현재 작업 중
+
+- 우선순위는 **system volume 최초 암호화 경로**입니다.
+- app 에서 최초 암호화 준비 시 다음 순서로 진행합니다.
+  - OS Volume filesystem 을 footer metadata 공간만큼 shrink
+    - 구현은 Go 코드로만 유지
+    - shrink 는 `sdk`의 Windows helper 로 재사용 가능해야 함
+    - `FSCTL_SHRINK_VOLUME`를 기본으로 사용하고, 필요 시 `FSCTL_MOVE_FILE`로 tail cluster 를 앞으로 재배치
+  - `(EFI)/EFI/Microsoft/Boot/bootmgfw.efi` 를 `(EFI)/EFI/Microsoft/Boot/bootmgfw.os.efi` 로 복사
+  - `(EFI)/vck.json` 생성
+    - VMK bytes = `000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f`
+    - sample `vck.json` 포맷에서는 위 VMK bytes 를 base64 로 저장
+    - `osloader = /EFI/Microsoft/Boot/bootmgfw.os.efi`
+    - target OS partition GUID 를 찾아서 `partition_guid` 에 저장
+  - 준비가 끝나면 이 정보로 system volume 암호화를 시작
+- 구현 중에는 이 흐름이 실제 VM 에서 재현되도록 test recipe 와 Makefile 타겟도 함께 유지합니다.

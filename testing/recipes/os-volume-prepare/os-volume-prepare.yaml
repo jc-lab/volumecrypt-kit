@@ -1,0 +1,46 @@
+# Copyright 2026 JC-Lab
+# SPDX-License-Identifier: Apache-2.0
+
+name: "os-volume-prepare"
+description: "Prepare the system volume for first-time encryption and verify EFI artifacts"
+
+steps:
+  - action: wait-boot
+    timeout: 120s
+    params:
+      retry_interval: 5s
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-app.exe"
+      dst: "C:\\Temp\\vck-app.exe"
+
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "powershell.exe"
+      args:
+        - "-Command"
+        - "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'C:\\Temp' -ErrorAction SilentlyContinue"
+
+  - action: exec
+    timeout: 240s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe --volume \\\\.\\C: os-volume encrypt --prepare-only"
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe --volume \\\\.\\C: os-volume verify-prepare"
+      expect_exit_code: 0
+
+  - action: shutdown
+    timeout: 120s

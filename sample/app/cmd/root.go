@@ -51,7 +51,8 @@ func init() {
 	dataVolumeCmd.AddCommand(newEncryptCmd())
 
 	// os-volume subcommands.
-	osVolumeCmd.AddCommand(newEncryptCmd())
+	osVolumeCmd.AddCommand(newOSVolumeEncryptCmd())
+	osVolumeCmd.AddCommand(newOSVolumeVerifyPrepareCmd())
 
 	// Top-level command groups.
 	rootCmd.AddCommand(osVolumeCmd)

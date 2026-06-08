@@ -30,3 +30,5 @@ spin = { version = "0.9", default-features = false, features = ["mutex", "spin_m
 thiserror = { version = "1", default-features = false }
 uuid = { version = "1", default-features = false, features = ["serde"] }
 xts-mode = { version = "0.5.1", default-features = false }
+wdk-alloc = "0.4.1"
+wdk-build = "0.5.1"

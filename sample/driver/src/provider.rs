@@ -50,7 +50,9 @@ impl VolumeProvider for VckVolumeProvider {
 
 impl IoctlAuthorization for VckVolumeProvider {
     fn authorize(&self, ctx: &IoctlAuthContext<'_>) -> VckResult<()> {
-        if ctx.ioctl_code == IOCTL_VCK_GET_PROGRESS {
+        if ctx.ioctl_code == IOCTL_VCK_GET_PROGRESS
+            || ctx.ioctl_code == vck_driver::ioctl::codes::IOCTL_VCK_GET_STATUS
+        {
             return Ok(());
         }
         require_administrator(ctx)

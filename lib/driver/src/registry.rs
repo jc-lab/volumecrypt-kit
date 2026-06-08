@@ -15,6 +15,7 @@ pub struct VolumeAttachRegistry {
 
 pub struct AttachedVolume {
     pub volume_path: String,
+    pub sector_size: u32,
     pub io_config: IoConfig,
     pub encryption: Mutex<EncryptionEngine>,
     pub offset_store: Arc<dyn EncryptedOffsetStore>,
@@ -48,6 +49,17 @@ impl VolumeAttachRegistry {
 
     pub fn remove(&self, volume_path: &str) -> Option<Arc<AttachedVolume>> {
         self.entries.lock().remove(volume_path)
+    }
+}
+
+impl AttachedVolume {
+    pub fn offset_sector(&self) -> u64 {
+        match &self.io_config {
+            IoConfig::Passthrough => 0,
+            IoConfig::AesXts { offset_sector, .. } | IoConfig::Custom { offset_sector, .. } => {
+                *offset_sector
+            }
+        }
     }
 }
 
