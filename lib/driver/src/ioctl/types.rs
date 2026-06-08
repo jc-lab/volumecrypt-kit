@@ -13,6 +13,11 @@ pub const STATE_DECRYPTING: i32 = 2;
 pub const STATE_PAUSED: i32 = 3;
 
 /// IOCTL_JVCK_ATTACH request.
+///
+/// `fvek_key1`/`fvek_key2`/`volume_id` are only used on first-time encryption
+/// (when no metadata exists yet); the user-space app generates them with a
+/// CSPRNG. On re-attach they are ignored (recovered from existing metadata),
+/// so the app may send empty slices.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JvckVolumeAttachReq {
     pub volume_path: String,
@@ -20,6 +25,12 @@ pub struct JvckVolumeAttachReq {
     pub use_header: u32,
     pub use_footer: u32,
     pub metadata_size: u32,
+    #[serde(default)]
+    pub fvek_key1: Vec<u8>,
+    #[serde(default)]
+    pub fvek_key2: Vec<u8>,
+    #[serde(default)]
+    pub volume_id: Vec<u8>,
 }
 
 /// IOCTL_JVCK_ATTACH response.

@@ -711,6 +711,11 @@ type JvckVolumeAttachRequest struct {
     UseFooter    uint32 `msgpack:"use_footer"`
     // Required. replica 한 개 영역 크기(벤더 데이터 포함). 최소 128KiB.
     MetadataSize uint32 `msgpack:"metadata_size"`
+    // 최초 암호화 전용(재연결 시 무시): 앱이 CSPRNG로 생성한 FVEK 키 절반과 volume id.
+    // 각각 32/32/16 bytes. 기존 metadata가 있으면 드라이버가 무시하고 metadata에서 복원.
+    Fvek1    []byte `msgpack:"fvek_key1"`
+    Fvek2    []byte `msgpack:"fvek_key2"`
+    VolumeID []byte `msgpack:"volume_id"`
 }
 
 // JvckVolumeAttachResponse는 IOCTL_JVCK_ATTACH 응답 구조체입니다.

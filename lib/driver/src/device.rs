@@ -3,15 +3,16 @@
 //! Creates `\Device\VolumeCryptKitSample` and `\DosDevices\VolumeCryptKitSample`
 //! so the Go SDK can `CreateFile(\\.\VolumeCryptKitSample)`.
 
-use alloc::vec::Vec;
 use core::ptr::null_mut;
 
 use vck_common::VckResult;
 use wdk_sys::{
-    ntddk::{IoCreateDevice, IoCreateSymbolicLink, IoDeleteDevice, IoDeleteSymbolicLink, RtlInitUnicodeString},
+    ntddk::{IoCreateDevice, IoCreateSymbolicLink, IoDeleteDevice, IoDeleteSymbolicLink},
     BOOLEAN, DO_BUFFERED_IO, DO_DEVICE_INITIALIZING, DRIVER_OBJECT, FILE_DEVICE_SECURE_OPEN,
-    FILE_DEVICE_UNKNOWN, NTSTATUS, PDEVICE_OBJECT, UNICODE_STRING,
+    FILE_DEVICE_UNKNOWN, PDEVICE_OBJECT,
 };
+
+use crate::nt::{ntstatus_to_result, UnicodeString};
 
 pub const DEVICE_NAME: &str = r"\Device\VolumeCryptKitSample";
 pub const SYMLINK_NAME: &str = r"\DosDevices\VolumeCryptKitSample";
@@ -77,42 +78,3 @@ impl ControlDevice {
     }
 }
 
-struct UnicodeString {
-    value: UNICODE_STRING,
-    buffer: Vec<u16>,
-}
-
-impl UnicodeString {
-    fn from_str(value: &str) -> Self {
-        let mut buffer: Vec<u16> = value.encode_utf16().collect();
-        buffer.push(0);
-
-        let mut unicode = UNICODE_STRING {
-            Length: 0,
-            MaximumLength: 0,
-            Buffer: null_mut(),
-        };
-
-        unsafe {
-            RtlInitUnicodeString(&mut unicode, buffer.as_ptr());
-        }
-
-        Self {
-            value: unicode,
-            buffer,
-        }
-    }
-
-    fn as_ptr(&self) -> *mut UNICODE_STRING {
-        let _ = &self.buffer;
-        &self.value as *const UNICODE_STRING as *mut UNICODE_STRING
-    }
-}
-
-fn ntstatus_to_result(status: NTSTATUS, context: &'static str) -> VckResult<()> {
-    if status >= 0 {
-        Ok(())
-    } else {
-        Err(vck_common::VckError::Io(context.into()))
-    }
-}

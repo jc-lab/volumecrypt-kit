@@ -5,9 +5,14 @@
 현재 상태: **JVCK 암호 코어 구현 완료**(호스트 단위테스트 20개 통과). 커널/UEFI 배선은 대부분 스텁입니다.
 아래 각 항목은 채워야 할 구체적인 파일·함수를 가리킵니다.
 
-> 빌드 참고: `lib/driver`는 호스트(`cargo build -p vck-driver --target x86_64-pc-windows-msvc`)에서
-> `debug.rs`의 `wdk_sys::ntddk` import만 미해결(WDK 바인딩은 WEDK `G:\` 환경에서 생성됨)이고 나머지
-> 모듈은 타입체크를 통과합니다. 따라서 드라이버 추가 작업은 `make build-driver`(WEDK)로 검증하세요.
+> 빌드 참고:
+> - `wdk-sys` 바인딩은 **다운스트림 드라이버 크레이트의 `[package.metadata.wdk]`** 기반으로 생성되므로,
+>   `cargo build -p vck-driver` 단독은 빈 바인딩이 됩니다. 드라이버 컴파일 검증은 반드시 드라이버 바이너리
+>   크레이트(`vck-sample-driver`/`vck-crypto-test-driver`)를 통해, **msys2 로그인 셸 + WEDK**에서:
+>   `C:/msys64/usr/bin/bash.exe -lc 'cd /d/workspace/volumecrypt-kit; make build-driver'`.
+> - `make build-driver`/`make build-crypto-test-driver`는 **빌드+서명까지 통과**합니다(현재 검증됨).
+>   서명 스크립트(`testing/signing/sign-driver.ps1`)는 x64 signtool 우선 선택 + `Start-Process .ExitCode`
+>   사용으로 셸 경계(`$LASTEXITCODE`) 문제를 회피합니다.
 
 ## 빌드 / 테스트 명령 (Makefile)
 
@@ -74,17 +79,25 @@
   (상대 섹터 공간, `encrypted_offset` 경계 기준 섹터별 분기).
 - [x] `lib/driver/src/offset/engine.rs::EncryptionEngine` — `relative`(헤더/푸터 모두 제외 확인),
   `start_encrypt`/`start_decrypt`/`pause`, `progress_step`(암/복호 배치 + store 영속화), `snapshot`.
-- [ ] `lib/driver/src/io.rs::KernelVolumeIo` — `read_sectors`/`write_sectors`
-  (하위 디바이스에 동기 IRP_MJ_READ/WRITE). `open`은 골격 완료. **하위(lower) 디바이스 핸들 필요.**
+- [x] `lib/driver/src/io.rs::KernelVolumeIo` — `read_sectors`/`write_sectors` 구현 완료
+  (`IoBuildSynchronousFsdRequest` + `IofCallDriver` + `KeWaitForSingleObject` 동기 IRP).
+  `open`(NT 경로→`IoGetDeviceObjectPointer`) 및 `from_lower_device`(필터 하위 디바이스) 제공.
+  공용 NT 헬퍼는 `lib/driver/src/nt.rs`로 추출. `make build-driver`로 컴파일·링크·서명 검증.
+  남은 것: 볼륨 geometry(sector_size/total_sectors) 질의 헬퍼(`IOCTL_DISK_GET_LENGTH_INFO` 등).
 - [ ] `lib/driver/src/filter/manager.rs::VolumeFilterDriver` — `attach`(filter DO 생성 +
   `IoAttachDeviceToDeviceStackSafe`) / `detach`.
 - [ ] `lib/driver/src/filter/irp.rs` — `on_read`/`on_write`/`pass_through`
   (IRP 완료 콜백 → `CryptoPipeline`).
 - [ ] `lib/driver/src/executor.rs::KernelExecutor` — `spawn`/`block_on`
   (IRP completion waker + `ExWorkItem` 워커).
-- [ ] `lib/driver/src/ioctl/dispatch.rs` — `handle_jvck_attach`/`detach` 미구현.
-  `handle_get_status`/`start_encrypt`/`start_decrypt`/`get_progress`(논블로킹)/`pause`와
-  msgpack 디코드/인코드는 구현 완료; 나머지 attach/detach 배선이 필요.
+- [x] `lib/driver/src/ioctl/dispatch.rs` — `handle_jvck_attach`/`handle_detach` 구현 완료.
+  attach: NT 경로 변환 → `KernelVolumeIo::open_query`(geometry) → `JvckMetadataStore::open`(기존)
+  또는 `create`(최초, 앱이 보낸 FVEK/volume_id 사용) → `AttachedVolume` 등록 → 응답.
+  detach: registry 제거. (프로토콜: `JvckVolumeAttachReq`에 `fvek_key1/fvek_key2/volume_id` 추가,
+  Go `JvckVolumeAttachRequest` + `attach.go`가 `crypto/rand`로 생성·전달.)
+  **남은 것**: (1) 암호화 sweep worker — 현재 `start_encrypt`는 상태만 Encrypting으로 두고
+  `progress_step`을 구동하는 워커(system thread / `ExQueueWorkItem`)가 없어 실제 암호화는 아직 미진행.
+  (2) transparent 볼륨 필터(아래).
 - [x] `lib/driver/src/device.rs::ControlDevice` — `create`(`IoCreateDevice` + `IoCreateSymbolicLink`,
   `DEVICE_NAME`/`SYMLINK_NAME`) / `destroy` 구현 완료. `DO_BUFFERED_IO` 설정 및 unload 시 삭제 경로 포함.
 - [ ] `lib/driver/src/handover.rs::read_handover::<P>()` — ACPI 테이블 영역 획득 후

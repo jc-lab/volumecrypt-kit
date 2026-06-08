@@ -3,12 +3,22 @@
 //! GET_PROGRESS is non-blocking: it returns the current snapshot immediately.
 
 use alloc::string::{String, ToString};
-use vck_common::{VckError, VckResult};
+use alloc::sync::Arc;
+
+use spin::Mutex;
+use vck_common::{
+    jvck::{JvckMetadataStore, JvckMetadataOptions},
+    types::Guid,
+    EncryptedOffset, EncryptedOffsetStore, VckError, VckResult, VolumeId,
+};
 
 use crate::{
+    io::KernelVolumeIo,
     ioctl::codes::*,
-    provider::{IoctlAuthContext, IoctlAuthorization},
-    registry::VolumeAttachRegistry,
+    nt::win32_volume_path_to_nt,
+    offset::engine::EncryptionEngine,
+    provider::{IoConfig, IoctlAuthContext, IoctlAuthorization},
+    registry::{AttachSource, AttachedVolume, VolumeAttachRegistry},
 };
 
 /// Serialized msgpack response buffer to copy back to the caller.
@@ -118,22 +128,94 @@ fn handle_pause(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<Ioct
     encode_resp(&EmptyResponse {})
 }
 
-fn handle_jvck_attach(
-    _registry: &VolumeAttachRegistry,
-    input: &[u8],
-) -> VckResult<IoctlResponse> {
-    let _: JvckVolumeAttachReq = decode_req(input)?;
-    let _placeholder = JvckVolumeAttachResp {
-        offset_sector: 0,
-        total_sectors: 0,
-        sector_size: 0,
+fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
+    let req: JvckVolumeAttachReq = decode_req(input)?;
+
+    if registry.get(&req.volume_path).is_some() {
+        return Err(VckError::Unsupported("volume already attached"));
+    }
+
+    let volume_id = VolumeId {
+        partition_guid: Guid::nil(),
+        device_path: win32_volume_path_to_nt(&req.volume_path),
     };
-    todo!("decode JvckVolumeAttachReq, JvckMetadataStore open/create, attach filter, encode resp")
+
+    // Open existing JVCK metadata, or create it on first-time encryption using
+    // the app-provided FVEK / volume id. `open`/`create` each consume a fresh
+    // KernelVolumeIo (the failed `open` drops its handle).
+    let store = match JvckMetadataStore::open(KernelVolumeIo::open_query(&volume_id)?, &req.vmk) {
+        Ok(store) => store,
+        Err(VckError::NotFound(_)) => {
+            let options = JvckMetadataOptions {
+                use_header: req.use_header,
+                use_footer: req.use_footer,
+                metadata_size: req.metadata_size,
+            };
+            JvckMetadataStore::create(
+                KernelVolumeIo::open_query(&volume_id)?,
+                &req.vmk,
+                options,
+                to_key(&req.fvek_key1, "fvek_key1")?,
+                to_key(&req.fvek_key2, "fvek_key2")?,
+                to_volume_id(&req.volume_id)?,
+            )?
+        }
+        Err(err) => return Err(err),
+    };
+
+    let meta = store.load_metadata()?;
+    let offset_sector = store.offset_sector();
+    let data_sectors = store.data_sector_count();
+    let sector_size = store.sector_size();
+    let encrypted_offset = EncryptedOffset {
+        sector: meta.encrypted_offset,
+        total_sectors: data_sectors,
+    };
+
+    let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
+    let io_config = IoConfig::AesXts {
+        key1: meta.fvek_key1,
+        key2: meta.fvek_key2,
+        offset_sector,
+        encrypted_offset: encrypted_offset.clone(),
+        offset_store: offset_store.clone(),
+    };
+
+    registry.insert(Arc::new(AttachedVolume {
+        volume_path: req.volume_path.clone(),
+        sector_size,
+        io_config,
+        encryption: Mutex::new(EncryptionEngine::new(offset_sector, encrypted_offset)),
+        offset_store,
+        attach_source: AttachSource::Ioctl,
+    }));
+
+    encode_resp(&JvckVolumeAttachResp {
+        offset_sector,
+        total_sectors: data_sectors,
+        sector_size,
+    })
 }
 
-fn handle_detach(_registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
-    let _: VolumeRequest = decode_req(input)?;
-    todo!("decode VolumeRequest, detach filter, remove from registry")
+fn handle_detach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
+    let req: VolumeRequest = decode_req(input)?;
+    registry
+        .remove(&req.volume_path)
+        .ok_or(VckError::NotFound("volume is not attached"))?;
+    // TODO(driver): detach the volume filter device once filter attach is wired.
+    encode_resp(&EmptyResponse {})
+}
+
+fn to_key(bytes: &[u8], what: &'static str) -> VckResult<[u8; 32]> {
+    bytes
+        .try_into()
+        .map_err(|_| VckError::InvalidData(what))
+}
+
+fn to_volume_id(bytes: &[u8]) -> VckResult<[u8; 16]> {
+    bytes
+        .try_into()
+        .map_err(|_| VckError::InvalidData("volume_id must be 16 bytes"))
 }
 
 fn decode_req<T>(input: &[u8]) -> VckResult<T>
