@@ -13,6 +13,11 @@
 > - `make build-driver`/`make build-crypto-test-driver`는 **빌드+서명까지 통과**합니다(현재 검증됨).
 >   서명 스크립트(`testing/signing/sign-driver.ps1`)는 x64 signtool 우선 선택 + `Start-Process .ExitCode`
 >   사용으로 셸 경계(`$LASTEXITCODE`) 문제를 회피합니다.
+> - **panic 전략(혼합 워크스페이스)**: `panic="abort"`는 워크스페이스 `Cargo.toml`의 `[profile.dev]`/
+>   `[profile.release]`에만 둡니다(전역 `.cargo/config.toml` 사용 안 함). cargo가 `test`/`bench` profile에서는
+>   `panic=abort`를 무시하고 unwind를 쓰므로 `make test`(=`cargo test -p vck-common`)가 그대로 동작합니다.
+>   드라이버 전용 플래그(`crt-static`, `aes_force_soft`)는 Makefile의 인라인 RUSTFLAGS로, `driver_model` cfg는
+>   각 드라이버 크레이트의 `build.rs`(`wdk_build::configure_wdk_binary_build`)가 방출합니다.
 
 ## 빌드 / 테스트 명령 (Makefile)
 

@@ -15,6 +15,16 @@ edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/jc-lab/volumecrypt-kit"
 
+# Kernel drivers cannot unwind, so builds use panic=abort. Cargo automatically
+# ignores this for the `test`/`bench` profiles (they always unwind), so
+# `cargo test -p vck-common` still works on the host. (windows-drivers-rs
+# recommends setting panic via [profile] rather than rustflags for this reason.)
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
 [workspace.dependencies]
 aes = { version = "0.8", default-features = false }
 cbc = { version = "0.1", default-features = false }
