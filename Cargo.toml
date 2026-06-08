@@ -1,0 +1,32 @@
+[workspace]
+resolver = "2"
+members = [
+    "lib/common",
+    "lib/driver",
+    "lib/loader",
+    "sample/common",
+    "sample/crypto-test",
+    "sample/driver",
+    "sample/loader",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/jc-lab/volumecrypt-kit"
+
+[workspace.dependencies]
+aes = { version = "0.8", default-features = false }
+cbc = { version = "0.1", default-features = false }
+cipher = { version = "0.4", default-features = false, features = ["block-padding"] }
+crc32fast = { version = "1", default-features = false }
+hkdf = { version = "0.12", default-features = false }
+hmac = { version = "0.12", default-features = false }
+irql = { version = "0.1.6" }
+messagepack-serde = { version = "0.2", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+thiserror = { version = "1", default-features = false }
+uuid = { version = "1", default-features = false, features = ["serde"] }
+xts-mode = { version = "0.5.1", default-features = false }

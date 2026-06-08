@@ -1,0 +1,203 @@
+//! `EncryptionEngine`: decides per-sector crypto behaviour and drives the
+//! background encrypt/decrypt sweep, persisting progress via the store.
+
+use vck_common::{EncryptedOffset, EncryptedOffsetStore, SectorIo, VckResult};
+
+use crate::crypto::aes_xts::AesXtsCipher;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EngineState {
+    Idle,
+    Encrypting,
+    Decrypting,
+    Paused,
+}
+
+/// Wire-compatible integer values mirror the Go SDK's `EncryptionState`.
+impl EngineState {
+    pub fn as_wire(self) -> i32 {
+        match self {
+            EngineState::Idle => 0,
+            EngineState::Encrypting => 1,
+            EngineState::Decrypting => 2,
+            EngineState::Paused => 3,
+        }
+    }
+}
+
+/// A point-in-time progress snapshot returned to GET_STATUS / GET_PROGRESS.
+#[derive(Debug, Clone, Copy)]
+pub struct ProgressSnapshot {
+    pub encrypted_sector: u64,
+    pub total_sectors: u64,
+    pub state: EngineState,
+}
+
+pub struct EncryptionEngine {
+    /// Absolute start LBA of the data region.
+    offset_sector: u64,
+    /// Progress (data-region relative) + total target sectors.
+    encrypted_offset: EncryptedOffset,
+    state: EngineState,
+}
+
+impl EncryptionEngine {
+    pub fn new(offset_sector: u64, encrypted_offset: EncryptedOffset) -> Self {
+        Self {
+            offset_sector,
+            encrypted_offset,
+            state: EngineState::Idle,
+        }
+    }
+
+    /// Map an absolute LBA to a data-region relative sector, or `None` if the
+    /// LBA falls in a metadata region (which must be passed through).
+    ///
+    /// Header regions yield `None` because `lba < offset_sector`; footer regions
+    /// yield `None` because the relative sector is `>= total_sectors`.
+    pub fn relative(&self, lba: u64) -> Option<u64> {
+        lba.checked_sub(self.offset_sector)
+            .filter(|rel| *rel < self.encrypted_offset.total_sectors)
+    }
+
+    /// Whether the (relative) sector is currently in the encrypted span.
+    pub fn is_encrypted(&self, rel: u64) -> bool {
+        self.encrypted_offset.is_encrypted(rel)
+    }
+
+    /// Current ciphertext boundary (data-region relative).
+    pub fn encrypted_boundary(&self) -> u64 {
+        self.encrypted_offset.sector
+    }
+
+    pub fn state(&self) -> EngineState {
+        self.state
+    }
+
+    pub fn snapshot(&self) -> ProgressSnapshot {
+        ProgressSnapshot {
+            encrypted_sector: self.encrypted_offset.sector,
+            total_sectors: self.encrypted_offset.total_sectors,
+            state: self.state,
+        }
+    }
+
+    /// Begin (or resume) progressive encryption. No-op if already fully encrypted.
+    pub fn start_encrypt(&mut self) {
+        if !self.encrypted_offset.is_fully_encrypted() {
+            self.state = EngineState::Encrypting;
+        } else {
+            self.state = EngineState::Idle;
+        }
+    }
+
+    /// Begin (or resume) progressive decryption. No-op if nothing is encrypted.
+    pub fn start_decrypt(&mut self) {
+        if self.encrypted_offset.sector > 0 {
+            self.state = EngineState::Decrypting;
+        } else {
+            self.state = EngineState::Idle;
+        }
+    }
+
+    pub fn pause(&mut self) {
+        if matches!(
+            self.state,
+            EngineState::Encrypting | EngineState::Decrypting
+        ) {
+            self.state = EngineState::Paused;
+        }
+    }
+
+    /// Run one batch of the encrypt/decrypt sweep and persist progress.
+    ///
+    /// Returns `Ok(true)` if more work remains (caller should schedule another
+    /// step), `Ok(false)` when the engine reached `Idle`.
+    ///
+    /// `io` MUST be the raw lower volume device (below this filter), so the
+    /// sweep reads plaintext / writes ciphertext without re-entering the filter.
+    pub fn progress_step(
+        &mut self,
+        io: &dyn SectorIo,
+        cipher: &AesXtsCipher,
+        store: &dyn EncryptedOffsetStore,
+        batch_sectors: u64,
+    ) -> VckResult<bool> {
+        match self.state {
+            EngineState::Encrypting => self.encrypt_step(io, cipher, store, batch_sectors),
+            EngineState::Decrypting => self.decrypt_step(io, cipher, store, batch_sectors),
+            _ => Ok(false),
+        }
+    }
+
+    fn encrypt_step(
+        &mut self,
+        io: &dyn SectorIo,
+        cipher: &AesXtsCipher,
+        store: &dyn EncryptedOffsetStore,
+        batch_sectors: u64,
+    ) -> VckResult<bool> {
+        if self.encrypted_offset.is_fully_encrypted() {
+            self.state = EngineState::Idle;
+            return Ok(false);
+        }
+        let sector_size = io.sector_size() as usize;
+        let start_rel = self.encrypted_offset.sector;
+        let remaining = self.encrypted_offset.total_sectors - start_rel;
+        let count = remaining.min(batch_sectors.max(1));
+
+        let mut buf = alloc::vec![0u8; count as usize * sector_size];
+        let abs = self.offset_sector + start_rel;
+        io.read_sectors(abs, &mut buf)?;
+        for (i, sector) in buf.chunks_mut(sector_size).enumerate() {
+            cipher.encrypt_sector(start_rel + i as u64, sector);
+        }
+        io.write_sectors(abs, &buf)?;
+
+        self.encrypted_offset.sector += count;
+        store.store(&self.encrypted_offset)?;
+        store.flush()?;
+
+        if self.encrypted_offset.is_fully_encrypted() {
+            self.state = EngineState::Idle;
+            Ok(false)
+        } else {
+            Ok(true)
+        }
+    }
+
+    fn decrypt_step(
+        &mut self,
+        io: &dyn SectorIo,
+        cipher: &AesXtsCipher,
+        store: &dyn EncryptedOffsetStore,
+        batch_sectors: u64,
+    ) -> VckResult<bool> {
+        if self.encrypted_offset.sector == 0 {
+            self.state = EngineState::Idle;
+            return Ok(false);
+        }
+        let sector_size = io.sector_size() as usize;
+        let count = self.encrypted_offset.sector.min(batch_sectors.max(1));
+        let new_boundary = self.encrypted_offset.sector - count;
+
+        let mut buf = alloc::vec![0u8; count as usize * sector_size];
+        let abs = self.offset_sector + new_boundary;
+        io.read_sectors(abs, &mut buf)?;
+        for (i, sector) in buf.chunks_mut(sector_size).enumerate() {
+            cipher.decrypt_sector(new_boundary + i as u64, sector);
+        }
+        io.write_sectors(abs, &buf)?;
+
+        self.encrypted_offset.sector = new_boundary;
+        store.store(&self.encrypted_offset)?;
+        store.flush()?;
+
+        if new_boundary == 0 {
+            self.state = EngineState::Idle;
+            Ok(false)
+        } else {
+            Ok(true)
+        }
+    }
+}
