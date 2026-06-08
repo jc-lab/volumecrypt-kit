@@ -3,6 +3,7 @@
 //! Creates `\Device\VolumeCryptKitSample` and `\DosDevices\VolumeCryptKitSample`
 //! so the Go SDK can `CreateFile(\\.\VolumeCryptKitSample)`.
 
+use core::mem::size_of;
 use core::ptr::null_mut;
 
 use vck_common::VckResult;
@@ -13,9 +14,40 @@ use wdk_sys::{
 };
 
 use crate::nt::{ntstatus_to_result, UnicodeString};
+use crate::registry::AttachedVolume;
 
 pub const DEVICE_NAME: &str = r"\Device\VolumeCryptKitSample";
 pub const SYMLINK_NAME: &str = r"\DosDevices\VolumeCryptKitSample";
+
+/// Discriminates which kind of device object an IRP arrived on, since the
+/// control device and every filter device share this driver's MajorFunction
+/// table.
+pub const DEVICE_KIND_CONTROL: u32 = 0;
+pub const DEVICE_KIND_FILTER: u32 = 1;
+
+/// Stored in every device object's `DeviceExtension`.
+#[repr(C)]
+pub struct DeviceExtension {
+    pub kind: u32,
+    /// Filter only: the device immediately below us in the stack.
+    pub lower_device: PDEVICE_OBJECT,
+    /// Filter only: raw `Arc<AttachedVolume>` (via `Arc::into_raw`), released on
+    /// detach.
+    pub volume: *const AttachedVolume,
+}
+
+impl DeviceExtension {
+    /// Borrow the extension of `device`.
+    ///
+    /// # Safety
+    /// `device` must be one of this driver's device objects (created with a
+    /// `DeviceExtension`-sized extension).
+    pub unsafe fn of<'a>(device: PDEVICE_OBJECT) -> &'a DeviceExtension {
+        &*((*device).DeviceExtension as *const DeviceExtension)
+    }
+}
+
+pub(crate) const DEVICE_EXTENSION_SIZE: u32 = size_of::<DeviceExtension>() as u32;
 
 pub struct ControlDevice {
     device_object: PDEVICE_OBJECT,
@@ -34,7 +66,7 @@ impl ControlDevice {
         ntstatus_to_result(unsafe {
             IoCreateDevice(
                 driver_object,
-                0,
+                DEVICE_EXTENSION_SIZE,
                 device_name.as_ptr(),
                 FILE_DEVICE_UNKNOWN,
                 FILE_DEVICE_SECURE_OPEN,
@@ -45,6 +77,10 @@ impl ControlDevice {
 
         unsafe {
             (*device_object).Flags |= DO_BUFFERED_IO;
+            let ext = (*device_object).DeviceExtension as *mut DeviceExtension;
+            (*ext).kind = DEVICE_KIND_CONTROL;
+            (*ext).lower_device = null_mut();
+            (*ext).volume = null_mut();
         }
 
         if let Err(err) = ntstatus_to_result(

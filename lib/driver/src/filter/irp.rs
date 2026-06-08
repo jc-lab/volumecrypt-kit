@@ -1,26 +1,36 @@
-//! IRP_MJ_READ / IRP_MJ_WRITE interception and async dispatch into the crypto
-//! pipeline. Other major functions are passed through to the lower device.
+//! Filter IRP helpers.
+//!
+//! For now read/write are forwarded unchanged (transparent pass-through). The
+//! AES-XTS interception (decrypt on read completion, encrypt via a shadow buffer
+//! on write) will be layered on top of this.
 
-use vck_common::VckResult;
+use wdk_sys::{ntddk::IofCallDriver, NTSTATUS, PDEVICE_OBJECT, PIRP};
 
-use crate::filter::context::FilterContext;
-
-/// Intercept a read IRP: forward down-stack, then decrypt the returned buffer
-/// for sectors within the encrypted span on completion.
-pub fn on_read(ctx: &FilterContext) -> VckResult<()> {
-    let _ = ctx;
-    todo!("hook IRP_MJ_READ completion -> CryptoPipeline::decrypt_read")
+/// Forward `irp` to `lower_device` without consuming a stack location of our
+/// own (we did not allocate one for it).
+///
+/// # Safety
+/// `irp` must be a valid IRP currently owned by this driver, and `lower_device`
+/// the device immediately below the filter.
+pub unsafe fn pass_through(lower_device: PDEVICE_OBJECT, irp: PIRP) -> NTSTATUS {
+    skip_current_stack_location(irp);
+    IofCallDriver(lower_device, irp)
 }
 
-/// Intercept a write IRP: encrypt the buffer for sectors within the encrypted
-/// span, then forward down-stack.
-pub fn on_write(ctx: &FilterContext) -> VckResult<()> {
-    let _ = ctx;
-    todo!("encrypt -> forward IRP_MJ_WRITE")
-}
-
-/// Pass-through for all other major functions.
-pub fn pass_through(ctx: &FilterContext) -> VckResult<()> {
-    let _ = ctx;
-    todo!("IoSkipCurrentIrpStackLocation + IoCallDriver")
+/// Equivalent of the `IoSkipCurrentIrpStackLocation` macro: reuse the current
+/// stack location for the next (lower) driver.
+unsafe fn skip_current_stack_location(irp: PIRP) {
+    (*irp).CurrentLocation += 1;
+    let csl = (*irp)
+        .Tail
+        .Overlay
+        .__bindgen_anon_2
+        .__bindgen_anon_1
+        .CurrentStackLocation;
+    (*irp)
+        .Tail
+        .Overlay
+        .__bindgen_anon_2
+        .__bindgen_anon_1
+        .CurrentStackLocation = csl.add(1);
 }

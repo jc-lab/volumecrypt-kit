@@ -89,10 +89,16 @@
   `open`(NT 경로→`IoGetDeviceObjectPointer`) 및 `from_lower_device`(필터 하위 디바이스) 제공.
   공용 NT 헬퍼는 `lib/driver/src/nt.rs`로 추출. `make build-driver`로 컴파일·링크·서명 검증.
   남은 것: 볼륨 geometry(sector_size/total_sectors) 질의 헬퍼(`IOCTL_DISK_GET_LENGTH_INFO` 등).
-- [ ] `lib/driver/src/filter/manager.rs::VolumeFilterDriver` — `attach`(filter DO 생성 +
-  `IoAttachDeviceToDeviceStackSafe`) / `detach`.
-- [ ] `lib/driver/src/filter/irp.rs` — `on_read`/`on_write`/`pass_through`
-  (IRP 완료 콜백 → `CryptoPipeline`).
+- [x] `lib/driver/src/filter/manager.rs` — `attach_filter`(filter DO 생성 +
+  `IoAttachDeviceToDeviceStackSafe`, 확장 태깅, flag 상속) / `detach_filter`(IoDetachDevice +
+  IoDeleteDevice + Arc 해제) 구현 완료.
+- [x] `lib/driver/src/device.rs` — `DeviceExtension`(Control/Filter 태깅) 추가, 컨트롤 디바이스에 부착.
+  sample 드라이버의 `dispatch_any`가 확장 kind로 IRP 라우팅(필터=pass-through, 컨트롤=IOCTL).
+  ATTACH가 `attach_filter`까지, DETACH가 `detach_filter`까지 배선. **현재는 transparent pass-through**
+  (볼륨 정상 동작 확인용). sweep_io는 필터 attach 전에 볼륨 디바이스를 해석해 재진입 없음.
+- [ ] `lib/driver/src/filter/irp.rs` — READ/WRITE **crypto 가로채기** 미구현(현재 pass-through).
+  read 완료 콜백에서 복호화, write는 shadow 버퍼 암호화 후 하위 전달. (다음 단계)
+  PnP remove 처리(IRP_MN_REMOVE_DEVICE 시 자동 detach)도 보강 필요.
 - [ ] `lib/driver/src/executor.rs::KernelExecutor` — `spawn`/`block_on`
   (IRP completion waker + `ExWorkItem` 워커).
 - [x] `lib/driver/src/ioctl/dispatch.rs` — `handle_jvck_attach`/`handle_detach` 구현 완료.

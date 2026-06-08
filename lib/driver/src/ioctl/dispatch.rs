@@ -4,6 +4,8 @@
 
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
+use core::ptr::null_mut;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use spin::Mutex;
 use vck_common::{
@@ -182,21 +184,39 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         offset_store: offset_store.clone(),
     };
 
-    // Cipher + raw volume I/O for the background sweep. (No filter yet, so the
-    // sweep addresses the volume device directly.)
+    // Cipher + raw volume I/O for the background sweep. The sweep_io device
+    // pointer is resolved BEFORE the filter is attached, so it targets the
+    // volume device directly (below our filter) and never re-enters the filter.
     let cipher = AesXtsCipher::new(meta.fvek_key1, meta.fvek_key2)?;
     let sweep_io: Arc<dyn SectorIo> = Arc::new(KernelVolumeIo::open_query(&volume_id)?);
 
-    registry.insert(Arc::new(AttachedVolume {
+    let volume = Arc::new(AttachedVolume {
         volume_path: req.volume_path.clone(),
         sector_size,
         io_config,
         encryption: Mutex::new(EncryptionEngine::new(offset_sector, encrypted_offset)),
         offset_store,
         attach_source: AttachSource::Ioctl,
+        filter_device: AtomicPtr::new(null_mut()),
         cipher: Some(cipher),
         sweep_io,
-    }));
+    });
+    registry.insert(volume.clone());
+
+    // Attach a transparent filter above the volume so live filesystem I/O can
+    // (later) be encrypted/decrypted in flight.
+    let driver = registry.driver_object();
+    if driver.is_null() {
+        registry.remove(&req.volume_path);
+        return Err(VckError::Io("driver object not registered".into()));
+    }
+    match crate::filter::attach_filter(driver, &volume_id.device_path, volume.clone()) {
+        Ok(filter_do) => volume.filter_device.store(filter_do, Ordering::Release),
+        Err(err) => {
+            registry.remove(&req.volume_path);
+            return Err(err);
+        }
+    }
 
     encode_resp(&JvckVolumeAttachResp {
         offset_sector,
@@ -207,10 +227,14 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
 
 fn handle_detach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
     let req: VolumeRequest = decode_req(input)?;
-    registry
+    let volume = registry
         .remove(&req.volume_path)
         .ok_or(VckError::NotFound("volume is not attached"))?;
-    // TODO(driver): detach the volume filter device once filter attach is wired.
+
+    let filter_do = volume.filter_device.swap(null_mut(), Ordering::AcqRel);
+    if !filter_do.is_null() {
+        crate::filter::detach_filter(filter_do);
+    }
     encode_resp(&EmptyResponse {})
 }
 

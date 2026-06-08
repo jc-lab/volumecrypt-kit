@@ -2,15 +2,20 @@
 //! via IOCTL).
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use core::ptr::null_mut;
+use core::sync::atomic::{AtomicPtr, Ordering};
 
 use spin::Mutex;
 use vck_common::{EncryptedOffsetStore, SectorIo, VckResult};
+use wdk_sys::{DEVICE_OBJECT, DRIVER_OBJECT};
 
 use crate::{crypto::aes_xts::AesXtsCipher, offset::engine::EncryptionEngine, provider::IoConfig};
 
 pub struct VolumeAttachRegistry {
     // volume_path (NT device path) -> AttachedVolume
     entries: Mutex<BTreeMap<String, Arc<AttachedVolume>>>,
+    // Set once at DriverEntry; needed to create filter device objects.
+    driver_object: AtomicPtr<DRIVER_OBJECT>,
 }
 
 pub struct AttachedVolume {
@@ -20,6 +25,8 @@ pub struct AttachedVolume {
     pub encryption: Mutex<EncryptionEngine>,
     pub offset_store: Arc<dyn EncryptedOffsetStore>,
     pub attach_source: AttachSource,
+    /// Filter device object attached above this volume (null if none yet).
+    pub filter_device: AtomicPtr<DEVICE_OBJECT>,
     /// AES-XTS cipher for the background sweep (present on the high-level path).
     pub cipher: Option<AesXtsCipher>,
     /// Raw volume sector I/O used by the sweep to read plaintext / write
@@ -40,7 +47,17 @@ impl VolumeAttachRegistry {
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(BTreeMap::new()),
+            driver_object: AtomicPtr::new(null_mut()),
         }
+    }
+
+    /// Record the WDM driver object (set once at DriverEntry).
+    pub fn set_driver_object(&self, driver: *mut DRIVER_OBJECT) {
+        self.driver_object.store(driver, Ordering::Release);
+    }
+
+    pub fn driver_object(&self) -> *mut DRIVER_OBJECT {
+        self.driver_object.load(Ordering::Acquire)
     }
 
     pub fn insert(&self, volume: Arc<AttachedVolume>) {

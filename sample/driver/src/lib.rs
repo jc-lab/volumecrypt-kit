@@ -16,11 +16,12 @@ use spin::{Lazy, Mutex};
 use wdk_alloc::WdkAllocator;
 use wdk_sys::{
     ntddk::IofCompleteRequest, CCHAR, DRIVER_OBJECT, IO_NO_INCREMENT, IRP_MJ_CLEANUP,
-    IRP_MJ_CLOSE, IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, NTSTATUS, PDEVICE_OBJECT,
-    PDRIVER_OBJECT, PIRP, PIO_STACK_LOCATION, PCUNICODE_STRING, _MODE,
+    IRP_MJ_CLOSE, IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, NTSTATUS, PDEVICE_OBJECT, PDRIVER_OBJECT,
+    PIRP, PIO_STACK_LOCATION, PCUNICODE_STRING, _MODE,
 };
 use vck_driver::{
-    device::ControlDevice,
+    device::{ControlDevice, DeviceExtension, DEVICE_KIND_FILTER},
+    filter::pass_through,
     ioctl::dispatch_ioctl,
     provider::{IoctlAuthContext, RequestorMode},
     SweepWorker, VolumeAttachRegistry,
@@ -37,6 +38,7 @@ static PROVIDER: VckVolumeProvider = VckVolumeProvider;
 const STATUS_SUCCESS: NTSTATUS = 0;
 const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as i32;
 const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000_000Du32 as i32;
+const STATUS_INVALID_DEVICE_REQUEST: NTSTATUS = 0xC000_0010u32 as i32;
 const STATUS_BUFFER_TOO_SMALL: NTSTATUS = 0xC000_0023u32 as i32;
 
 /// Kernel driver entry point.
@@ -76,11 +78,15 @@ pub unsafe extern "system" fn DriverEntry(
         }
     }
 
+    // Needed by IOCTL_JVCK_ATTACH to create filter device objects.
+    REGISTRY.set_driver_object(driver as *mut DRIVER_OBJECT);
+
     driver.DriverUnload = Some(driver_unload);
-    driver.MajorFunction[IRP_MJ_CREATE as usize] = Some(dispatch_create_close);
-    driver.MajorFunction[IRP_MJ_CLOSE as usize] = Some(dispatch_create_close);
-    driver.MajorFunction[IRP_MJ_CLEANUP as usize] = Some(dispatch_create_close);
-    driver.MajorFunction[IRP_MJ_DEVICE_CONTROL as usize] = Some(dispatch_device_control);
+    // Every device this driver owns (control + filters) shares one dispatcher
+    // that routes by the device-extension kind.
+    for slot in driver.MajorFunction.iter_mut() {
+        *slot = Some(dispatch_any);
+    }
 
     STATUS_SUCCESS
 }
@@ -102,12 +108,42 @@ unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
     }
 }
 
-unsafe extern "C" fn dispatch_create_close(
-    _device_object: PDEVICE_OBJECT,
-    irp: PIRP,
-) -> NTSTATUS {
-    complete_irp(irp, STATUS_SUCCESS, 0);
-    STATUS_SUCCESS
+/// Shared dispatcher for every device this driver owns. Filter devices forward
+/// to the device below; the control device handles CREATE/CLOSE/CLEANUP and
+/// DEVICE_CONTROL.
+unsafe extern "C" fn dispatch_any(device_object: PDEVICE_OBJECT, irp: PIRP) -> NTSTATUS {
+    if device_object.is_null() || irp.is_null() {
+        if !irp.is_null() {
+            complete_irp(irp, STATUS_INVALID_PARAMETER, 0);
+        }
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    let ext = DeviceExtension::of(device_object);
+    if ext.kind == DEVICE_KIND_FILTER {
+        // Transparent pass-through for now; AES-XTS interception of READ/WRITE
+        // will be layered on here.
+        return pass_through(ext.lower_device, irp);
+    }
+
+    // Control device.
+    let stack = current_stack_location(irp);
+    let major = if stack.is_null() {
+        u32::MAX
+    } else {
+        (*stack).MajorFunction as u32
+    };
+    match major {
+        IRP_MJ_DEVICE_CONTROL => dispatch_device_control(device_object, irp),
+        IRP_MJ_CREATE | IRP_MJ_CLOSE | IRP_MJ_CLEANUP => {
+            complete_irp(irp, STATUS_SUCCESS, 0);
+            STATUS_SUCCESS
+        }
+        _ => {
+            complete_irp(irp, STATUS_INVALID_DEVICE_REQUEST, 0);
+            STATUS_INVALID_DEVICE_REQUEST
+        }
+    }
 }
 
 unsafe extern "C" fn dispatch_device_control(
