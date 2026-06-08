@@ -1,12 +1,12 @@
 //! Tracks every volume currently attached to the driver (OS via handover, data
 //! via IOCTL).
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 
 use spin::Mutex;
-use vck_common::EncryptedOffsetStore;
+use vck_common::{EncryptedOffsetStore, SectorIo, VckResult};
 
-use crate::{offset::engine::EncryptionEngine, provider::IoConfig};
+use crate::{crypto::aes_xts::AesXtsCipher, offset::engine::EncryptionEngine, provider::IoConfig};
 
 pub struct VolumeAttachRegistry {
     // volume_path (NT device path) -> AttachedVolume
@@ -20,6 +20,12 @@ pub struct AttachedVolume {
     pub encryption: Mutex<EncryptionEngine>,
     pub offset_store: Arc<dyn EncryptedOffsetStore>,
     pub attach_source: AttachSource,
+    /// AES-XTS cipher for the background sweep (present on the high-level path).
+    pub cipher: Option<AesXtsCipher>,
+    /// Raw volume sector I/O used by the sweep to read plaintext / write
+    /// ciphertext. Currently the volume device itself; once a transparent filter
+    /// is attached this must be the lower device.
+    pub sweep_io: Arc<dyn SectorIo>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +56,11 @@ impl VolumeAttachRegistry {
     pub fn remove(&self, volume_path: &str) -> Option<Arc<AttachedVolume>> {
         self.entries.lock().remove(volume_path)
     }
+
+    /// Snapshot of all attached volumes (for the sweep worker to iterate).
+    pub fn all(&self) -> Vec<Arc<AttachedVolume>> {
+        self.entries.lock().values().cloned().collect()
+    }
 }
 
 impl AttachedVolume {
@@ -60,6 +71,22 @@ impl AttachedVolume {
                 *offset_sector
             }
         }
+    }
+
+    /// Run one batch of the encrypt/decrypt sweep. Returns `Ok(true)` if this
+    /// volume still has work pending, `Ok(false)` when idle (or not high-level).
+    pub fn sweep_step(&self, batch_sectors: u64) -> VckResult<bool> {
+        let cipher = match self.cipher.as_ref() {
+            Some(cipher) => cipher,
+            None => return Ok(false),
+        };
+        let mut engine = self.encryption.lock();
+        engine.progress_step(
+            self.sweep_io.as_ref(),
+            cipher,
+            self.offset_store.as_ref(),
+            batch_sectors,
+        )
     }
 }
 

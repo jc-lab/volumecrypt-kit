@@ -8,7 +8,10 @@ use crate::{types::EncryptedOffset, VckResult};
 /// - Kernel driver: backed by the lower volume device (`lib/driver`).
 ///
 /// All offsets are absolute LBAs on the volume.
-pub trait SectorIo {
+///
+/// `Send + Sync` so a `JvckMetadataStore<S>` / `Arc<dyn SectorIo>` can be shared
+/// with the background sweep thread.
+pub trait SectorIo: Send + Sync {
     fn sector_size(&self) -> u32;
     /// Total raw sector count of the volume (partition capacity).
     fn total_sectors(&self) -> u64;

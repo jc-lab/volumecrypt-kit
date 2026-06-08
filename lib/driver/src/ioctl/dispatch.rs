@@ -9,10 +9,11 @@ use spin::Mutex;
 use vck_common::{
     jvck::{JvckMetadataStore, JvckMetadataOptions},
     types::Guid,
-    EncryptedOffset, EncryptedOffsetStore, VckError, VckResult, VolumeId,
+    EncryptedOffset, EncryptedOffsetStore, SectorIo, VckError, VckResult, VolumeId,
 };
 
 use crate::{
+    crypto::aes_xts::AesXtsCipher,
     io::KernelVolumeIo,
     ioctl::codes::*,
     nt::win32_volume_path_to_nt,
@@ -181,6 +182,11 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         offset_store: offset_store.clone(),
     };
 
+    // Cipher + raw volume I/O for the background sweep. (No filter yet, so the
+    // sweep addresses the volume device directly.)
+    let cipher = AesXtsCipher::new(meta.fvek_key1, meta.fvek_key2)?;
+    let sweep_io: Arc<dyn SectorIo> = Arc::new(KernelVolumeIo::open_query(&volume_id)?);
+
     registry.insert(Arc::new(AttachedVolume {
         volume_path: req.volume_path.clone(),
         sector_size,
@@ -188,6 +194,8 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         encryption: Mutex::new(EncryptionEngine::new(offset_sector, encrypted_offset)),
         offset_store,
         attach_source: AttachSource::Ioctl,
+        cipher: Some(cipher),
+        sweep_io,
     }));
 
     encode_resp(&JvckVolumeAttachResp {

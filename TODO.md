@@ -95,9 +95,14 @@
   또는 `create`(최초, 앱이 보낸 FVEK/volume_id 사용) → `AttachedVolume` 등록 → 응답.
   detach: registry 제거. (프로토콜: `JvckVolumeAttachReq`에 `fvek_key1/fvek_key2/volume_id` 추가,
   Go `JvckVolumeAttachRequest` + `attach.go`가 `crypto/rand`로 생성·전달.)
-  **남은 것**: (1) 암호화 sweep worker — 현재 `start_encrypt`는 상태만 Encrypting으로 두고
-  `progress_step`을 구동하는 워커(system thread / `ExQueueWorkItem`)가 없어 실제 암호화는 아직 미진행.
-  (2) transparent 볼륨 필터(아래).
+- [x] **암호화 sweep worker** ([sweep.rs](lib/driver/src/sweep.rs)) 구현 완료 —
+  `PsCreateSystemThread` 기반 단일 시스템 스레드가 registry를 폴링하며 Encrypting/Decrypting 볼륨의
+  `AttachedVolume::sweep_step`(→`EncryptionEngine::progress_step`)을 배치(1MiB)로 구동, offset 영속화.
+  `START_ENCRYPT`/`DECRYPT`는 상태만 바꾸고 폴러가 자동으로 처리. DriverEntry에서 start, DriverUnload에서 stop(join).
+  `SectorIo`에 `Send+Sync` 슈퍼트레이트 추가(`Arc<dyn SectorIo>` 스레드 공유용).
+  주의: 아직 transparent 필터가 없어 sweep는 raw 볼륨을 직접 암호화하므로, 마운트된 FS와 충돌하지 않도록
+  암호화 전 볼륨 lock/dismount가 필요(앱 책임). 실제 활용은 (2) 필터 attach 후 가능.
+  **남은 것**: (2) transparent 볼륨 필터(아래).
 - [x] `lib/driver/src/device.rs::ControlDevice` — `create`(`IoCreateDevice` + `IoCreateSymbolicLink`,
   `DEVICE_NAME`/`SYMLINK_NAME`) / `destroy` 구현 완료. `DO_BUFFERED_IO` 설정 및 unload 시 삭제 경로 포함.
 - [ ] `lib/driver/src/handover.rs::read_handover::<P>()` — ACPI 테이블 영역 획득 후

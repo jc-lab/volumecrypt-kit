@@ -23,7 +23,7 @@ use vck_driver::{
     device::ControlDevice,
     ioctl::dispatch_ioctl,
     provider::{IoctlAuthContext, RequestorMode},
-    VolumeAttachRegistry,
+    SweepWorker, VolumeAttachRegistry,
 };
 
 #[global_allocator]
@@ -31,6 +31,7 @@ static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
 
 static CONTROL_DEVICE: Mutex<Option<ControlDevice>> = Mutex::new(None);
 static REGISTRY: Lazy<VolumeAttachRegistry> = Lazy::new(VolumeAttachRegistry::new);
+static SWEEP: Mutex<Option<SweepWorker>> = Mutex::new(None);
 static PROVIDER: VckVolumeProvider = VckVolumeProvider;
 
 const STATUS_SUCCESS: NTSTATUS = 0;
@@ -63,6 +64,18 @@ pub unsafe extern "system" fn DriverEntry(
         }
     }
 
+    // Start the background encrypt/decrypt sweep worker.
+    match SweepWorker::start(&REGISTRY) {
+        Ok(worker) => *SWEEP.lock() = Some(worker),
+        Err(err) => {
+            vck_driver::driver_println!("sample-driver: sweep worker start failed: {}", err);
+            if let Some(control_device) = CONTROL_DEVICE.lock().take() {
+                let _ = control_device.destroy();
+            }
+            return STATUS_UNSUCCESSFUL;
+        }
+    }
+
     driver.DriverUnload = Some(driver_unload);
     driver.MajorFunction[IRP_MJ_CREATE as usize] = Some(dispatch_create_close);
     driver.MajorFunction[IRP_MJ_CLOSE as usize] = Some(dispatch_create_close);
@@ -78,6 +91,10 @@ fn panic(info: &PanicInfo<'_>) -> ! {
 }
 
 unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
+    // Stop the sweep worker first so it no longer touches the registry.
+    if let Some(worker) = SWEEP.lock().take() {
+        worker.stop();
+    }
     if let Some(control_device) = CONTROL_DEVICE.lock().take() {
         if let Err(err) = control_device.destroy() {
             vck_driver::driver_println!("sample-driver: control device destroy failed: {}", err);

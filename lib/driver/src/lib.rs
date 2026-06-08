@@ -20,6 +20,7 @@ pub mod nt;
 pub mod offset;
 pub mod provider;
 pub mod registry;
+pub mod sweep;
 
 pub use offset::engine::EncryptionEngine;
 pub use provider::{
@@ -27,6 +28,7 @@ pub use provider::{
     RequestorMode, VolumeProvider,
 };
 pub use registry::{AttachSource, AttachedVolume, VolumeAttachRegistry};
+pub use sweep::SweepWorker;
 
 // Re-export common types so samples depend on a single crate surface.
 pub use vck_common::{
