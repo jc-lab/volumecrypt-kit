@@ -22,7 +22,7 @@ use wdk_sys::{
 };
 use vck_driver::{
     device::{ControlDevice, DeviceExtension, DEVICE_KIND_FILTER},
-    filter::{detach_filter, pass_through},
+    filter::{detach_filter, handle_filter_irp},
     ioctl::dispatch_ioctl,
     provider::{IoctlAuthContext, RequestorMode},
     SweepWorker, VolumeAttachRegistry,
@@ -172,9 +172,9 @@ unsafe extern "C" fn dispatch_any(device_object: PDEVICE_OBJECT, irp: PIRP) -> N
 
     let ext = DeviceExtension::of(device_object);
     if ext.kind == DEVICE_KIND_FILTER {
-        // Transparent pass-through for now; AES-XTS interception of READ/WRITE
-        // will be layered on here.
-        return pass_through(ext.lower_device, irp);
+        // Size-query rewrite (hide metadata) + read/write offset shift. AES-XTS
+        // in-flight crypto will be layered on inside the filter handler.
+        return handle_filter_irp(device_object, irp);
     }
 
     // Control device.

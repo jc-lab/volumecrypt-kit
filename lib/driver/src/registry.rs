@@ -90,6 +90,20 @@ impl AttachedVolume {
         }
     }
 
+    /// Number of sectors in the data (encryptable) region — i.e. the volume size
+    /// the OS should see, with the header/footer metadata regions excluded.
+    pub fn data_sectors(&self) -> u64 {
+        match &self.io_config {
+            IoConfig::Passthrough => 0,
+            IoConfig::AesXts {
+                encrypted_offset, ..
+            }
+            | IoConfig::Custom {
+                encrypted_offset, ..
+            } => encrypted_offset.total_sectors,
+        }
+    }
+
     /// Run one batch of the encrypt/decrypt sweep. Returns `Ok(true)` if this
     /// volume still has work pending, `Ok(false)` when idle (or not high-level).
     pub fn sweep_step(&self, batch_sectors: u64) -> VckResult<bool> {

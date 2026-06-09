@@ -75,6 +75,16 @@ steps:
         - "echo hello-before-attach> D:\\vck-pretest.txt"
       expect_exit_code: 0
 
+  # Raw volume length BEFORE attach (full partition size).
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe volume-info --volume \\\\.\\D:"
+      expect_exit_code: 0
+
   # Attach: app shrinks the volume tail, driver writes footer metadata + attaches
   # the (currently transparent) filter.
   - action: exec
@@ -84,6 +94,18 @@ steps:
       args:
         - "/c"
         - "C:\\Temp\\vck-app.exe data-volume attach --volume \\\\.\\D: --vmk AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8= --use-header 0 --use-footer 2 --metadata-size 131072"
+      expect_exit_code: 0
+
+  # Raw volume length AFTER attach: must be the data-region size (partition
+  # minus 2x 128 KiB footer = 262144 bytes smaller), proving the filter hides the
+  # metadata from the OS.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe volume-info --volume \\\\.\\D:"
       expect_exit_code: 0
 
   # The pre-existing file must still be readable through the filter.

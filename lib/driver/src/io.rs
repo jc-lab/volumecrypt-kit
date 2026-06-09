@@ -250,7 +250,7 @@ impl Drop for KernelVolumeIo {
     fn drop(&mut self) {
         if !self.handle.is_null() {
             unsafe {
-                ZwClose(self.handle);
+                let _ = ZwClose(self.handle);
             }
         }
     }
