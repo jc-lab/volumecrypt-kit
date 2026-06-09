@@ -26,12 +26,12 @@ use core::ptr::null_mut;
 
 use wdk_sys::{
     ntddk::{
-        ExAllocatePool2, ExFreePool, IoAllocateMdl, IoFreeMdl, IofCallDriver,
+        ExAllocatePool2, ExFreePool, IofCompleteRequest, IoAllocateMdl, IoFreeMdl, IofCallDriver,
         MmBuildMdlForNonPagedPool, MmMapLockedPagesSpecifyCache,
     },
-    IRP_MJ_DEVICE_CONTROL, IRP_MJ_READ, IRP_MJ_WRITE, NTSTATUS, PDEVICE_OBJECT,
-    PIO_STACK_LOCATION, PIRP, PMDL, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS,
-    SL_PENDING_RETURNED,
+    CCHAR, IO_NO_INCREMENT, IRP_MJ_DEVICE_CONTROL, IRP_MJ_READ, IRP_MJ_WRITE, NTSTATUS,
+    PDEVICE_OBJECT, PIO_STACK_LOCATION, PIRP, PMDL, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR,
+    SL_INVOKE_ON_SUCCESS, SL_PENDING_RETURNED,
 };
 
 use core::sync::atomic::Ordering;
@@ -51,6 +51,7 @@ const VCK_POOL_TAG: u32 = u32::from_le_bytes(*b"VCKI");
 
 const STATUS_CONTINUE_COMPLETION: NTSTATUS = 0;
 const STATUS_MORE_PROCESSING_REQUIRED: NTSTATUS = 0x0000_0103u32 as i32;
+const STATUS_ACCESS_DENIED: NTSTATUS = 0xC000_0022u32 as i32;
 
 // METHOD_BUFFERED size-query IOCTLs: byte offset of the 8-byte length field
 // within the (system-buffer) output structure.
@@ -359,6 +360,23 @@ unsafe extern "C" fn size_ioctl_completion(
 
 // --- Helpers -------------------------------------------------------------------
 
+/// Complete an IRP immediately with the given status (no further processing).
+unsafe fn block_irp(irp: PIRP, status: NTSTATUS) {
+    (*irp).IoStatus.__bindgen_anon_1.Status = status;
+    (*irp).IoStatus.Information = 0;
+    IofCompleteRequest(irp, IO_NO_INCREMENT as CCHAR);
+}
+
+/// Return true when `byte_offset` addresses a metadata sector (outside the
+/// data region). The filter must block UserMode access to these sectors and
+/// allow KernelMode (driver-internal) I/O to pass through.
+fn is_metadata_sector(volume: &AttachedVolume, byte_offset: u64, sector_size: u64) -> bool {
+    if sector_size == 0 { return false; }
+    let lba = byte_offset / sector_size;
+    // data_relative returns None for anything outside [offset_sector, offset_sector+data_sectors).
+    data_relative(volume, lba).is_none()
+}
+
 /// Borrow the `CryptoPipeline` for this volume, if one is present.
 fn pipeline_for(volume: &AttachedVolume) -> Option<CryptoPipeline<'_>> {
     let cipher = volume.cipher.as_ref()?;
@@ -396,10 +414,27 @@ pub unsafe fn handle_filter_irp(filter_do: PDEVICE_OBJECT, irp: PIRP) -> NTSTATU
     match major {
         IRP_MJ_READ => {
             shift_offset(volume, stack);
+            // Block UserMode access to the metadata region; allow KernelMode
+            // (driver-internal metadata I/O: offset_store, ATTACH reads, etc.).
+            if is_metadata_sector(volume, (*stack).Parameters.Read.ByteOffset.QuadPart as u64,
+                                   volume.sector_size as u64)
+                && (*irp).RequestorMode != 0 // not KernelMode
+            {
+                block_irp(irp, STATUS_ACCESS_DENIED);
+                return STATUS_ACCESS_DENIED;
+            }
             intercept_read(volume, lower, irp)
         }
         IRP_MJ_WRITE => {
             shift_offset(volume, stack);
+            // Block UserMode writes to the metadata region.
+            if is_metadata_sector(volume, (*stack).Parameters.Write.ByteOffset.QuadPart as u64,
+                                   volume.sector_size as u64)
+                && (*irp).RequestorMode != 0
+            {
+                block_irp(irp, STATUS_ACCESS_DENIED);
+                return STATUS_ACCESS_DENIED;
+            }
             intercept_write(volume, lower, irp)
         }
         IRP_MJ_DEVICE_CONTROL => {

@@ -17,6 +17,29 @@ import (
 // = (9<<16) | (32<<2) | 3 = 0x00090083.
 const fsctlAllowExtendedDasdIo = 0x00090083
 
+// HasJvckMetadata returns true if the volume's last sector already contains a
+// valid JVCK Metadata block (CRC check only, no VMK needed). length and
+// sectorSize must be queried beforehand via VolumeLengthAndSectorSize.
+func HasJvckMetadata(volumePath string, length uint64, sectorSize uint32) (bool, error) {
+	if sectorSize < MetadataBlockSize {
+		return false, fmt.Errorf("sector size %d smaller than %d", sectorSize, MetadataBlockSize)
+	}
+	handle, err := openVolumeHandle(volumePath, windows.GENERIC_READ)
+	if err != nil {
+		return false, err
+	}
+	defer windows.CloseHandle(handle)
+	if err := allowExtendedDasdIo(handle); err != nil {
+		return false, err
+	}
+	volumeSectors := length / uint64(sectorSize)
+	last := make([]byte, sectorSize)
+	if err := readSectorAt(handle, int64(volumeSectors-1)*int64(sectorSize), last); err != nil {
+		return false, fmt.Errorf("failed to probe footer metadata: %w", err)
+	}
+	return verifyMetadataCRC(last), nil
+}
+
 // EnsureJvckMetadata makes sure the volume carries JVCK metadata, writing it on
 // first-time encryption.
 //

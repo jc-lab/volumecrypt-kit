@@ -138,129 +138,12 @@ fn handle_pause(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<Ioct
     encode_resp(&EmptyResponse {})
 }
 
-/// Shared helper: lock → dismount → re-lock-if-needed → attach filter below FSD
-/// → query geometry → unlock.
-///
-/// Returns `(filter_do, lower_do, sector_size, total_sectors)`.
-/// CRITICAL: must be called on an EXPANDED kernel stack (32 KiB) because
-/// `IoBuildSynchronousFsdRequest` + `IofCallDriver` in the geometry path
-/// consumes significant stack space.
-fn do_filter_attach_below_fsd(
-    driver: *mut wdk_sys::DRIVER_OBJECT,
-    nt_path: &str,
-    volume_win32_path: &str,
-) -> VckResult<(wdk_sys::PDEVICE_OBJECT, wdk_sys::PDEVICE_OBJECT, u32, u64)> {
-    use crate::io::{open_volume_handle_raw, send_fsctl};
-    use wdk_sys::ntddk::{
-        IoGetRelatedDeviceObject, ObReferenceObjectByHandle, ObfDereferenceObject, ZwClose,
-        ZwDeviceIoControlFile,
-    };
-    use wdk_sys::{PDEVICE_OBJECT as PDO, PFILE_OBJECT};
-    const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
-    const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
-    const FSCTL_UNLOCK_VOLUME: u32 = 0x0009_001c;
-    const IOCTL_DISK_GET_DRIVE_GEOMETRY: u32 = 0x0007_0000;
-    const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405C;
-
-    // Open volume handle (for FSCTLs + geometry + filter attachment target).
-    let vol_handle = open_volume_handle_raw(nt_path);
-    crate::driver_println!(
-        "filter_attach_below_fsd: path={} handle_open={}",
-        nt_path, vol_handle.is_some()
-    );
-
-    // 1. Optimistic lock.
-    let mut held_lock = false;
-    if let Some(h) = vol_handle {
-        let st = send_fsctl(h, FSCTL_LOCK_VOLUME);
-        crate::driver_println!("fsd_below: LOCK(1)=0x{:08x}", st);
-        held_lock = crate::nt::nt_success(st);
-    }
-
-    // 2. Dismount → FSD releases the stack.
-    if let Some(h) = vol_handle {
-        let st = send_fsctl(h, FSCTL_DISMOUNT_VOLUME);
-        crate::driver_println!("fsd_below: DISMOUNT=0x{:08x}", st);
-    }
-
-    // 3. Re-lock if step 1 failed (no race between dismount and attach).
-    if !held_lock {
-        if let Some(h) = vol_handle {
-            let st = send_fsctl(h, FSCTL_LOCK_VOLUME);
-            crate::driver_println!("fsd_below: LOCK(2)=0x{:08x}", st);
-            held_lock = crate::nt::nt_success(st);
-        }
-    }
-    crate::driver_println!("fsd_below: lock_held={}", held_lock);
-
-    // 4. Obtain target device object from the open file handle (works while locked
-    //    and after dismount; IoGetDeviceObjectPointer would need a path open which
-    //    fails when no FSD is mounted).
-    let target_do: PDO = if let Some(h) = vol_handle {
-        let mut fobj: PFILE_OBJECT = null_mut();
-        let st = unsafe {
-            ObReferenceObjectByHandle(h, 0, null_mut(), 0,
-                (&mut fobj as *mut PFILE_OBJECT).cast(), null_mut())
-        };
-        crate::driver_println!("fsd_below: ObRefByHandle=0x{:08x}", st);
-        if crate::nt::nt_success(st) && !fobj.is_null() {
-            let do_ptr = unsafe { IoGetRelatedDeviceObject(fobj) };
-            unsafe { ObfDereferenceObject(fobj.cast()) };
-            do_ptr
-        } else { null_mut() }
-    } else { null_mut() };
-    crate::driver_println!("fsd_below: target_do={:p}", target_do);
-
-    // Query geometry while the lock is held (ZwDeviceIoControlFile works here).
-    let (sector_size, total_sectors): (u32, u64) = vol_handle.map_or((512, 0), |h| {
-        let mut iosb: wdk_sys::IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
-        let mut bps = 512u32;
-        let mut total = 0u64;
-        let mut geom = [0u8; 32];
-        if crate::nt::nt_success(unsafe {
-            ZwDeviceIoControlFile(h, null_mut(), None, null_mut(), &mut iosb,
-                IOCTL_DISK_GET_DRIVE_GEOMETRY, null_mut(), 0, geom.as_mut_ptr().cast(), 32)
-        }) {
-            bps = u32::from_le_bytes(geom[20..24].try_into().unwrap_or([0;4]));
-            if bps == 0 { bps = 512; }
-        }
-        let mut len_buf = [0u8; 8];
-        if crate::nt::nt_success(unsafe {
-            ZwDeviceIoControlFile(h, null_mut(), None, null_mut(), &mut iosb,
-                IOCTL_DISK_GET_LENGTH_INFO, null_mut(), 0, len_buf.as_mut_ptr().cast(), 8)
-        }) {
-            total = u64::from_le_bytes(len_buf) / bps as u64;
-        }
-        crate::driver_println!("fsd_below: geom bps={} total={}", bps, total);
-        (bps, total)
-    });
-
-    // 5. Attach filter while lock is held → no race re-mount.
-    let (fdo, lower_do) = if !target_do.is_null() {
-        crate::filter::attach_filter_to_raw_device(driver, target_do)
-    } else {
-        // Fallback: use Win32 path (may be above NTFS if FSD re-mounted).
-        let win32_nt = win32_volume_path_to_nt(volume_win32_path);
-        crate::filter::attach_filter_unbound(driver, &win32_nt)
-    }.map_err(|err| {
-        crate::driver_println!("fsd_below: attach failed: {}", err);
-        if held_lock { if let Some(h) = vol_handle { send_fsctl(h, FSCTL_UNLOCK_VOLUME); } }
-        if let Some(h) = vol_handle { unsafe { let _ = ZwClose(h); } }
-        err
-    })?;
-    crate::driver_println!("fsd_below: filter_do={:p} lower_do={:p}", fdo, lower_do);
-
-    // 6. Unlock → FSD re-mounts ABOVE our filter.
-    if held_lock {
-        if let Some(h) = vol_handle {
-            let st = send_fsctl(h, FSCTL_UNLOCK_VOLUME);
-            crate::driver_println!("fsd_below: UNLOCK=0x{:08x}", st);
-        }
-    }
-    if let Some(h) = vol_handle { unsafe { let _ = ZwClose(h); } }
-
-    Ok((fdo, lower_do, sector_size, total_sectors))
-}
+// FSCTL codes used in PREPARE.
+const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
+const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
+const FSCTL_UNLOCK_VOLUME: u32 = 0x0009_001c;
+const IOCTL_DISK_GET_DRIVE_GEOMETRY_PREPARE: u32 = 0x0007_0000;
+const IOCTL_DISK_GET_LENGTH_INFO_PREPARE: u32 = 0x0007_405C;
 
 /// Dummy `EncryptedOffsetStore` used by provisional (pre-metadata) volumes.
 struct DummyOffsetStore {
@@ -288,22 +171,31 @@ impl SectorIo for DummySectorIo {
 
 /// IOCTL_JVCK_PREPARE — Phase 1.
 ///
-/// Attaches the volume filter BELOW the FSD (lock→dismount→attach→unlock) and
-/// activates size hiding immediately, so NTFS remounts seeing only the data
-/// region. NTFS will NOT write its VBR backup into the footer metadata region.
-///
-/// After this returns, the app writes JVCK metadata via EnsureJvckMetadata
-/// (which uses FSCTL_ALLOW_EXTENDED_DASD_IO to reach the protected tail), then
-/// calls IOCTL_JVCK_ATTACH to read the metadata and complete encryption setup.
+/// Complete sequence (all while holding the volume lock):
+///   1. lock → dismount → re-lock (prevents NTFS from seeing or writing to the
+///      metadata region)
+///   2. Write the provided JVCK metadata_block to every replica LBA via
+///      vol_handle (ZwWriteFile, no FSD interference while locked/dismounted)
+///   3. Attach filter below FSD
+///   4. Bind provisional volume → size hiding active (NTFS sees only data region)
+///   5. unlock → FSD re-mounts above filter, never reaching the metadata region
 fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
+    use crate::io::{open_volume_handle_raw, send_fsctl};
+    use wdk_sys::ntddk::{
+        IoGetRelatedDeviceObject, ObReferenceObjectByHandle, ObfDereferenceObject, ZwClose,
+        ZwDeviceIoControlFile,
+    };
+    use wdk_sys::{PDEVICE_OBJECT as PDO, PFILE_OBJECT};
+
     crate::driver_println!(
         "jvck_prepare: enter stack={}",
         crate::debug::remaining_stack()
     );
     let req: JvckVolumePrepareReq = decode_req(input)?;
     crate::driver_println!(
-        "jvck_prepare: path={} use_h={} use_f={} md_size={}",
-        req.volume_path, req.use_header, req.use_footer, req.metadata_size
+        "jvck_prepare: path={} use_h={} use_f={} md_size={} block_len={}",
+        req.volume_path, req.use_header, req.use_footer, req.metadata_size,
+        req.metadata_block.len()
     );
 
     if registry.get(&req.volume_path).is_some() {
@@ -321,29 +213,113 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         win32_volume_path_to_nt(&req.volume_path)
     };
 
-    let (filter_do, _lower_do, sector_size, total_sectors) =
-        do_filter_attach_below_fsd(driver, &nt_path, &req.volume_path)?;
+    // Open vol_handle early — used for FSCTLs, geometry, metadata write.
+    let vol_handle = open_volume_handle_raw(&nt_path);
+    crate::driver_println!("jvck_prepare: vol_handle_open={}", vol_handle.is_some());
+
+    // ── Step 1: lock → dismount → re-lock ──────────────────────────────────
+    let mut held_lock = false;
+    if let Some(h) = vol_handle {
+        let st = send_fsctl(h, FSCTL_LOCK_VOLUME);
+        crate::driver_println!("jvck_prepare: LOCK(1)=0x{:08x}", st);
+        held_lock = crate::nt::nt_success(st);
+    }
+    if let Some(h) = vol_handle {
+        let st = send_fsctl(h, FSCTL_DISMOUNT_VOLUME);
+        crate::driver_println!("jvck_prepare: DISMOUNT=0x{:08x}", st);
+    }
+    if !held_lock {
+        if let Some(h) = vol_handle {
+            let st = send_fsctl(h, FSCTL_LOCK_VOLUME);
+            crate::driver_println!("jvck_prepare: LOCK(2)=0x{:08x}", st);
+            held_lock = crate::nt::nt_success(st);
+        }
+    }
+    crate::driver_println!("jvck_prepare: lock_held={}", held_lock);
+
+    // Query geometry while locked.
+    let (sector_size, total_sectors): (u32, u64) = vol_handle.map_or((512, 0), |h| {
+        let mut iosb: wdk_sys::IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
+        let mut bps = 512u32;
+        let mut total = 0u64;
+        let mut geom = [0u8; 32];
+        if crate::nt::nt_success(unsafe {
+            ZwDeviceIoControlFile(h, null_mut(), None, null_mut(), &mut iosb,
+                IOCTL_DISK_GET_DRIVE_GEOMETRY_PREPARE, null_mut(), 0,
+                geom.as_mut_ptr().cast(), 32)
+        }) {
+            bps = u32::from_le_bytes(geom[20..24].try_into().unwrap_or([0;4]));
+            if bps == 0 { bps = 512; }
+        }
+        let mut len_buf = [0u8; 8];
+        if crate::nt::nt_success(unsafe {
+            ZwDeviceIoControlFile(h, null_mut(), None, null_mut(), &mut iosb,
+                IOCTL_DISK_GET_LENGTH_INFO_PREPARE, null_mut(), 0,
+                len_buf.as_mut_ptr().cast(), 8)
+        }) {
+            total = u64::from_le_bytes(len_buf) / bps as u64;
+        }
+        crate::driver_println!("jvck_prepare: geom bps={} total={}", bps, total);
+        (bps, total)
+    });
 
     if sector_size == 0 || total_sectors == 0 {
-        crate::filter::detach_filter(filter_do);
+        if held_lock { if let Some(h) = vol_handle { send_fsctl(h, FSCTL_UNLOCK_VOLUME); } }
+        if let Some(h) = vol_handle { unsafe { let _ = ZwClose(h); } }
         return Err(VckError::Io("could not query volume geometry".into()));
     }
 
-    // Compute data region geometry from the request (same formula as EnsureJvckMetadata).
+    // Compute replica geometry.
     let rs = (req.metadata_size / sector_size) as u64;
     let footer_sectors = req.use_footer as u64 * rs;
     let header_sectors = req.use_header as u64 * rs;
     let data_sectors = total_sectors.saturating_sub(header_sectors + footer_sectors);
     let offset_sector = header_sectors;
-
     crate::driver_println!(
-        "jvck_prepare: data_sectors={} offset_sector={} rs={}",
-        data_sectors, offset_sector, rs
+        "jvck_prepare: data_sectors={} offset_sector={} rs={}", data_sectors, offset_sector, rs
     );
 
-    // Create a PROVISIONAL AttachedVolume with correct geometry but no FVEK.
-    // The filter uses data_sectors for size-query interception, hiding the footer
-    // from NTFS. cipher=None means no crypto and sweep_step is a no-op.
+    // Compute replica LBAs for metadata write (done AFTER unlock below).
+    let replica_lbas: alloc::vec::Vec<u64> = {
+        let mut v = alloc::vec::Vec::new();
+        for i in 0..req.use_header as u64 {
+            v.push(i * rs);
+        }
+        let footer_start = total_sectors - (req.use_footer as u64 * rs);
+        for j in 0..req.use_footer as u64 {
+            v.push(footer_start + j * rs + rs - 1);
+        }
+        v
+    };
+
+    // ── Step 3: attach filter (while still locked — prevents race re-mount) ─
+    let target_do: PDO = if let Some(h) = vol_handle {
+        let mut fobj: PFILE_OBJECT = null_mut();
+        let st = unsafe {
+            ObReferenceObjectByHandle(h, 0, null_mut(), 0,
+                (&mut fobj as *mut PFILE_OBJECT).cast(), null_mut())
+        };
+        if crate::nt::nt_success(st) && !fobj.is_null() {
+            let do_ptr = unsafe { IoGetRelatedDeviceObject(fobj) };
+            unsafe { ObfDereferenceObject(fobj.cast()) };
+            do_ptr
+        } else { null_mut() }
+    } else { null_mut() };
+    crate::driver_println!("jvck_prepare: target_do={:p}", target_do);
+
+    let (filter_do, _lower_do) = if !target_do.is_null() {
+        crate::filter::attach_filter_to_raw_device(driver, target_do)
+    } else {
+        let win32_nt = win32_volume_path_to_nt(&req.volume_path);
+        crate::filter::attach_filter_unbound(driver, &win32_nt)
+    }.map_err(|err| {
+        crate::driver_println!("jvck_prepare: attach failed: {}", err);
+        if held_lock { if let Some(h) = vol_handle { send_fsctl(h, FSCTL_UNLOCK_VOLUME); } }
+        if let Some(h) = vol_handle { unsafe { let _ = ZwClose(h); } }
+        err
+    })?;
+
+    // ── Step 4: bind provisional volume (size hiding now active) ────────────
     let volume = Arc::new(AttachedVolume {
         volume_path: req.volume_path.clone(),
         sector_size,
@@ -352,8 +328,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
             key2: [0u8; 32],
             offset_sector,
             encrypted_offset: vck_common::types::EncryptedOffset {
-                sector: 0,
-                total_sectors: data_sectors,
+                sector: 0, total_sectors: data_sectors,
             },
             offset_store: Arc::new(DummyOffsetStore { total_sectors: data_sectors }),
         },
@@ -364,19 +339,71 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         offset_store: Arc::new(DummyOffsetStore { total_sectors: data_sectors }),
         attach_source: AttachSource::Ioctl,
         filter_device: AtomicPtr::new(filter_do),
-        cipher: None, // no FVEK yet
+        cipher: None,
         sweep_io: Mutex::new(Arc::new(DummySectorIo { sector_size, total_sectors: data_sectors })),
         encrypted_boundary: AtomicU64::new(0),
     });
     registry.insert(volume.clone());
     unsafe { crate::filter::filter_bind_volume(filter_do, volume.clone()) };
-    crate::driver_println!("jvck_prepare: provisional volume registered, size hiding active");
+    crate::driver_println!("jvck_prepare: provisional volume bound, size hiding active");
 
-    encode_resp(&JvckVolumePrepareResp {
-        offset_sector,
-        data_sectors,
-        sector_size,
-    })
+    // ── Step 5: unlock → FSD re-mounts above our filter ─────────────────────
+    if held_lock {
+        if let Some(h) = vol_handle {
+            let st = send_fsctl(h, FSCTL_UNLOCK_VOLUME);
+            crate::driver_println!("jvck_prepare: UNLOCK=0x{:08x}", st);
+        }
+    }
+    if let Some(h) = vol_handle { unsafe { let _ = ZwClose(h); } }
+
+    // ── Step 6: write metadata_block to replica LBAs (AFTER unlock) ─────────
+    // The filter is now bound with size hiding active. NTFS has re-mounted and
+    // sees only the data region (20971008 sectors). Replica LBAs (e.g. 20971519)
+    // are OUTSIDE NTFS's view, so NTFS has never cached them. ZwWriteFile with
+    // FILE_NO_INTERMEDIATE_BUFFERING (set in KernelVolumeIo::open) goes through
+    // NTFS extended-DASD → filter (KernelMode pass-through) → raw device → disk.
+    if !req.metadata_block.is_empty() {
+        use vck_common::jvck::metadata::METADATA_BLOCK_SIZE;
+        if req.metadata_block.len() < METADATA_BLOCK_SIZE {
+            registry.remove(&req.volume_path);
+            crate::filter::detach_filter(filter_do);
+            return Err(VckError::InvalidData("metadata_block must be at least 512 bytes"));
+        }
+        let write_vol_id = VolumeId {
+            partition_guid: Guid::nil(),
+            device_path: nt_path.clone(),
+        };
+        match KernelVolumeIo::open(&write_vol_id, sector_size, total_sectors) {
+            Ok(write_io) => {
+                let mut sector_buf = alloc::vec![0u8; sector_size as usize];
+                let copy_len = METADATA_BLOCK_SIZE.min(sector_size as usize);
+                sector_buf[..copy_len].copy_from_slice(&req.metadata_block[..copy_len]);
+                for lba in &replica_lbas {
+                    match write_io.write_sectors(*lba, &sector_buf) {
+                        Ok(()) => crate::driver_println!(
+                            "jvck_prepare: wrote metadata lba={}", lba
+                        ),
+                        Err(err) => {
+                            crate::driver_println!(
+                                "jvck_prepare: write failed lba={}: {}", lba, err
+                            );
+                            registry.remove(&req.volume_path);
+                            crate::filter::detach_filter(filter_do);
+                            return Err(err);
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                crate::driver_println!("jvck_prepare: write_io open failed: {}", err);
+                registry.remove(&req.volume_path);
+                crate::filter::detach_filter(filter_do);
+                return Err(err);
+            }
+        }
+    }
+
+    encode_resp(&JvckVolumePrepareResp { offset_sector, data_sectors, sector_size })
 }
 
 /// IOCTL_JVCK_ATTACH — Phase 2.

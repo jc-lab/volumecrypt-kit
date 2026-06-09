@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 
@@ -42,35 +43,71 @@ var attachCmd = &cobra.Command{
 		}
 		defer client.Close()
 
-		// Phase 1: driver attaches filter + activates size hiding.
-		// NTFS remounts seeing only the data region → VBR backup goes to
-		// the last visible sector (inside NTFS extent), NOT our footer.
-		fmt.Println("Phase 1: attaching filter and hiding metadata region...")
+		// Phase 1: build JVCK metadata block (app is responsible for key generation
+		// and crypto; driver just writes the provided binary to the footer).
+		// For re-attach, send an empty MetadataBlock so the driver skips writing.
+		fmt.Println("Phase 1: building JVCK metadata block...")
+		var metadataBlock []byte
+		{
+			// Check if metadata already exists before generating a new one.
+			length, sectorSize, gErr := vck.VolumeLengthAndSectorSize(volumeFlag)
+			if gErr != nil {
+				return fmt.Errorf("failed to query volume geometry: %w", gErr)
+			}
+			alreadyExists, checkErr := vck.HasJvckMetadata(volumeFlag, uint64(length), sectorSize)
+			if checkErr != nil {
+				return fmt.Errorf("failed to probe existing metadata: %w", checkErr)
+			}
+			if alreadyExists {
+				fmt.Println("Existing JVCK metadata found; reusing it (skip write).")
+				// Empty block → driver skips write.
+			} else {
+				fmt.Println("No metadata found; generating fresh FVEK + volume ID.")
+				var fvek1, fvek2 [32]byte
+				var volumeID [16]byte
+				if _, err := rand.Read(fvek1[:]); err != nil {
+					return fmt.Errorf("failed to generate FVEK: %w", err)
+				}
+				if _, err := rand.Read(fvek2[:]); err != nil {
+					return fmt.Errorf("failed to generate FVEK: %w", err)
+				}
+				if _, err := rand.Read(volumeID[:]); err != nil {
+					return fmt.Errorf("failed to generate volume ID: %w", err)
+				}
+				header := &vck.JvckHeader{
+					MetadataVersion:    1,
+					MetadataSize:       metadataSizeFlag,
+					SectorSize:         uint32(sectorSize),
+					HeaderReplicaCount: uint8(useHeaderFlag),
+					FooterReplicaCount: uint8(useFooterFlag),
+					VolumeID:           volumeID,
+				}
+				block, encErr := header.EncodeMetadataBlock(fvek1, fvek2, 0, vmk)
+				if encErr != nil {
+					return fmt.Errorf("failed to encode JVCK metadata: %w", encErr)
+				}
+				metadataBlock = block[:]
+			}
+		}
+
+		// Phase 2: driver attaches filter below FSD, writes metadata (while locked),
+		// activates size hiding, then unlocks → NTFS remounts above filter with
+		// only the data region visible. NTFS VBR backup goes to the last *visible*
+		// sector (inside NTFS extent), never into the metadata region.
+		fmt.Println("Phase 2: attaching filter + hiding metadata region...")
 		prepResp, err := client.Prepare(&vck.JvckVolumePrepareRequest{
-			VolumePath:   volumeFlag,
-			NTDevicePath: ntDevicePath,
-			UseHeader:    useHeaderFlag,
-			UseFooter:    useFooterFlag,
-			MetadataSize: metadataSizeFlag,
+			VolumePath:    volumeFlag,
+			NTDevicePath:  ntDevicePath,
+			UseHeader:     useHeaderFlag,
+			UseFooter:     useFooterFlag,
+			MetadataSize:  metadataSizeFlag,
+			MetadataBlock: metadataBlock,
 		})
 		if err != nil {
 			return fmt.Errorf("prepare failed: %w", err)
 		}
-		fmt.Printf("Phase 1 done. offset=%d data=%d sector_size=%d\n",
+		fmt.Printf("Phase 2 done. offset=%d data=%d sector_size=%d\n",
 			prepResp.OffsetSector, prepResp.DataSectors, prepResp.SectorSize)
-
-		// Phase 2: write JVCK footer metadata. The metadata region is now hidden
-		// from NTFS so NTFS cannot overwrite it with VBR backup data.
-		fmt.Println("Phase 2: writing JVCK footer metadata...")
-		created, err := vck.EnsureJvckMetadata(volumeFlag, vmk, useHeaderFlag, useFooterFlag, metadataSizeFlag)
-		if err != nil {
-			return fmt.Errorf("failed to write JVCK metadata: %w", err)
-		}
-		if created {
-			fmt.Println("Wrote fresh JVCK metadata (first-time encryption).")
-		} else {
-			fmt.Println("Existing JVCK metadata found; reusing it.")
-		}
 
 		// Phase 3: driver reads the metadata and completes encryption setup.
 		fmt.Println("Phase 3: completing attach (reading metadata + deriving keys)...")

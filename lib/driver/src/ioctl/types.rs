@@ -30,6 +30,12 @@ pub struct JvckVolumePrepareReq {
     pub use_footer: u32,
     #[serde(default)]
     pub metadata_size: u32,
+    /// Pre-encoded JVCK Metadata block (512 bytes). The driver writes this to
+    /// every replica LBA while the volume lock is held (before unlock), so NTFS
+    /// can never overwrite the metadata region on re-mount.
+    /// Empty means skip writing (re-attach to an already-prepared volume).
+    #[serde(default, with = "serde_bytes")]
+    pub metadata_block: Vec<u8>,
 }
 
 /// IOCTL_JVCK_PREPARE response.
