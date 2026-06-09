@@ -1,22 +1,12 @@
 package cmd
 
 import (
-	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 
 	vck "github.com/jc-lab/volumecrypt-kit/sdk"
 	"github.com/spf13/cobra"
 )
-
-// randomBytes returns n cryptographically-random bytes.
-func randomBytes(n int) ([]byte, error) {
-	buf := make([]byte, n)
-	if _, err := rand.Read(buf); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
 
 var attachCmd = &cobra.Command{
 	Use:   "attach",
@@ -28,26 +18,10 @@ var attachCmd = &cobra.Command{
 			return fmt.Errorf("invalid base64 VMK: %w", err)
 		}
 
-		// Generate fresh FVEK + volume id for first-time encryption. The driver
-		// ignores these when the volume already has JVCK metadata.
-		fvek1, err := randomBytes(32)
-		if err != nil {
-			return fmt.Errorf("failed to generate FVEK: %w", err)
-		}
-		fvek2, err := randomBytes(32)
-		if err != nil {
-			return fmt.Errorf("failed to generate FVEK: %w", err)
-		}
-		volumeID, err := randomBytes(16)
-		if err != nil {
-			return fmt.Errorf("failed to generate volume id: %w", err)
-		}
-
 		// Reserve space at the volume tail for the footer metadata replicas so
-		// the filesystem no longer occupies it; the driver then writes the JVCK
-		// metadata into that tail. Existing data volumes cannot use a header, so
-		// only the footer region is reserved. ShrinkVolumeTail targets an
-		// absolute size, so it is a no-op on re-attach.
+		// the filesystem no longer occupies it. Existing data volumes cannot use
+		// a header, so only the footer region is reserved. ShrinkVolumeTail
+		// targets an absolute size, so it is a no-op on re-attach.
 		reserved := uint64(useFooterFlag) * uint64(metadataSizeFlag)
 		if reserved == 0 {
 			return fmt.Errorf("--use-footer and --metadata-size must be greater than zero")
@@ -55,6 +29,19 @@ var attachCmd = &cobra.Command{
 		fmt.Printf("Reserving %d bytes at the volume tail for footer metadata...\n", reserved)
 		if err := vck.ShrinkVolumeTail(volumeFlag, reserved); err != nil {
 			return fmt.Errorf("failed to reserve volume tail: %w", err)
+		}
+
+		// First-time encryption: generate the FVEK + volume id and write the JVCK
+		// footer metadata into the reserved tail (over an extended-DASD handle).
+		// A no-op when the volume already carries metadata (re-attach).
+		created, err := vck.EnsureJvckMetadata(volumeFlag, vmk, useHeaderFlag, useFooterFlag, metadataSizeFlag)
+		if err != nil {
+			return fmt.Errorf("failed to write JVCK metadata: %w", err)
+		}
+		if created {
+			fmt.Println("Wrote fresh JVCK metadata (first-time encryption).")
+		} else {
+			fmt.Println("Existing JVCK metadata found; reusing it.")
 		}
 
 		client, err := vck.Open()
@@ -69,9 +56,6 @@ var attachCmd = &cobra.Command{
 			UseHeader:    useHeaderFlag,
 			UseFooter:    useFooterFlag,
 			MetadataSize: metadataSizeFlag,
-			Fvek1:        fvek1,
-			Fvek2:        fvek2,
-			VolumeID:     volumeID,
 		})
 		if err != nil {
 			return err

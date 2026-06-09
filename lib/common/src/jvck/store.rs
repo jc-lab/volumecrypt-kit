@@ -14,8 +14,13 @@
 
 use alloc::vec::Vec;
 
+use zeroize::Zeroizing;
+
 use crate::{
-    jvck::{metadata::JvckMetadata, metadata::METADATA_BLOCK_SIZE, options::JvckMetadataOptions},
+    jvck::{
+        metadata::{self, JvckHeader, JvckSecrets, METADATA_BLOCK_SIZE},
+        options::JvckMetadataOptions,
+    },
     store::{EncryptedOffsetStore, SectorIo},
     types::EncryptedOffset,
     VckError, VckResult,
@@ -34,15 +39,24 @@ pub struct Geometry {
 pub struct JvckMetadataStore<S: SectorIo> {
     io: S,
     options: JvckMetadataOptions,
-    vmk: Vec<u8>,
+    vmk: Zeroizing<Vec<u8>>,
     geometry: Geometry,
     volume_sectors: u64,
-    /// Immutable template (keys, volume id, counts). Only `encrypted_offset`
-    /// changes at runtime, so `store()` clones this and overrides that field.
-    template: JvckMetadata,
+    /// Immutable plaintext template (counts, sizes, volume id). Re-encoded with
+    /// `secrets` + the live `encrypted_offset` on every metadata write.
+    header: JvckHeader,
+    /// FVEK material, kept (zeroize-on-drop) so `store()` can re-encode the
+    /// EncryptedMetadata blob when `encrypted_offset` advances.
+    secrets: JvckSecrets,
 }
 
 /// Sectors-per-replica for the given layout.
+///
+/// The 512-byte Metadata block always occupies exactly one sector, and the
+/// vendor-specific area is `floor((metadata_size - sector_size) / sector_size)`
+/// sectors. The total is therefore `floor(metadata_size / sector_size)`: when
+/// `metadata_size` is not a multiple of `sector_size` the remainder is dropped
+/// so a replica region never exceeds `metadata_size`.
 fn replica_sectors(metadata_size: u32, sector_size: u32) -> u64 {
     (metadata_size / sector_size) as u64
 }
@@ -76,12 +90,16 @@ fn compute_geometry(
     if (sector_size as usize) < METADATA_BLOCK_SIZE {
         return Err(VckError::Unsupported("sector size smaller than 512"));
     }
-    if options.metadata_size % sector_size != 0 {
+    // `metadata_size` need not be a multiple of `sector_size`: the replica region
+    // is floored to whole sectors (`floor(metadata_size / sector_size)`), so it
+    // never exceeds `metadata_size`. It must still hold at least the one Metadata
+    // sector.
+    let rs = replica_sectors(options.metadata_size, sector_size);
+    if rs == 0 {
         return Err(VckError::ValidationFailed(
-            "metadata_size must be a multiple of sector_size",
+            "metadata_size smaller than one sector",
         ));
     }
-    let rs = replica_sectors(options.metadata_size, sector_size);
     let consumed = (options.use_header + options.use_footer) as u64 * rs;
     if consumed >= volume_sectors {
         return Err(VckError::ValidationFailed(
@@ -120,77 +138,60 @@ fn write_block<S: SectorIo>(
     io.write_sectors(lba, &sector)
 }
 
-fn read_metadata_at<S: SectorIo>(
-    io: &S,
-    sector_size: u32,
-    lba: u64,
-    vmk: &[u8],
-) -> VckResult<JvckMetadata> {
-    let block = read_block(io, sector_size, lba)?;
-    JvckMetadata::parse(&block, vmk)
-}
-
-/// Read the authoritative metadata to learn the layout (metadata_size, header /
-/// footer replica counts) WITHOUT knowing it in advance.
-///
-/// The volume's very last sector is always a footer Metadata block: the footer
-/// region sits at the end of the volume and, within a footer replica, the
-/// Metadata block is the last sector (`[vendor][Metadata]`). For header-only
-/// layouts (no footer) we fall back to sector 0 (`[Metadata][vendor]`).
-fn bootstrap<S: SectorIo>(
-    io: &S,
-    sector_size: u32,
-    volume_sectors: u64,
-    vmk: &[u8],
-) -> VckResult<JvckMetadata> {
-    if volume_sectors == 0 {
-        return Err(VckError::NotFound("empty volume"));
-    }
-    // A `JVCK` signature + valid Header CRC32 is checkable WITHOUT the VMK, so we
-    // can tell "blank volume" (-> NotFound, caller may create) apart from
-    // "metadata present but wrong VMK / corrupt" (-> propagate the auth error,
-    // so the caller never overwrites a real volume).
-    for lba in [volume_sectors - 1, 0] {
-        let block = read_block(io, sector_size, lba)?;
-        if JvckMetadata::verify_crc(&block).is_ok() {
-            return JvckMetadata::parse(&block, vmk);
-        }
-    }
-    Err(VckError::NotFound("no JVCK metadata present"))
-}
-
 impl<S: SectorIo> JvckMetadataStore<S> {
-    /// Open an existing JVCK volume: locate a valid replica (last sector first,
-    /// then first sector), authenticate with `vmk`, and compute geometry.
+    /// Open an existing JVCK volume.
+    ///
+    /// Locates a CRC-valid replica (last sector first — always a footer Metadata
+    /// block — then sector 0 for header-only layouts), parses its plaintext
+    /// header for the layout, and decrypts the EncryptedMetadata blob ONCE with
+    /// `vmk` to authenticate and recover the FVEK. A CRC-valid block that fails
+    /// to authenticate propagates the auth error (so a wrong VMK never falls
+    /// through to "blank volume" and overwrites a real one); a volume with no
+    /// JVCK signature anywhere returns `NotFound`.
     pub fn open(io: S, vmk: &[u8]) -> VckResult<Self> {
         let sector_size = io.sector_size();
         if (sector_size as usize) < METADATA_BLOCK_SIZE {
             return Err(VckError::Unsupported("sector size smaller than 512"));
         }
         let volume_sectors = io.total_sectors();
+        if volume_sectors == 0 {
+            return Err(VckError::NotFound("empty volume"));
+        }
 
-        // The layout (metadata_size, replica counts) is read from the volume
-        // itself — always available in the last sector (footer Metadata).
-        let template = bootstrap(&io, sector_size, volume_sectors, vmk)?;
+        for lba in [volume_sectors - 1, 0] {
+            let block = read_block(&io, sector_size, lba)?;
+            if metadata::verify_crc(&block).is_err() {
+                continue;
+            }
+            // Layout is plaintext; the VMK only gates the encrypted FVEK blob.
+            let header = JvckHeader::parse(&block)?;
+            let (_offset, secrets) = metadata::decrypt_payload(&block, vmk)?;
 
-        let options = JvckMetadataOptions {
-            use_header: template.header_replica_count as u32,
-            use_footer: template.footer_replica_count as u32,
-            metadata_size: template.metadata_size,
-        };
-        let geometry = compute_geometry(sector_size, volume_sectors, &options)?;
-        Ok(Self {
-            io,
-            options,
-            vmk: vmk.to_vec(),
-            geometry,
-            volume_sectors,
-            template,
-        })
+            let options = JvckMetadataOptions {
+                use_header: header.header_replica_count as u32,
+                use_footer: header.footer_replica_count as u32,
+                metadata_size: header.metadata_size,
+            };
+            let geometry = compute_geometry(sector_size, volume_sectors, &options)?;
+            return Ok(Self {
+                io,
+                options,
+                vmk: Zeroizing::new(vmk.to_vec()),
+                geometry,
+                volume_sectors,
+                header,
+                secrets,
+            });
+        }
+        Err(VckError::NotFound("no JVCK metadata present"))
     }
 
     /// Initialize a brand new JVCK volume (first-time encryption): lay out the
     /// replicas per `options` and write seed metadata (`encrypted_offset = 0`).
+    ///
+    /// The kernel driver no longer creates metadata (the user-space SDK does
+    /// that over an extended-DASD volume handle); this remains the in-tree
+    /// reference encoder used by host tests and tooling.
     pub fn create(
         io: S,
         vmk: &[u8],
@@ -204,7 +205,7 @@ impl<S: SectorIo> JvckMetadataStore<S> {
         let volume_sectors = io.total_sectors();
         let geometry = compute_geometry(sector_size, volume_sectors, &options)?;
 
-        let template = JvckMetadata {
+        let header = JvckHeader {
             vendor_id: 0,
             metadata_version: 1,
             vendor_version: 0,
@@ -213,7 +214,8 @@ impl<S: SectorIo> JvckMetadataStore<S> {
             header_replica_count: options.use_header as u8,
             footer_replica_count: options.use_footer as u8,
             volume_id,
-            encrypted_offset: 0,
+        };
+        let secrets = JvckSecrets {
             fvek_key1,
             fvek_key2,
         };
@@ -221,49 +223,60 @@ impl<S: SectorIo> JvckMetadataStore<S> {
         let store = Self {
             io,
             options,
-            vmk: vmk.to_vec(),
+            vmk: Zeroizing::new(vmk.to_vec()),
             geometry,
             volume_sectors,
-            template,
+            header,
+            secrets,
         };
-        store.write_all_replicas(&store.template)?;
+        store.write_all_replicas(0)?;
         Ok(store)
     }
 
-    /// Read every replica, authenticate with the VMK, and return the most
-    /// up-to-date metadata. Recovery policy: among valid replicas, pick the one
-    /// with the largest `encrypted_offset`.
-    pub fn load_metadata(&self) -> VckResult<JvckMetadata> {
+    /// Read every replica and return the most up-to-date `encrypted_offset`.
+    ///
+    /// Uses the cached layout (the on-disk layout is immutable once written, so
+    /// re-bootstrapping per call is unnecessary). Recovery policy: among valid
+    /// replicas, pick the largest `encrypted_offset`. Only the offset is
+    /// recovered; the FVEK decrypted along the way is zeroized immediately.
+    pub fn load_offset(&self) -> VckResult<u64> {
         let sector_size = self.geometry.sector_size;
-        // Re-read the layout from the last sector every time so metadata_size /
-        // replica counts come from the volume, not a possibly-stale cache.
-        let boot = bootstrap(&self.io, sector_size, self.volume_sectors, &self.vmk)?;
-        let rs = replica_sectors(boot.metadata_size, sector_size);
+        let rs = replica_sectors(self.options.metadata_size, sector_size);
         let lbas = metadata_sector_lbas(
             self.volume_sectors,
             rs,
-            boot.header_replica_count as u32,
-            boot.footer_replica_count as u32,
+            self.options.use_header,
+            self.options.use_footer,
         );
 
-        let mut best: Option<JvckMetadata> = None;
+        let mut best: Option<u64> = None;
         for lba in lbas {
-            if let Ok(meta) = read_metadata_at(&self.io, sector_size, lba, &self.vmk) {
-                let replace = match &best {
-                    Some(b) => meta.encrypted_offset > b.encrypted_offset,
-                    None => true,
-                };
-                if replace {
-                    best = Some(meta);
-                }
+            let block = match read_block(&self.io, sector_size, lba) {
+                Ok(block) => block,
+                Err(_) => continue,
+            };
+            if let Ok(offset) = metadata::read_encrypted_offset(&block, &self.vmk) {
+                best = Some(best.map_or(offset, |b| b.max(offset)));
             }
         }
         best.ok_or(VckError::NotFound("no valid JVCK metadata replica"))
     }
 
-    fn write_all_replicas(&self, meta: &JvckMetadata) -> VckResult<()> {
+    /// FVEK key halves recovered at open/create. Kept zeroize-on-drop in the
+    /// store; copied out here only to build the volume cipher.
+    pub fn fvek_keys(&self) -> (&[u8; 32], &[u8; 32]) {
+        (&self.secrets.fvek_key1, &self.secrets.fvek_key2)
+    }
+
+    /// The plaintext Volume ID (HKDF salt) from the metadata header.
+    pub fn volume_id(&self) -> [u8; 16] {
+        self.header.volume_id
+    }
+
+    fn write_all_replicas(&self, encrypted_offset: u64) -> VckResult<()> {
         let mut block = [0u8; METADATA_BLOCK_SIZE];
-        meta.encode(&self.vmk, &mut block)?;
+        self.header
+            .encode(&self.secrets, encrypted_offset, &self.vmk, &mut block)?;
         let rs = replica_sectors(self.options.metadata_size, self.geometry.sector_size);
         for lba in metadata_sector_lbas(
             self.volume_sectors,
@@ -302,17 +315,14 @@ where
     S: Send + Sync + 'static,
 {
     fn load(&self) -> VckResult<EncryptedOffset> {
-        let meta = self.load_metadata()?;
         Ok(EncryptedOffset {
-            sector: meta.encrypted_offset,
+            sector: self.load_offset()?,
             total_sectors: self.geometry.data_sectors,
         })
     }
 
     fn store(&self, offset: &EncryptedOffset) -> VckResult<()> {
-        let mut meta = self.template.clone();
-        meta.encrypted_offset = offset.sector;
-        self.write_all_replicas(&meta)
+        self.write_all_replicas(offset.sector)
     }
 
     fn flush(&self) -> VckResult<()> {
@@ -431,10 +441,9 @@ mod tests {
         assert_eq!(store.data_sector_count(), 512);
         assert_eq!(store.footer_replica_count(), 2);
 
-        let meta = store.load_metadata().unwrap();
-        assert_eq!(meta.encrypted_offset, 0);
-        assert_eq!(meta.fvek_key1, [1; 32]);
-        assert_eq!(meta.volume_id, [9; 16]);
+        assert_eq!(store.load_offset().unwrap(), 0);
+        assert_eq!(store.fvek_keys().0, &[1u8; 32]);
+        assert_eq!(store.volume_id(), [9; 16]);
     }
 
     #[test]
@@ -486,7 +495,7 @@ mod tests {
         let reopened = JvckMetadataStore::open(io, VMK).unwrap();
         assert_eq!(reopened.offset_sector(), 0);
         assert_eq!(reopened.data_sector_count(), 512);
-        assert_eq!(reopened.load_metadata().unwrap().encrypted_offset, 777);
+        assert_eq!(reopened.load_offset().unwrap(), 777);
     }
 
     #[test]
@@ -504,14 +513,15 @@ mod tests {
             .unwrap();
 
         // Corrupt the last footer replica (very last sector) to a stale 300.
-        let mut stale = store.template.clone();
-        stale.encrypted_offset = 300;
         let mut block = [0u8; METADATA_BLOCK_SIZE];
-        stale.encode(VMK, &mut block).unwrap();
+        store
+            .header
+            .encode(&store.secrets, 300, VMK, &mut block)
+            .unwrap();
         write_block(&store.io, 512, store.volume_sectors - 1, &block).unwrap();
 
-        // load_metadata must still report 500 (the other valid replica).
-        assert_eq!(store.load_metadata().unwrap().encrypted_offset, 500);
+        // load_offset must still report 500 (the other valid replica).
+        assert_eq!(store.load_offset().unwrap(), 500);
     }
 
     #[test]
@@ -521,5 +531,39 @@ mod tests {
             JvckMetadataStore::open(io, VMK),
             Err(VckError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn metadata_size_not_multiple_of_sector_is_floored() {
+        // 4096-byte sectors with a metadata_size that is NOT a multiple of the
+        // sector size: 128 KiB + 100 bytes. The replica region floors to
+        // floor(131172 / 4096) = 32 sectors (the trailing 100 bytes are dropped).
+        let sector_size = 4096u32;
+        let md_size = 128 * 1024 + 100;
+        let opts = JvckMetadataOptions {
+            use_header: 0,
+            use_footer: 2,
+            metadata_size: md_size,
+        };
+        let expected_rs = (md_size / sector_size) as u64; // 32
+        assert_eq!(expected_rs, 32);
+
+        // 2 footer replicas (64 sectors) + 64 data sectors.
+        let io = MemVolume::new(sector_size, 128);
+        let store =
+            JvckMetadataStore::create(io, VMK, opts, [1; 32], [2; 32], [9; 16]).unwrap();
+        assert_eq!(store.data_sector_count(), 128 - 2 * expected_rs);
+        assert_eq!(store.sector_size(), sector_size);
+
+        // The footer Metadata is the last sector and round-trips through reopen.
+        store
+            .store(&EncryptedOffset {
+                sector: 7,
+                total_sectors: store.data_sector_count(),
+            })
+            .unwrap();
+        let reopened = JvckMetadataStore::open(store.io, VMK).unwrap();
+        assert_eq!(reopened.metadata_size(), md_size);
+        assert_eq!(reopened.load_offset().unwrap(), 7);
     }
 }

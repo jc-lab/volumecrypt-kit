@@ -29,16 +29,17 @@ impl VolumeProvider for VckVolumeProvider {
         //    geometry. The same store persists encrypted_offset later.
         let io = KernelVolumeIo::open(ctx.volume_id, ctx.sector_size, ctx.volume_sectors)?;
         let store = JvckMetadataStore::open(io, &payload.vmk)?;
-        let meta = store.load_metadata()?;
+        let encrypted_offset = EncryptedOffset {
+            sector: store.load_offset()?,
+            total_sectors: store.data_sector_count(),
+        };
+        let (key1, key2) = store.fvek_keys();
 
         Ok(IoConfig::AesXts {
-            key1: meta.fvek_key1,
-            key2: meta.fvek_key2,
+            key1: *key1,
+            key2: *key2,
             offset_sector: store.offset_sector(),
-            encrypted_offset: EncryptedOffset {
-                sector: meta.encrypted_offset,
-                total_sectors: store.data_sector_count(),
-            },
+            encrypted_offset,
             offset_store: Arc::new(store),
         })
     }

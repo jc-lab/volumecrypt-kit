@@ -1,108 +1,133 @@
-//! Kernel `SectorIo` implementation backed by a volume device object.
+//! Kernel `SectorIo` implementation backed by a volume file handle.
 //!
 //! Used by the JVCK store to read/write footer (and header) metadata replicas
-//! and by the progressive-encryption sweep. All I/O is issued synchronously at
-//! PASSIVE_LEVEL via `IoBuildSynchronousFsdRequest` + `IofCallDriver`.
+//! and by the progressive-encryption sweep.
 //!
-//! Two construction modes:
-//! - [`KernelVolumeIo::open`]: resolve an NT device path (e.g. `\??\D:`) to its
-//!   device/file object via `IoGetDeviceObjectPointer` (holds a reference).
-//! - [`KernelVolumeIo::from_lower_device`]: wrap the lower device a filter is
-//!   attached above, so the sweep reads plaintext / writes ciphertext without
-//!   re-entering our own filter.
+//! The volume is opened with `ZwCreateFile` (synchronous, kernel handle) and,
+//! crucially, `FSCTL_ALLOW_EXTENDED_DASD_IO` is issued via `ZwFsControlFile` so
+//! reads/writes can reach the partition tail beyond the (shrunk) filesystem
+//! extent — that tail is where the JVCK footer metadata lives. All I/O is
+//! synchronous at PASSIVE_LEVEL (`FILE_SYNCHRONOUS_IO_NONALERT`), so no IRP
+//! plumbing or completion events are needed.
 
 use core::ffi::c_void;
+use core::mem::size_of;
 use core::ptr::null_mut;
 
 use vck_common::{SectorIo, VckError, VckResult, VolumeId};
 use wdk_sys::{
-    ntddk::{
-        IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IoGetDeviceObjectPointer,
-        IofCallDriver, KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject,
-    },
-    FILE_READ_DATA, FILE_WRITE_DATA, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT,
-    LARGE_INTEGER, PDEVICE_OBJECT, PFILE_OBJECT, PIRP, _EVENT_TYPE::NotificationEvent,
-    _KWAIT_REASON::Executive, _MODE::KernelMode,
+    ntddk::{ZwClose, ZwCreateFile, ZwDeviceIoControlFile, ZwFsControlFile, ZwReadFile, ZwWriteFile},
+    FILE_READ_DATA, FILE_WRITE_DATA, HANDLE, IO_STATUS_BLOCK, LARGE_INTEGER, OBJECT_ATTRIBUTES,
 };
 
-use crate::nt::{nt_success, UnicodeString, STATUS_PENDING};
-
-/// Set the FileObject in the IRP's next stack location (the one the target
-/// driver will see). Volume/disk devices opened via `IoGetDeviceObjectPointer`
-/// dereference the FileObject for raw reads/writes/IOCTLs; a NULL one bugchecks.
-unsafe fn set_next_file_object(irp: PIRP, file_object: PFILE_OBJECT) {
-    if file_object.is_null() {
-        return;
-    }
-    let next = (*irp)
-        .Tail
-        .Overlay
-        .__bindgen_anon_2
-        .__bindgen_anon_1
-        .CurrentStackLocation
-        .offset(-1);
-    (*next).FileObject = file_object;
-}
+use crate::nt::{nt_success, UnicodeString};
 
 // METHOD_BUFFERED disk IOCTLs (CTL_CODE values are stable across SDKs).
 const IOCTL_DISK_GET_DRIVE_GEOMETRY: u32 = 0x0007_0000;
 const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405C;
+// FSCTL_ALLOW_EXTENDED_DASD_IO: CTL_CODE(FILE_DEVICE_FILE_SYSTEM=9, 32,
+// METHOD_NEITHER=3, FILE_ANY_ACCESS=0) = (9<<16) | (32<<2) | 3.
+const FSCTL_ALLOW_EXTENDED_DASD_IO: u32 = 0x0009_0083;
 // Offset of BytesPerSector within DISK_GEOMETRY.
 const DISK_GEOMETRY_BYTES_PER_SECTOR_OFFSET: usize = 20;
 
+// ZwCreateFile / OBJECT_ATTRIBUTES constants (stable NT ABI values; not all are
+// re-exported by the bindings, so they are spelled out here).
+const SYNCHRONIZE: u32 = 0x0010_0000;
+const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+const FILE_SHARE_READ: u32 = 0x0000_0001;
+const FILE_SHARE_WRITE: u32 = 0x0000_0002;
+const FILE_OPEN: u32 = 0x0000_0001;
+const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
+const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
+const OBJ_CASE_INSENSITIVE: u32 = 0x0000_0040;
+const OBJ_KERNEL_HANDLE: u32 = 0x0000_0200;
+
 pub struct KernelVolumeIo {
-    device_object: PDEVICE_OBJECT,
-    /// Non-null only when we own a reference obtained from
-    /// `IoGetDeviceObjectPointer` (released on drop).
-    file_object: PFILE_OBJECT,
+    handle: HANDLE,
     sector_size: u32,
     total_sectors: u64,
 }
 
-// The device/file object pointers are used only under driver-side serialization
-// (registry/engine locks); the kernel owns their lifetime.
+// The handle is a kernel handle (`OBJ_KERNEL_HANDLE`), valid in any thread
+// context; access is serialized by the driver-side registry/engine locks.
 unsafe impl Send for KernelVolumeIo {}
 unsafe impl Sync for KernelVolumeIo {}
 
 impl KernelVolumeIo {
-    /// Resolve `volume_id.device_path` (an NT path such as `\??\D:` or
-    /// `\Device\HarddiskVolume3`) and hold a reference to its device object.
+    /// Open `volume_id.device_path` (an NT path such as `\??\D:`) for raw
+    /// synchronous I/O and enable extended-DASD access on the handle.
     pub fn open(volume_id: &VolumeId, sector_size: u32, total_sectors: u64) -> VckResult<Self> {
         let name = UnicodeString::from_str(&volume_id.device_path);
-        let mut device_object: PDEVICE_OBJECT = null_mut();
-        let mut file_object: PFILE_OBJECT = null_mut();
 
+        let mut oa: OBJECT_ATTRIBUTES = unsafe { core::mem::zeroed() };
+        oa.Length = size_of::<OBJECT_ATTRIBUTES>() as u32;
+        oa.ObjectName = name.as_ptr();
+        oa.Attributes = OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE;
+
+        let mut handle: HANDLE = null_mut();
+        let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
         let status = unsafe {
-            IoGetDeviceObjectPointer(
-                name.as_ptr(),
-                FILE_READ_DATA | FILE_WRITE_DATA,
-                &mut file_object,
-                &mut device_object,
+            ZwCreateFile(
+                &mut handle,
+                FILE_READ_DATA | FILE_WRITE_DATA | SYNCHRONIZE,
+                &mut oa,
+                &mut iosb,
+                null_mut(),
+                FILE_ATTRIBUTE_NORMAL,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                FILE_OPEN,
+                FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+                null_mut(),
+                0,
             )
         };
         crate::driver_println!(
-            "KVIO: IoGetDeviceObjectPointer status=0x{:08x} stack={}",
+            "KVIO: ZwCreateFile status=0x{:08x} stack={}",
             status,
             crate::debug::remaining_stack()
         );
         if !nt_success(status) {
-            return Err(VckError::Io("IoGetDeviceObjectPointer failed".into()));
+            return Err(VckError::Io("ZwCreateFile failed".into()));
         }
 
-        Ok(Self {
-            device_object,
-            file_object,
+        let me = Self {
+            handle,
             sector_size,
             total_sectors,
-        })
+        };
+        // Lift the filesystem-extent bound so the shrunk-away tail (footer
+        // metadata) is reachable. Best-effort: a raw partition device does not
+        // need it, so failures are only logged.
+        me.allow_extended_dasd_io();
+        Ok(me)
     }
 
-    /// Resolve `volume_id.device_path` and query the volume geometry
+    /// Open `volume_id.device_path` and query the volume geometry
     /// (`sector_size`, `total_sectors`) via disk IOCTLs.
     pub fn open_query(volume_id: &VolumeId) -> VckResult<Self> {
         let mut me = Self::open(volume_id, 0, 0)?;
         me.query_geometry()?;
         Ok(me)
+    }
+
+    fn allow_extended_dasd_io(&self) {
+        let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
+        let status = unsafe {
+            ZwFsControlFile(
+                self.handle,
+                null_mut(),
+                None,
+                null_mut(),
+                &mut iosb,
+                FSCTL_ALLOW_EXTENDED_DASD_IO,
+                null_mut(),
+                0,
+                null_mut(),
+                0,
+            )
+        };
+        crate::driver_println!("KVIO: allow_extended_dasd_io status=0x{:08x}", status);
     }
 
     fn query_geometry(&mut self) -> VckResult<()> {
@@ -111,8 +136,7 @@ impl KernelVolumeIo {
         crate::driver_println!("KVIO: ioctl DRIVE_GEOMETRY");
         self.device_ioctl(IOCTL_DISK_GET_DRIVE_GEOMETRY, &mut geom)?;
         let bps_off = DISK_GEOMETRY_BYTES_PER_SECTOR_OFFSET;
-        let bytes_per_sector =
-            u32::from_le_bytes(geom[bps_off..bps_off + 4].try_into().unwrap());
+        let bytes_per_sector = u32::from_le_bytes(geom[bps_off..bps_off + 4].try_into().unwrap());
         if bytes_per_sector == 0 {
             return Err(VckError::Io("volume reported zero sector size".into()));
         }
@@ -141,78 +165,36 @@ impl KernelVolumeIo {
             output.len(),
             crate::debug::remaining_stack()
         );
-        let mut event: KEVENT = unsafe { core::mem::zeroed() };
         let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
-
-        unsafe {
-            KeInitializeEvent(&mut event, NotificationEvent, 0);
-        }
-
-        crate::driver_println!("KVIO: IoBuildDeviceIoControlRequest");
-        let irp = unsafe {
-            IoBuildDeviceIoControlRequest(
+        let status = unsafe {
+            ZwDeviceIoControlFile(
+                self.handle,
+                null_mut(),
+                None,
+                null_mut(),
+                &mut iosb,
                 code,
-                self.device_object,
                 null_mut(),
                 0,
                 output.as_mut_ptr().cast::<c_void>(),
                 output.len() as u32,
-                0, // InternalDeviceIoControl = FALSE
-                &mut event,
-                &mut iosb,
             )
         };
-        crate::driver_println!("KVIO: irp_built={}", (!irp.is_null()) as u32);
-        if irp.is_null() {
-            return Err(VckError::Io("IoBuildDeviceIoControlRequest failed".into()));
-        }
-        unsafe { set_next_file_object(irp, self.file_object) };
-
-        crate::driver_println!("KVIO: IofCallDriver (dev ioctl)");
-        let mut status = unsafe { IofCallDriver(self.device_object, irp) };
-        crate::driver_println!("KVIO: IofCallDriver returned 0x{:08x}", status);
-        if status == STATUS_PENDING {
-            unsafe {
-                let _ = KeWaitForSingleObject(
-                    (&mut event as *mut KEVENT).cast::<c_void>(),
-                    Executive,
-                    KernelMode as i8,
-                    0,
-                    null_mut(),
-                );
-                status = iosb.__bindgen_anon_1.Status;
-            }
-            crate::driver_println!("KVIO: waited iosb=0x{:08x}", status);
-        }
+        crate::driver_println!("KVIO: device_ioctl status=0x{:08x}", status);
         if !nt_success(status) {
             return Err(VckError::Io("volume geometry IOCTL failed".into()));
         }
         Ok(())
     }
 
-    /// Wrap an existing lower device object (filter's attach target). Does not
-    /// take a reference; the caller guarantees the device outlives this value.
-    pub fn from_lower_device(
-        device_object: PDEVICE_OBJECT,
-        sector_size: u32,
-        total_sectors: u64,
-    ) -> Self {
-        Self {
-            device_object,
-            file_object: null_mut(),
-            sector_size,
-            total_sectors,
-        }
-    }
-
-    /// Issue one synchronous read/write IRP covering `len` bytes at `lba`.
-    fn run_sync(&self, major: u32, lba: u64, buf: *mut u8, len: usize) -> VckResult<()> {
+    /// Issue one synchronous read or write covering `len` bytes at `lba`.
+    fn run_sync(&self, is_write: bool, lba: u64, buf: *mut u8, len: usize) -> VckResult<()> {
         if len == 0 {
             return Ok(());
         }
         crate::driver_println!(
-            "KVIO: run_sync major={} lba={} len={} stack={}",
-            major,
+            "KVIO: run_sync write={} lba={} len={} stack={}",
+            is_write as u32,
             lba,
             len,
             crate::debug::remaining_stack()
@@ -223,51 +205,42 @@ impl KernelVolumeIo {
         let length =
             u32::try_from(len).map_err(|_| VckError::Io("I/O length too large".into()))?;
 
-        let mut event: KEVENT = unsafe { core::mem::zeroed() };
         let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
         let mut offset = LARGE_INTEGER {
             QuadPart: byte_offset as i64,
         };
 
-        unsafe {
-            // BOOLEAN State = FALSE (0).
-            KeInitializeEvent(&mut event, NotificationEvent, 0);
-        }
-
-        let irp = unsafe {
-            IoBuildSynchronousFsdRequest(
-                major,
-                self.device_object,
-                buf.cast::<c_void>(),
-                length,
-                &mut offset,
-                &mut event,
-                &mut iosb,
-            )
-        };
-        if irp.is_null() {
-            return Err(VckError::Io("IoBuildSynchronousFsdRequest failed".into()));
-        }
-        unsafe { set_next_file_object(irp, self.file_object) };
-
-        let mut status = unsafe { IofCallDriver(self.device_object, irp) };
-        if status == STATUS_PENDING {
-            unsafe {
-                // Wait at PASSIVE_LEVEL until the lower driver completes the IRP.
-                let _ = KeWaitForSingleObject(
-                    (&mut event as *mut KEVENT).cast::<c_void>(),
-                    Executive,
-                    KernelMode as i8,
-                    0, // Alertable = FALSE
+        let status = unsafe {
+            if is_write {
+                ZwWriteFile(
+                    self.handle,
                     null_mut(),
-                );
-                status = iosb.__bindgen_anon_1.Status;
+                    None,
+                    null_mut(),
+                    &mut iosb,
+                    buf.cast::<c_void>(),
+                    length,
+                    &mut offset,
+                    null_mut(),
+                )
+            } else {
+                ZwReadFile(
+                    self.handle,
+                    null_mut(),
+                    None,
+                    null_mut(),
+                    &mut iosb,
+                    buf.cast::<c_void>(),
+                    length,
+                    &mut offset,
+                    null_mut(),
+                )
             }
-        }
+        };
 
         crate::driver_println!("KVIO: run_sync done status=0x{:08x}", status);
         if !nt_success(status) {
-            return Err(VckError::Io("volume I/O IRP failed".into()));
+            return Err(VckError::Io("volume I/O failed".into()));
         }
         Ok(())
     }
@@ -275,9 +248,9 @@ impl KernelVolumeIo {
 
 impl Drop for KernelVolumeIo {
     fn drop(&mut self) {
-        if !self.file_object.is_null() {
+        if !self.handle.is_null() {
             unsafe {
-                ObfDereferenceObject(self.file_object.cast::<c_void>());
+                ZwClose(self.handle);
             }
         }
     }
@@ -293,12 +266,12 @@ impl SectorIo for KernelVolumeIo {
     }
 
     fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> VckResult<()> {
-        self.run_sync(IRP_MJ_READ, lba, buf.as_mut_ptr(), buf.len())
+        self.run_sync(false, lba, buf.as_mut_ptr(), buf.len())
     }
 
     fn write_sectors(&self, lba: u64, buf: &[u8]) -> VckResult<()> {
         // The write path only reads from this buffer; the cast to `*mut` is for
         // the C signature and the bytes are not modified.
-        self.run_sync(IRP_MJ_WRITE, lba, buf.as_ptr() as *mut u8, buf.len())
+        self.run_sync(true, lba, buf.as_ptr() as *mut u8, buf.len())
     }
 }

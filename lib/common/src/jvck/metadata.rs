@@ -9,6 +9,7 @@ use cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvIn
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::{types::Guid, VckError, VckResult};
 
@@ -27,8 +28,9 @@ pub const INFO_MAC: &[u8] = b"EncryptedMetadata:MAC";
 pub const INFO_ENC: &[u8] = b"EncryptedMetadata:ENC";
 pub const INFO_IV: &[u8] = b"EncryptedMetadata:IV";
 
-/// Keys derived from the VMK and the (plaintext) Volume ID salt.
-#[derive(Clone)]
+/// Keys derived from the VMK and the (plaintext) Volume ID salt. Zeroized on
+/// drop so the derived AES/HMAC material does not linger in memory.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct DerivedKeys {
     pub mac_key: [u8; 32],
     pub enc_key: [u8; 32],
@@ -55,14 +57,6 @@ pub fn derive_keys(volume_id: &[u8; 16], vmk: &[u8]) -> DerivedKeys {
     keys
 }
 
-/// Decrypted inner payload of the Metadata block (128-byte EncryptedMetadata).
-#[derive(Debug, Clone)]
-pub struct EncryptedMetadata {
-    pub encrypted_offset: u64,
-    pub fvek_key1: [u8; 32],
-    pub fvek_key2: [u8; 32],
-}
-
 // --- EncryptedMetadata field offsets (within the 128-byte plaintext) ---
 pub const EM_OFF_SIGNATURE: usize = 0;
 pub const EM_OFF_MUST_ZERO: usize = 4;
@@ -70,10 +64,13 @@ pub const EM_OFF_ENCRYPTED_OFFSET: usize = 16;
 pub const EM_OFF_FVEK_KEY1: usize = 32;
 pub const EM_OFF_FVEK_KEY2: usize = 64;
 
-/// A parsed JVCK Metadata block. Header fields and the decrypted inner payload
-/// are flattened for ergonomic access (`meta.fvek_key1`, `meta.encrypted_offset`).
+/// Plaintext header fields of a Metadata block.
+///
+/// These live outside the encrypted blob, so parsing them needs neither the VMK
+/// nor any decryption. The on-disk layout (`metadata_size`, replica counts) is
+/// recovered from here without ever touching the sensitive key material.
 #[derive(Debug, Clone)]
-pub struct JvckMetadata {
+pub struct JvckHeader {
     pub vendor_id: u64,
     pub metadata_version: u16,
     pub vendor_version: u16,
@@ -83,8 +80,15 @@ pub struct JvckMetadata {
     pub header_replica_count: u8,
     pub footer_replica_count: u8,
     pub volume_id: [u8; 16],
-    // --- decrypted EncryptedMetadata fields ---
-    pub encrypted_offset: u64,
+}
+
+/// Sensitive FVEK material decrypted from the EncryptedMetadata blob.
+///
+/// Zeroized on drop so the plaintext volume keys are wiped as soon as the value
+/// goes out of scope. Decrypt only when the keys are actually needed (building
+/// the cipher / re-encoding metadata) and drop the value promptly afterwards.
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
+pub struct JvckSecrets {
     pub fvek_key1: [u8; 32],
     pub fvek_key2: [u8; 32],
 }
@@ -117,50 +121,16 @@ fn le_u64(block: &[u8], off: usize) -> u64 {
     u64::from_le_bytes(block[off..off + 8].try_into().unwrap())
 }
 
-impl JvckMetadata {
-    /// Parse and authenticate a 512-byte Metadata block using the VMK.
+impl JvckHeader {
+    /// Parse the plaintext header fields of a Metadata block.
     ///
-    /// Steps: verify `JVCK` signature, verify Header CRC32 over [0,508),
-    /// derive keys, verify HMAC over the encrypted blob, AES-256-CBC decrypt,
-    /// verify inner `JVCK` signature + zero field.
-    pub fn parse(block: &[u8], vmk: &[u8]) -> VckResult<Self> {
-        Self::verify_crc(block)?;
+    /// Verifies the `JVCK` signature and Header CRC32 over [0,508) but does NOT
+    /// touch the encrypted blob, so no key material is decrypted. Use this to
+    /// recover the on-disk layout (`metadata_size`, replica counts) cheaply and
+    /// without the VMK.
+    pub fn parse(block: &[u8]) -> VckResult<Self> {
+        verify_crc(block)?;
         let block = &block[..METADATA_BLOCK_SIZE];
-
-        let volume_id: [u8; 16] = block[OFF_VOLUME_ID..OFF_VOLUME_ID + 16].try_into().unwrap();
-        let keys = derive_keys(&volume_id, vmk);
-
-        // Authenticate the encrypted blob before decrypting.
-        let enc = &block[OFF_ENCRYPTED_METADATA..OFF_ENCRYPTED_METADATA + ENCRYPTED_METADATA_SIZE];
-        let stored_hmac = &block[OFF_HMAC..OFF_HMAC + HMAC_SIZE];
-        let mut mac = HmacSha256::new_from_slice(&keys.mac_key)
-            .map_err(|_| VckError::CryptoFailed("invalid HMAC key length"))?;
-        mac.update(enc);
-        mac.verify_slice(stored_hmac)
-            .map_err(|_| VckError::ValidationFailed("EncryptedMetadata HMAC mismatch"))?;
-
-        // AES-256-CBC (no padding) decrypt.
-        let mut buf = [0u8; ENCRYPTED_METADATA_SIZE];
-        buf.copy_from_slice(enc);
-        let dec = Decryptor::<Aes256>::new_from_slices(&keys.enc_key, &keys.enc_iv)
-            .map_err(|_| VckError::CryptoFailed("invalid ENC key/iv length"))?;
-        let plain = dec
-            .decrypt_padded_mut::<NoPadding>(&mut buf)
-            .map_err(|_| VckError::CryptoFailed("EncryptedMetadata CBC decrypt failed"))?;
-
-        // Verify the inner signature + zero field (wrong VMK -> garbage here).
-        if plain[EM_OFF_SIGNATURE..EM_OFF_SIGNATURE + 4] != JVCK_SIGNATURE {
-            return Err(VckError::ValidationFailed("inner JVCK signature mismatch"));
-        }
-        if plain[EM_OFF_MUST_ZERO..EM_OFF_MUST_ZERO + 12] != [0u8; 12] {
-            return Err(VckError::ValidationFailed("inner must-zero field not zero"));
-        }
-
-        let mut fvek_key1 = [0u8; 32];
-        fvek_key1.copy_from_slice(&plain[EM_OFF_FVEK_KEY1..EM_OFF_FVEK_KEY1 + 32]);
-        let mut fvek_key2 = [0u8; 32];
-        fvek_key2.copy_from_slice(&plain[EM_OFF_FVEK_KEY2..EM_OFF_FVEK_KEY2 + 32]);
-
         Ok(Self {
             vendor_id: le_u64(block, OFF_VENDOR_ID),
             metadata_version: le_u16(block, OFF_METADATA_VERSION),
@@ -169,16 +139,20 @@ impl JvckMetadata {
             sector_size: le_u32(block, OFF_SECTOR_SIZE),
             header_replica_count: block[OFF_HEADER_COUNT],
             footer_replica_count: block[OFF_FOOTER_COUNT],
-            volume_id,
-            encrypted_offset: le_u64(plain, EM_OFF_ENCRYPTED_OFFSET),
-            fvek_key1,
-            fvek_key2,
+            volume_id: block[OFF_VOLUME_ID..OFF_VOLUME_ID + 16].try_into().unwrap(),
         })
     }
 
-    /// Serialize this metadata into a 512-byte block, encrypting the inner
-    /// payload and computing HMAC + CRC32.
-    pub fn encode(&self, vmk: &[u8], out: &mut [u8; METADATA_BLOCK_SIZE]) -> VckResult<()> {
+    /// Serialize this header plus the (sensitive) `secrets` and `encrypted_offset`
+    /// into a 512-byte block, encrypting the inner payload and computing HMAC +
+    /// CRC32. The transient EncryptedMetadata plaintext is zeroized afterwards.
+    pub fn encode(
+        &self,
+        secrets: &JvckSecrets,
+        encrypted_offset: u64,
+        vmk: &[u8],
+        out: &mut [u8; METADATA_BLOCK_SIZE],
+    ) -> VckResult<()> {
         out.fill(0);
         out[OFF_SIGNATURE..OFF_SIGNATURE + 4].copy_from_slice(&JVCK_SIGNATURE);
         out[OFF_VENDOR_ID..OFF_VENDOR_ID + 8].copy_from_slice(&self.vendor_id.to_le_bytes());
@@ -193,55 +167,41 @@ impl JvckMetadata {
         out[OFF_FOOTER_COUNT] = self.footer_replica_count;
         out[OFF_VOLUME_ID..OFF_VOLUME_ID + 16].copy_from_slice(&self.volume_id);
 
-        // Build the 128-byte EncryptedMetadata plaintext.
+        // Build the 128-byte EncryptedMetadata plaintext (holds the FVEK), then
+        // zeroize it before returning so the keys do not linger on the stack.
         let mut plain = [0u8; ENCRYPTED_METADATA_SIZE];
         plain[EM_OFF_SIGNATURE..EM_OFF_SIGNATURE + 4].copy_from_slice(&JVCK_SIGNATURE);
         plain[EM_OFF_ENCRYPTED_OFFSET..EM_OFF_ENCRYPTED_OFFSET + 8]
-            .copy_from_slice(&self.encrypted_offset.to_le_bytes());
-        plain[EM_OFF_FVEK_KEY1..EM_OFF_FVEK_KEY1 + 32].copy_from_slice(&self.fvek_key1);
-        plain[EM_OFF_FVEK_KEY2..EM_OFF_FVEK_KEY2 + 32].copy_from_slice(&self.fvek_key2);
+            .copy_from_slice(&encrypted_offset.to_le_bytes());
+        plain[EM_OFF_FVEK_KEY1..EM_OFF_FVEK_KEY1 + 32].copy_from_slice(&secrets.fvek_key1);
+        plain[EM_OFF_FVEK_KEY2..EM_OFF_FVEK_KEY2 + 32].copy_from_slice(&secrets.fvek_key2);
 
         let keys = derive_keys(&self.volume_id, vmk);
-        let enc = Encryptor::<Aes256>::new_from_slices(&keys.enc_key, &keys.enc_iv)
-            .map_err(|_| VckError::CryptoFailed("invalid ENC key/iv length"))?;
-        enc.encrypt_padded_mut::<NoPadding>(&mut plain, ENCRYPTED_METADATA_SIZE)
-            .map_err(|_| VckError::CryptoFailed("EncryptedMetadata CBC encrypt failed"))?;
-        out[OFF_ENCRYPTED_METADATA..OFF_ENCRYPTED_METADATA + ENCRYPTED_METADATA_SIZE]
-            .copy_from_slice(&plain);
+        let result = (|| {
+            let enc = Encryptor::<Aes256>::new_from_slices(&keys.enc_key, &keys.enc_iv)
+                .map_err(|_| VckError::CryptoFailed("invalid ENC key/iv length"))?;
+            enc.encrypt_padded_mut::<NoPadding>(&mut plain, ENCRYPTED_METADATA_SIZE)
+                .map_err(|_| VckError::CryptoFailed("EncryptedMetadata CBC encrypt failed"))?;
+            out[OFF_ENCRYPTED_METADATA..OFF_ENCRYPTED_METADATA + ENCRYPTED_METADATA_SIZE]
+                .copy_from_slice(&plain);
 
-        // HMAC over the (now encrypted) blob.
-        let mut mac = HmacSha256::new_from_slice(&keys.mac_key)
-            .map_err(|_| VckError::CryptoFailed("invalid HMAC key length"))?;
-        mac.update(&out[OFF_ENCRYPTED_METADATA..OFF_ENCRYPTED_METADATA + ENCRYPTED_METADATA_SIZE]);
-        let tag = mac.finalize().into_bytes();
-        out[OFF_HMAC..OFF_HMAC + HMAC_SIZE].copy_from_slice(&tag);
+            // HMAC over the (now encrypted) blob.
+            let mut mac = HmacSha256::new_from_slice(&keys.mac_key)
+                .map_err(|_| VckError::CryptoFailed("invalid HMAC key length"))?;
+            mac.update(
+                &out[OFF_ENCRYPTED_METADATA..OFF_ENCRYPTED_METADATA + ENCRYPTED_METADATA_SIZE],
+            );
+            let tag = mac.finalize().into_bytes();
+            out[OFF_HMAC..OFF_HMAC + HMAC_SIZE].copy_from_slice(&tag);
 
-        // Header CRC32 over [0, 508).
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&out[0..CRC_COVERAGE_END]);
-        out[OFF_CRC32..OFF_CRC32 + 4].copy_from_slice(&hasher.finalize().to_le_bytes());
-        Ok(())
-    }
-
-    /// Verify only the plaintext signature + Header CRC32 (used while scanning
-    /// for a replica before the VMK is applied).
-    pub fn verify_crc(block: &[u8]) -> VckResult<()> {
-        if block.len() < METADATA_BLOCK_SIZE {
-            return Err(VckError::SizeMismatch {
-                expected: METADATA_BLOCK_SIZE,
-                actual: block.len(),
-            });
-        }
-        if block[OFF_SIGNATURE..OFF_SIGNATURE + 4] != JVCK_SIGNATURE {
-            return Err(VckError::SignatureMismatch);
-        }
-        let stored = le_u32(block, OFF_CRC32);
-        let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&block[0..CRC_COVERAGE_END]);
-        if hasher.finalize() != stored {
-            return Err(VckError::ChecksumMismatch);
-        }
-        Ok(())
+            // Header CRC32 over [0, 508).
+            let mut hasher = crc32fast::Hasher::new();
+            hasher.update(&out[0..CRC_COVERAGE_END]);
+            out[OFF_CRC32..OFF_CRC32 + 4].copy_from_slice(&hasher.finalize().to_le_bytes());
+            Ok(())
+        })();
+        plain.zeroize();
+        result
     }
 
     pub fn volume_guid(&self) -> Guid {
@@ -249,12 +209,97 @@ impl JvckMetadata {
     }
 }
 
+/// Verify only the plaintext signature + Header CRC32 (used while scanning for a
+/// replica before the VMK is applied).
+pub fn verify_crc(block: &[u8]) -> VckResult<()> {
+    if block.len() < METADATA_BLOCK_SIZE {
+        return Err(VckError::SizeMismatch {
+            expected: METADATA_BLOCK_SIZE,
+            actual: block.len(),
+        });
+    }
+    if block[OFF_SIGNATURE..OFF_SIGNATURE + 4] != JVCK_SIGNATURE {
+        return Err(VckError::SignatureMismatch);
+    }
+    let stored = le_u32(block, OFF_CRC32);
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(&block[0..CRC_COVERAGE_END]);
+    if hasher.finalize() != stored {
+        return Err(VckError::ChecksumMismatch);
+    }
+    Ok(())
+}
+
+/// Authenticate (HMAC) and AES-256-CBC decrypt the EncryptedMetadata payload.
+///
+/// Verifies the Header CRC32, the HMAC (so a wrong VMK is rejected before any
+/// decryption), and the inner `JVCK` signature + zero field. The transient
+/// plaintext buffer is zeroized before returning; only the non-sensitive
+/// `encrypted_offset` and the zeroize-on-drop `JvckSecrets` survive.
+pub fn decrypt_payload(block: &[u8], vmk: &[u8]) -> VckResult<(u64, JvckSecrets)> {
+    verify_crc(block)?;
+    let block = &block[..METADATA_BLOCK_SIZE];
+
+    let volume_id: [u8; 16] = block[OFF_VOLUME_ID..OFF_VOLUME_ID + 16].try_into().unwrap();
+    let keys = derive_keys(&volume_id, vmk);
+
+    // Authenticate the encrypted blob before decrypting.
+    let enc = &block[OFF_ENCRYPTED_METADATA..OFF_ENCRYPTED_METADATA + ENCRYPTED_METADATA_SIZE];
+    let stored_hmac = &block[OFF_HMAC..OFF_HMAC + HMAC_SIZE];
+    let mut mac = HmacSha256::new_from_slice(&keys.mac_key)
+        .map_err(|_| VckError::CryptoFailed("invalid HMAC key length"))?;
+    mac.update(enc);
+    mac.verify_slice(stored_hmac)
+        .map_err(|_| VckError::ValidationFailed("EncryptedMetadata HMAC mismatch"))?;
+
+    // AES-256-CBC (no padding) decrypt into a buffer we zeroize on the way out.
+    let mut buf = [0u8; ENCRYPTED_METADATA_SIZE];
+    buf.copy_from_slice(enc);
+    let parsed = (|| {
+        let dec = Decryptor::<Aes256>::new_from_slices(&keys.enc_key, &keys.enc_iv)
+            .map_err(|_| VckError::CryptoFailed("invalid ENC key/iv length"))?;
+        let plain = dec
+            .decrypt_padded_mut::<NoPadding>(&mut buf)
+            .map_err(|_| VckError::CryptoFailed("EncryptedMetadata CBC decrypt failed"))?;
+
+        // Verify the inner signature + zero field (wrong VMK -> garbage here).
+        if plain[EM_OFF_SIGNATURE..EM_OFF_SIGNATURE + 4] != JVCK_SIGNATURE {
+            return Err(VckError::ValidationFailed("inner JVCK signature mismatch"));
+        }
+        if plain[EM_OFF_MUST_ZERO..EM_OFF_MUST_ZERO + 12] != [0u8; 12] {
+            return Err(VckError::ValidationFailed("inner must-zero field not zero"));
+        }
+
+        let mut secrets = JvckSecrets {
+            fvek_key1: [0u8; 32],
+            fvek_key2: [0u8; 32],
+        };
+        secrets
+            .fvek_key1
+            .copy_from_slice(&plain[EM_OFF_FVEK_KEY1..EM_OFF_FVEK_KEY1 + 32]);
+        secrets
+            .fvek_key2
+            .copy_from_slice(&plain[EM_OFF_FVEK_KEY2..EM_OFF_FVEK_KEY2 + 32]);
+        Ok((le_u64(plain, EM_OFF_ENCRYPTED_OFFSET), secrets))
+    })();
+    buf.zeroize();
+    parsed
+}
+
+/// Decrypt only to read `encrypted_offset`; the FVEK material is zeroized
+/// immediately (the returned `JvckSecrets` is dropped here). Use this on the
+/// recovery scan, which must not retain the volume keys.
+pub fn read_encrypted_offset(block: &[u8], vmk: &[u8]) -> VckResult<u64> {
+    let (encrypted_offset, _secrets) = decrypt_payload(block, vmk)?;
+    Ok(encrypted_offset)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn sample() -> JvckMetadata {
-        JvckMetadata {
+    fn sample_header() -> JvckHeader {
+        JvckHeader {
             vendor_id: 0x0102_0304_0506_0708,
             metadata_version: 1,
             vendor_version: 7,
@@ -263,10 +308,23 @@ mod tests {
             header_replica_count: 0,
             footer_replica_count: 2,
             volume_id: [0x11; 16],
-            encrypted_offset: 4096,
+        }
+    }
+
+    fn sample_secrets() -> JvckSecrets {
+        JvckSecrets {
             fvek_key1: [0xAA; 32],
             fvek_key2: [0xBB; 32],
         }
+    }
+
+    /// Encode the sample (header + secrets + offset) into a fresh block.
+    fn encode_sample(vmk: &[u8], offset: u64) -> [u8; METADATA_BLOCK_SIZE] {
+        let mut block = [0u8; METADATA_BLOCK_SIZE];
+        sample_header()
+            .encode(&sample_secrets(), offset, vmk, &mut block)
+            .unwrap();
+        block
     }
 
     #[test]
@@ -286,48 +344,57 @@ mod tests {
     #[test]
     fn encode_parse_roundtrip() {
         let vmk = b"my-volume-master-key";
-        let meta = sample();
-        let mut block = [0u8; METADATA_BLOCK_SIZE];
-        meta.encode(vmk, &mut block).unwrap();
+        let block = encode_sample(vmk, 4096);
 
-        let parsed = JvckMetadata::parse(&block, vmk).unwrap();
-        assert_eq!(parsed.vendor_id, meta.vendor_id);
-        assert_eq!(parsed.metadata_size, meta.metadata_size);
-        assert_eq!(parsed.sector_size, meta.sector_size);
-        assert_eq!(parsed.footer_replica_count, 2);
-        assert_eq!(parsed.volume_id, meta.volume_id);
-        assert_eq!(parsed.encrypted_offset, 4096);
-        assert_eq!(parsed.fvek_key1, meta.fvek_key1);
-        assert_eq!(parsed.fvek_key2, meta.fvek_key2);
+        // Plaintext header parses without the VMK.
+        let header = JvckHeader::parse(&block).unwrap();
+        assert_eq!(header.vendor_id, 0x0102_0304_0506_0708);
+        assert_eq!(header.metadata_size, 128 * 1024);
+        assert_eq!(header.sector_size, 512);
+        assert_eq!(header.footer_replica_count, 2);
+        assert_eq!(header.volume_id, [0x11; 16]);
+
+        // Secrets + offset require the VMK.
+        let (offset, secrets) = decrypt_payload(&block, vmk).unwrap();
+        assert_eq!(offset, 4096);
+        assert_eq!(secrets.fvek_key1, [0xAA; 32]);
+        assert_eq!(secrets.fvek_key2, [0xBB; 32]);
+
+        // Offset-only path returns the same value.
+        assert_eq!(read_encrypted_offset(&block, vmk).unwrap(), 4096);
     }
 
     #[test]
     fn parse_rejects_wrong_vmk() {
-        let meta = sample();
-        let mut block = [0u8; METADATA_BLOCK_SIZE];
-        meta.encode(b"correct-vmk", &mut block).unwrap();
-        // Wrong VMK -> HMAC mismatch (CRC still valid).
-        let err = JvckMetadata::parse(&block, b"wrong-vmk").unwrap_err();
-        assert!(matches!(err, VckError::ValidationFailed(_)));
+        let block = encode_sample(b"correct-vmk", 0);
+        // Wrong VMK -> HMAC mismatch (CRC still valid). Header still parses.
+        assert!(JvckHeader::parse(&block).is_ok());
+        assert!(matches!(
+            decrypt_payload(&block, b"wrong-vmk"),
+            Err(VckError::ValidationFailed(_))
+        ));
     }
 
     #[test]
     fn parse_rejects_corrupted_crc() {
-        let meta = sample();
-        let mut block = [0u8; METADATA_BLOCK_SIZE];
-        meta.encode(b"vmk", &mut block).unwrap();
+        let mut block = encode_sample(b"vmk", 0);
         block[100] ^= 0xFF; // flip a covered byte
-        let err = JvckMetadata::parse(&block, b"vmk").unwrap_err();
-        assert!(matches!(err, VckError::ChecksumMismatch));
+        assert!(matches!(
+            JvckHeader::parse(&block),
+            Err(VckError::ChecksumMismatch)
+        ));
+        assert!(matches!(
+            decrypt_payload(&block, b"vmk"),
+            Err(VckError::ChecksumMismatch)
+        ));
     }
 
     #[test]
     fn parse_rejects_bad_signature() {
-        let mut block = [0u8; METADATA_BLOCK_SIZE];
-        sample().encode(b"vmk", &mut block).unwrap();
+        let mut block = encode_sample(b"vmk", 0);
         block[0] = b'X';
         assert!(matches!(
-            JvckMetadata::parse(&block, b"vmk"),
+            JvckHeader::parse(&block),
             Err(VckError::SignatureMismatch)
         ));
     }
@@ -336,8 +403,49 @@ mod tests {
     fn parse_rejects_short_block() {
         let short = [0u8; 64];
         assert!(matches!(
-            JvckMetadata::parse(&short, b"vmk"),
+            JvckHeader::parse(&short),
             Err(VckError::SizeMismatch { .. })
         ));
+    }
+
+    /// Fixed cross-check vector shared with the Go SDK encoder (sdk/jvck_test.go).
+    /// Both implementations must produce this exact 512-byte block, proving the
+    /// on-disk format is byte-compatible across the two languages.
+    fn cross_check_block() -> [u8; METADATA_BLOCK_SIZE] {
+        let vmk = b"jvck-cross-check-vmk";
+        let header = JvckHeader {
+            vendor_id: 0,
+            metadata_version: 1,
+            vendor_version: 0,
+            metadata_size: 131072,
+            sector_size: 512,
+            header_replica_count: 0,
+            footer_replica_count: 2,
+            volume_id: [
+                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+            ],
+        };
+        let secrets = JvckSecrets {
+            fvek_key1: [0xA0; 32],
+            fvek_key2: [0x0B; 32],
+        };
+        let mut block = [0u8; METADATA_BLOCK_SIZE];
+        header.encode(&secrets, 12345, vmk, &mut block).unwrap();
+        block
+    }
+
+    /// Golden 512-byte block for the cross-check vector. The Go SDK encoder
+    /// (sdk/jvck_test.go) asserts the identical hex, so a divergence in either
+    /// implementation's on-disk format fails a unit test in both repos.
+    const CROSS_CHECK_HEX: &str = "4a56434b000000000000000001000000000002000002000000020000000000000102030405060708090a0b0c0d0e0f10aed78456db063a76376e3d7dc9f80d78bffb7989ec8747e0880a146a239c593b3a309d9e5e689fbf3c9e78e08c7e95c56f96cc5f9f25210dcd1c42aa00577104186fbba87c3b18334e326285d956bf34adf63f9b3538664017f0003123e95cd2c601c29a849e5ea83222b36eee0b255fe94466519e64fc74506952e3916d74f909b55a6cf38846ab7bc629af2857f1628d7638ff0a2e0b7213cf0bc4bca3adc3000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000bd09257c";
+
+    #[test]
+    fn cross_check_vector_matches_golden() {
+        let block = cross_check_block();
+        let mut hex = String::new();
+        for b in block {
+            hex.push_str(&alloc::format!("{:02x}", b));
+        }
+        assert_eq!(hex, CROSS_CHECK_HEX);
     }
 }

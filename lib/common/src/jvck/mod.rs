@@ -11,6 +11,6 @@ pub mod metadata;
 pub mod options;
 pub mod store;
 
-pub use metadata::{DerivedKeys, EncryptedMetadata, JvckMetadata, METADATA_BLOCK_SIZE};
+pub use metadata::{DerivedKeys, JvckHeader, JvckSecrets, METADATA_BLOCK_SIZE};
 pub use options::{JvckMetadataOptions, MIN_METADATA_SIZE};
 pub use store::JvckMetadataStore;

@@ -38,7 +38,12 @@ impl LoaderProvider for VckLoaderProvider {
             config.partition_guid,
             &config.vmk,
         )?;
-        let meta = store.load_metadata()?;
+        let encrypted_offset = EncryptedOffset {
+            sector: store.load_offset()?,
+            total_sectors: store.data_sector_count(),
+        };
+        let (key1, key2) = store.fvek_keys();
+        let (key1, key2) = (*key1, *key2);
 
         // 3. The handover carries only the VMK and partition_guid. The driver
         //    re-decrypts the same footer metadata with the VMK to recover the
@@ -54,13 +59,10 @@ impl LoaderProvider for VckLoaderProvider {
             handover_payload: payload,
             next_loader: config.osloader_device_path(boot_services)?,
             crypto: Some(LoaderCrypto {
-                key1: meta.fvek_key1,
-                key2: meta.fvek_key2,
+                key1,
+                key2,
                 offset_sector: store.offset_sector(),
-                encrypted_offset: EncryptedOffset {
-                    sector: meta.encrypted_offset,
-                    total_sectors: store.data_sector_count(),
-                },
+                encrypted_offset,
             }),
         })
     }

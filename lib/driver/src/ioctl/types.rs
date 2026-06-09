@@ -14,26 +14,24 @@ pub const STATE_PAUSED: i32 = 3;
 
 /// IOCTL_JVCK_ATTACH request.
 ///
-/// `fvek_key1`/`fvek_key2`/`volume_id` are only used on first-time encryption
-/// (when no metadata exists yet); the user-space app generates them with a
-/// CSPRNG. On re-attach they are ignored (recovered from existing metadata),
-/// so the app may send empty slices.
+/// The driver only ever OPENS existing JVCK metadata: first-time metadata
+/// creation (FVEK/volume-id generation + footer write over an extended-DASD
+/// handle) is performed by the user-space SDK before attach. So the FVEK and
+/// volume id are not part of this request; the layout fields are advisory and
+/// are authoritatively recovered from the on-disk header.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JvckVolumeAttachReq {
     pub volume_path: String,
-    // Byte fields are msgpack BIN on the wire (Go encodes `[]byte` as bin), so
-    // they go through serde_bytes rather than the default Vec<u8> = sequence.
+    // `vmk` is msgpack BIN on the wire (Go encodes `[]byte` as bin), so it goes
+    // through serde_bytes rather than the default Vec<u8> = sequence.
     #[serde(with = "serde_bytes")]
     pub vmk: Vec<u8>,
+    #[serde(default)]
     pub use_header: u32,
+    #[serde(default)]
     pub use_footer: u32,
+    #[serde(default)]
     pub metadata_size: u32,
-    #[serde(default, with = "serde_bytes")]
-    pub fvek_key1: Vec<u8>,
-    #[serde(default, with = "serde_bytes")]
-    pub fvek_key2: Vec<u8>,
-    #[serde(default, with = "serde_bytes")]
-    pub volume_id: Vec<u8>,
 }
 
 /// IOCTL_JVCK_ATTACH response.
