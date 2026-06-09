@@ -21,7 +21,7 @@ steps:
     timeout: 30s
     params:
       src: "./testing/artifacts/vck-sample-driver.sys"
-      dst: "C:\\Temp\\vck-sample-driver.sys"
+      dst: "C:\\Windows\\System32\\drivers\\vck-sample-driver.sys"
 
   - action: file-upload
     timeout: 30s
@@ -35,7 +35,7 @@ steps:
       cmd: "cmd.exe"
       args:
         - "/c"
-        - "sc create VolumeCryptKitSample type= kernel start= demand binPath= C:\\Temp\\vck-sample-driver.sys"
+        - "sc create VolumeCryptKitSample type= kernel start= boot binPath= C:\\Windows\\System32\\drivers\\vck-sample-driver.sys"
       expect_exit_code: 0
   
   - action: exec
@@ -73,13 +73,29 @@ steps:
         - "C:\\Temp\\vck-app.exe status"
       expect_exit_code: 0
 
+  - action: reboot
+    timeout: 120s
+  - action: wait-boot
+    timeout: 120s
+    params:
+      retry_interval: 5s
+
   - action: exec
-    timeout: 3000s
+    timeout: 30s
     params:
       cmd: "cmd.exe"
       args:
         - "/c"
-        - "ping -n 1000 127.0.0.1"
+        - "sc query VolumeCryptKitSample"
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe status"
       expect_exit_code: 0
 
   - action: shutdown

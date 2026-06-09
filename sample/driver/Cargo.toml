@@ -15,9 +15,8 @@ wdk-build.workspace = true
 crate-type = ["cdylib"]
 
 [features]
-default = []
-# Forwards driver DbgPrint output to the isa-debugcon port (0xe9) so it can be
-# captured to a file during VM testing. Off by default (signed release builds).
+# Always enable debugcon so VM test logs are always captured.
+default = ["debugcon"]
 debugcon = ["vck-driver/debugcon"]
 
 [dependencies]

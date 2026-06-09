@@ -119,6 +119,11 @@ pub unsafe extern "system" fn DriverEntry(
     // Needed by IOCTL_JVCK_ATTACH to create filter device objects.
     REGISTRY.set_driver_object(driver as *mut DRIVER_OBJECT);
 
+    // Register AddDevice so PnP calls us before any FSD mounts on a volume.
+    // This allows attaching the filter BELOW the FSD (correct position for
+    // transparent encryption), without the lock/dismount dance.
+    (*driver.DriverExtension).AddDevice = Some(add_device);
+
     driver.DriverUnload = Some(driver_unload);
     // Every device this driver owns (control + filters) shares one dispatcher
     // that routes by the device-extension kind.
@@ -127,6 +132,34 @@ pub unsafe extern "system" fn DriverEntry(
     }
 
     STATUS_SUCCESS
+}
+
+/// PnP AddDevice callback. Called for every volume device before any FSD mounts.
+///
+/// Attaches an unbound (pass-through) filter to the physical device object so that
+/// when IOCTL_JVCK_PREPARE later runs for this volume, it can use `filter_bind_volume`
+/// to activate encryption without needing to do lock/dismount. NTFS mounts above
+/// our filter → correct transparent-encryption stack.
+unsafe extern "C" fn add_device(driver: PDRIVER_OBJECT, pdo: PDEVICE_OBJECT) -> NTSTATUS {
+    vck_driver::driver_println!("add_device: pdo={:p}", pdo);
+
+    // Attach an UNBOUND filter to the physical device object before any FSD mounts.
+    // The filter has volume=NULL → all IRPs pass through transparently.
+    // IOCTL_JVCK_PREPARE will later find this filter by walking the device stack
+    // and bind it to a volume (activating encryption).
+    match vck_driver::filter::attach_filter_to_raw_device(driver, pdo) {
+        Ok((filter_do, lower_do)) => {
+            vck_driver::driver_println!(
+                "add_device: filter attached filter={:p} lower={:p}", filter_do, lower_do
+            );
+            // Note: filter is unbound (volume=NULL). PREPARE walks the stack to find it.
+            STATUS_SUCCESS
+        }
+        Err(err) => {
+            vck_driver::driver_println!("add_device: attach failed: {}", err);
+            STATUS_SUCCESS // Non-fatal: device still works without filter
+        }
+    }
 }
 
 #[panic_handler]

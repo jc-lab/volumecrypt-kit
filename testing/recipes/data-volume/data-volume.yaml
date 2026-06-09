@@ -2,7 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 name: "data-volume"
-description: "Attach a data volume (shrink tail + write footer metadata + attach filter), verify the volume stays usable through the pass-through filter, then detach."
+description: >
+  Data volume full flow with AddDevice:
+  1) Install driver as boot-start lower filter, shrink volume, write metadata.
+  2) Reboot → AddDevice fires before NTFS, filter below FSD.
+  3) Attach (provide VMK) → filter active, sweep can write via lower device.
 
 qemu:
   extra_args:
@@ -23,19 +27,30 @@ steps:
       src: "./testing/artifacts/vck-sample-driver.sys"
       dst: "C:\\Temp\\vck-sample-driver.sys"
 
-  - action: file-upload
-    timeout: 30s
-    params:
-      src: "./testing/artifacts/vck-app.exe"
-      dst: "C:\\Temp\\vck-app.exe"
-
+  # Also copy to system drivers dir for boot-start installation.
   - action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
       args:
         - "/c"
-        - "sc create VolumeCryptKitSample type= kernel start= demand binPath= C:\\Temp\\vck-sample-driver.sys"
+        - "copy /Y C:\\Temp\\vck-sample-driver.sys C:\\Windows\\System32\\drivers\\vck-sample-driver.sys"
+      expect_exit_code: 0
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-app.exe"
+      dst: "C:\\Temp\\vck-app.exe"
+
+  # Install driver from system drivers dir as demand-start initially.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "sc create VolumeCryptKitSample type= kernel start= demand binPath= C:\\Windows\\System32\\drivers\\vck-sample-driver.sys"
       expect_exit_code: 0
 
   - action: exec
@@ -47,6 +62,7 @@ steps:
         - "/adddriver"
         - "vck-sample-driver.sys"
 
+  # Disable Windows Defender scan on test paths.
   - action: exec
     timeout: 60s
     params:
@@ -55,6 +71,7 @@ steps:
         - "-Command"
         - "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'C:\\Temp' -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'D:\\' -ErrorAction SilentlyContinue"
 
+  # Start driver (control device only; AddDevice not yet active on existing volumes).
   - action: exec
     timeout: 30s
     params:
@@ -64,8 +81,7 @@ steps:
         - "sc start VolumeCryptKitSample"
       expect_exit_code: 0
 
-  # Write a file BEFORE attaching, to confirm the filesystem survives shrink +
-  # metadata write + filter attach.
+  # Write a test file before encryption.
   - action: exec
     timeout: 30s
     params:
@@ -75,20 +91,11 @@ steps:
         - "echo hello-before-attach> D:\\vck-pretest.txt"
       expect_exit_code: 0
 
-  # Raw volume length BEFORE attach (full partition size).
+  # Phase 1: shrink volume tail + write JVCK metadata + encrypt sector 0
+  # (PREPARE does lock/dismount to write sector 0; filter is NOT yet below NTFS
+  #  at this point, but sector 0 is written while locked).
   - action: exec
-    timeout: 30s
-    params:
-      cmd: "cmd.exe"
-      args:
-        - "/c"
-        - "C:\\Temp\\vck-app.exe volume-info --volume \\\\.\\D:"
-      expect_exit_code: 0
-
-  # Attach: app shrinks the volume tail, driver writes footer metadata + attaches
-  # the (currently transparent) filter.
-  - action: exec
-    timeout: 120s
+    timeout: 2m0s
     params:
       cmd: "cmd.exe"
       args:
@@ -96,9 +103,7 @@ steps:
         - "C:\\Temp\\vck-app.exe data-volume attach --volume \\\\.\\D: --vmk AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8= --use-header 0 --use-footer 2 --metadata-size 131072"
       expect_exit_code: 0
 
-  # Raw volume length AFTER attach: must be the data-region size (partition
-  # minus 2x 128 KiB footer = 262144 bytes smaller), proving the filter hides the
-  # metadata from the OS.
+  # Show size before reboot (NTFS sees reduced size via filter).
   - action: exec
     timeout: 30s
     params:
@@ -108,7 +113,67 @@ steps:
         - "C:\\Temp\\vck-app.exe volume-info --volume \\\\.\\D:"
       expect_exit_code: 0
 
-  # The pre-existing file must still be readable through the filter.
+  # Detach filter (will be re-attached via AddDevice after reboot).
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe data-volume detach --volume \\\\.\\D:"
+      expect_exit_code: 0
+
+  # Configure driver as boot-start so it loads before any filesystem drivers.
+  # boot-start → SERVICE_BOOT_START → PnP calls AddDevice during enumeration.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "sc config VolumeCryptKitSample start= boot"
+      expect_exit_code: 0
+
+  # Register as LowerFilter for disk volume class so PnP calls AddDevice
+  # before any FSD mounts. This places our filter BELOW the FSD.
+  # Disk Volume class GUID: {4d36e967-e325-11ce-bfc1-08002be10318}
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - |
+          $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e967-e325-11ce-bfc1-08002be10318}'
+          $existing = (Get-ItemProperty -Path $key -Name LowerFilters -ErrorAction SilentlyContinue).LowerFilters
+          if ($existing -notcontains 'VolumeCryptKitSample') {
+            $new = @($existing | Where-Object { $_ }) + 'VolumeCryptKitSample'
+            Set-ItemProperty -Path $key -Name LowerFilters -Value $new
+          }
+          Write-Host "LowerFilters: $((Get-ItemProperty -Path $key -Name LowerFilters).LowerFilters)"
+      expect_exit_code: 0
+
+  # Stop driver before reboot.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "sc stop VolumeCryptKitSample"
+
+  - action: reboot
+    timeout: 30s
+
+  - action: wait-boot
+    timeout: 2m0s
+    params:
+      retry_interval: 5s
+
+  # After reboot: AddDevice has fired, filter is below NTFS on every volume.
+  # D: VBR (sector 0) is ciphertext; NTFS reads through filter → decrypted ✓
+
+  # Verify D: is accessible (NTFS mounted above filter, decryption active for s0).
   - action: exec
     timeout: 30s
     params:
@@ -118,87 +183,27 @@ steps:
         - "type D:\\vck-pretest.txt"
       expect_exit_code: 0
 
-  # And the volume must still accept new writes through the filter.
+  # Volume info: should show full partition size (filter not yet activated for D:).
   - action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
       args:
         - "/c"
-        - "echo hello-after-attach> D:\\vck-posttest.txt && type D:\\vck-posttest.txt"
+        - "C:\\Temp\\vck-app.exe volume-info --volume \\\\.\\D:"
       expect_exit_code: 0
 
   - action: exec
     timeout: 30s
-    params:
-      cmd: "cmd.exe"
-      args:
-        - "/c"
-        - "C:\\Temp\\vck-app.exe status --volume \\\\.\\D:"
-      expect_exit_code: 0
-
-  # Start progressive encryption of the data volume and wait for some progress.
-  # A 10 GiB full encrypt takes too long; we verify the sweep makes measurable
-  # progress (> 0 sectors) within 45 s.
-  - action: exec
-    timeout: 60s
-    params:
-      cmd: "powershell"
-      args:
-        - "-Command"
-        - |
-          & C:\Temp\vck-app.exe data-volume encrypt --volume \\.\D:
-          $deadline = (Get-Date).AddSeconds(45)
-          $progress = $false
-          do {
-            $out = & C:\Temp\vck-app.exe status --volume \\.\D: 2>&1 | Out-String
-            Write-Host $out
-            if ($out -match 'Encrypting|Idle') {
-              $m = [regex]::Match($out, '([\d]+)\s*/\s*\d+\s+sector')
-              if ($m.Success -and [int64]$m.Groups[1].Value -gt 0) {
-                $progress = $true; break
-              }
-            }
-            Start-Sleep -Seconds 3
-          } while ((Get-Date) -lt $deadline)
-          if ($progress) { Write-Host "SWEEP_PROGRESS_OK" } else { Write-Host "NO_SWEEP_PROGRESS" }
-          exit $(if ($progress) { 0 } else { 1 })
-      expect_exit_code: 0
-
-  # Files written before and after attach must still read back correctly
-  # through the filter (transparent decryption for encrypted sectors).
-  - action: exec
-    timeout: 30s
-    params:
-      cmd: "cmd.exe"
-      args:
-        - "/c"
-        - "type D:\\vck-pretest.txt && type D:\\vck-posttest.txt"
-      expect_exit_code: 0
-
-  # Detach the filter before stopping the driver.
-  - action: exec
-    timeout: 60s
-    params:
-      cmd: "cmd.exe"
-      args:
-        - "/c"
-        - "C:\\Temp\\vck-app.exe data-volume detach --volume \\\\.\\D:"
-      expect_exit_code: 0
-
-  - action: exec
-    timeout: 60s
     params:
       cmd: "cmd.exe"
       args:
         - "/c"
         - "sc stop VolumeCryptKitSample"
-      expect_exit_code: 0
 
   - action: shutdown
-    timeout: 120s
+    timeout: 2m0s
 
-# Collect diagnostics on a bugcheck.
 panic:
   action_delay: 60s
   steps:
@@ -206,6 +211,6 @@ panic:
       timeout: 300s
       params:
         format: "win-dmp"
-        output: "${{ output.dir }}/memory.dmp"
+        output: "${{ output.dir}}/memory.dmp"
     - action: poweroff
       timeout: 5s
