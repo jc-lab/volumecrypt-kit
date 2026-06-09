@@ -9,4 +9,5 @@ pub mod manager;
 pub use context::FilterContext;
 pub use io::handle_filter_irp;
 pub use irp::pass_through;
-pub use manager::{attach_filter, detach_filter};
+pub use manager::{attach_filter, attach_filter_to_device, attach_filter_unbound,
+    detach_filter, filter_bind_volume};

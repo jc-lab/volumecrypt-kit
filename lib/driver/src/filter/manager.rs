@@ -1,8 +1,23 @@
 //! Volume filter device attach/detach.
 //!
-//! Creates an unnamed filter device object and attaches it above a target
-//! volume's device stack via `IoAttachDeviceToDeviceStackSafe`, tagging the
-//! device extension so the shared MajorFunction handlers can route IRPs.
+//! Creates an unnamed filter device object and attaches it to a volume's
+//! storage device stack. For NTFS I/O to pass through the filter (required for
+//! transparent encryption), the filter must be placed BELOW the filesystem (NTFS)
+//! and ABOVE the raw partition device — i.e.:
+//!
+//!   NTFS VCB
+//!     └── [Our Filter]   ← must be here
+//!          └── Raw Volume / Partition
+//!
+//! The only reliable way to achieve this without lock/dismount is via
+//! `IoRegisterFsRegistrationChange` (see `register_fs_change` below): the
+//! kernel calls our notification before the FSD finishes mounting, allowing us
+//! to attach to the raw partition device BEFORE NTFS places its VCB above it.
+//!
+//! `attach_to_device` is the low-level primitive used by both the notification
+//! path and the manual IOCTL path; the IOCTL path (`handle_jvck_attach`) calls
+//! it before the FSD has had a chance to attach to the raw device by supplying
+//! the raw partition device path directly.
 
 use alloc::sync::Arc;
 use core::ptr::null_mut;
@@ -14,7 +29,7 @@ use wdk_sys::{
         IoGetDeviceObjectPointer, ObfDereferenceObject,
     },
     DEVICE_OBJECT, DO_BUFFERED_IO, DO_DEVICE_INITIALIZING, DO_DIRECT_IO, DO_POWER_PAGABLE,
-    DRIVER_OBJECT, FILE_DEVICE_DISK, FILE_READ_DATA, PDEVICE_OBJECT, PFILE_OBJECT,
+    DRIVER_OBJECT, FILE_DEVICE_DISK, FILE_READ_DATA, FILE_WRITE_DATA, PDEVICE_OBJECT, PFILE_OBJECT,
 };
 
 use crate::{
@@ -27,9 +42,12 @@ use crate::{
 /// `target_nt_path` (e.g. `\??\D:`). On success the returned device object's
 /// extension owns a reference to `volume` (released by [`detach_filter`]).
 /// Returns `(filter_device_object, lower_device_object)`.
-/// `lower_device_object` is the device immediately below the filter in the
-/// stack; use it to open a handle via `ObOpenObjectByPointer` for I/O that must
-/// bypass the filter (e.g. the encryption sweep).
+///
+/// The filter is attached to the CURRENT top of the device stack. If the FSD
+/// (e.g. NTFS) has already mounted on the volume, the filter will land ABOVE
+/// the FSD. For correct transparent encryption the caller should ensure the
+/// filter is attached below the FSD (via the `IoRegisterFsRegistrationChange`
+/// path) or accept size-interception-only semantics.
 pub fn attach_filter(
     driver: *mut DRIVER_OBJECT,
     target_nt_path: &str,
@@ -55,15 +73,19 @@ pub fn attach_filter(
     let name = UnicodeString::from_str(target_nt_path);
     let mut file_obj: PFILE_OBJECT = null_mut();
     let mut target_do: PDEVICE_OBJECT = null_mut();
-    let status =
-        unsafe { IoGetDeviceObjectPointer(name.as_ptr(), FILE_READ_DATA, &mut file_obj, &mut target_do) };
+    let status = unsafe {
+        IoGetDeviceObjectPointer(
+            name.as_ptr(),
+            FILE_READ_DATA | FILE_WRITE_DATA,
+            &mut file_obj,
+            &mut target_do,
+        )
+    };
     if !nt_success(status) {
         unsafe { IoDeleteDevice(filter_do) };
         return Err(VckError::Io("IoGetDeviceObjectPointer(target) failed".into()));
     }
 
-    // Attach above the target. The attach holds its own stack reference, so the
-    // IoGetDeviceObjectPointer reference can be released immediately after.
     let mut lower: PDEVICE_OBJECT = null_mut();
     let status = unsafe { IoAttachDeviceToDeviceStackSafe(filter_do, target_do, &mut lower) };
     unsafe { ObfDereferenceObject(file_obj.cast()) };
@@ -79,6 +101,133 @@ pub fn attach_filter(
         (*ext).volume = Arc::into_raw(volume);
 
         // Inherit the relevant flags / type from the device below us.
+        (*filter_do).Flags |= (*lower).Flags & (DO_BUFFERED_IO | DO_DIRECT_IO | DO_POWER_PAGABLE);
+        (*filter_do).DeviceType = (*lower).DeviceType;
+        (*filter_do).Characteristics = (*lower).Characteristics;
+        (*filter_do).Flags &= !DO_DEVICE_INITIALIZING;
+    }
+
+    crate::driver_println!(
+        "filter: attached filter={:p} lower={:p} (NOTE: may be above FSD if FSD already mounted)",
+        filter_do, lower
+    );
+    Ok((filter_do, lower))
+}
+
+/// Create and attach a filter device object without binding it to a volume yet.
+///
+/// Used when the volume metadata needs to be read AFTER the filter is in place
+/// (e.g. the volume is dismounted so `ZwCreateFile` fails, but
+/// `IoAttachDeviceToDeviceStackSafe` still works via `IoGetDeviceObjectPointer`).
+/// Caller must call [`filter_bind_volume`] to complete setup once the
+/// `AttachedVolume` is built. If setup fails, call [`detach_filter`] to clean up.
+pub fn attach_filter_unbound(
+    driver: *mut DRIVER_OBJECT,
+    target_nt_path: &str,
+) -> VckResult<(PDEVICE_OBJECT, PDEVICE_OBJECT)> {
+    let mut filter_do: PDEVICE_OBJECT = null_mut();
+    let status = unsafe {
+        IoCreateDevice(
+            driver,
+            DEVICE_EXTENSION_SIZE,
+            null_mut(),
+            FILE_DEVICE_DISK,
+            0,
+            0,
+            &mut filter_do,
+        )
+    };
+    if !nt_success(status) {
+        return Err(VckError::Io("IoCreateDevice(filter) failed".into()));
+    }
+
+    let name = UnicodeString::from_str(target_nt_path);
+    let mut file_obj: PFILE_OBJECT = null_mut();
+    let mut target_do: PDEVICE_OBJECT = null_mut();
+    let status = unsafe {
+        IoGetDeviceObjectPointer(
+            name.as_ptr(),
+            FILE_READ_DATA | FILE_WRITE_DATA,
+            &mut file_obj,
+            &mut target_do,
+        )
+    };
+    if !nt_success(status) {
+        unsafe { IoDeleteDevice(filter_do) };
+        return Err(VckError::Io("IoGetDeviceObjectPointer(unbound) failed".into()));
+    }
+
+    let mut lower: PDEVICE_OBJECT = null_mut();
+    let status = unsafe { IoAttachDeviceToDeviceStackSafe(filter_do, target_do, &mut lower) };
+    unsafe { ObfDereferenceObject(file_obj.cast()) };
+    if !nt_success(status) || lower.is_null() {
+        unsafe { IoDeleteDevice(filter_do) };
+        return Err(VckError::Io("IoAttachDeviceToDeviceStackSafe(unbound) failed".into()));
+    }
+
+    unsafe {
+        // Mark as filter but leave volume pointer null until filter_bind_volume.
+        let ext = (*filter_do).DeviceExtension as *mut DeviceExtension;
+        (*ext).kind = DEVICE_KIND_FILTER;
+        (*ext).lower_device = lower;
+        (*ext).volume = null_mut();
+
+        (*filter_do).Flags |= (*lower).Flags & (DO_BUFFERED_IO | DO_DIRECT_IO | DO_POWER_PAGABLE);
+        (*filter_do).DeviceType = (*lower).DeviceType;
+        (*filter_do).Characteristics = (*lower).Characteristics;
+        (*filter_do).Flags &= !DO_DEVICE_INITIALIZING;
+    }
+    Ok((filter_do, lower))
+}
+
+/// Bind an `AttachedVolume` to a previously unbound filter device (see
+/// [`attach_filter_unbound`]).
+///
+/// # Safety
+/// `filter_do` must be one returned by `attach_filter_unbound` that has not yet
+/// been bound or detached.
+pub unsafe fn filter_bind_volume(filter_do: PDEVICE_OBJECT, volume: Arc<AttachedVolume>) {
+    let ext = (*filter_do).DeviceExtension as *mut DeviceExtension;
+    (*ext).volume = Arc::into_raw(volume);
+}
+
+/// Attach our filter to a specific device object (called from the
+/// `IoRegisterFsRegistrationChange` notification path where we know the raw
+/// partition device and can insert BELOW the FSD before it mounts).
+pub fn attach_filter_to_device(
+    driver: *mut DRIVER_OBJECT,
+    target_do: PDEVICE_OBJECT,
+    volume: Arc<AttachedVolume>,
+) -> VckResult<(PDEVICE_OBJECT, PDEVICE_OBJECT)> {
+    let mut filter_do: PDEVICE_OBJECT = null_mut();
+    let status = unsafe {
+        IoCreateDevice(
+            driver,
+            DEVICE_EXTENSION_SIZE,
+            null_mut(),
+            FILE_DEVICE_DISK,
+            0,
+            0,
+            &mut filter_do,
+        )
+    };
+    if !nt_success(status) {
+        return Err(VckError::Io("IoCreateDevice(filter) failed".into()));
+    }
+
+    let mut lower: PDEVICE_OBJECT = null_mut();
+    let status = unsafe { IoAttachDeviceToDeviceStackSafe(filter_do, target_do, &mut lower) };
+    if !nt_success(status) || lower.is_null() {
+        unsafe { IoDeleteDevice(filter_do) };
+        return Err(VckError::Io("IoAttachDeviceToDeviceStackSafe(device) failed".into()));
+    }
+
+    unsafe {
+        let ext = (*filter_do).DeviceExtension as *mut DeviceExtension;
+        (*ext).kind = DEVICE_KIND_FILTER;
+        (*ext).lower_device = lower;
+        (*ext).volume = Arc::into_raw(volume);
+
         (*filter_do).Flags |= (*lower).Flags & (DO_BUFFERED_IO | DO_DIRECT_IO | DO_POWER_PAGABLE);
         (*filter_do).DeviceType = (*lower).DeviceType;
         (*filter_do).Characteristics = (*lower).Characteristics;

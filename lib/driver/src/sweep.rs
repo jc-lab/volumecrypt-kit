@@ -9,18 +9,27 @@ use alloc::boxed::Box;
 use core::ffi::c_void;
 use core::ptr::null_mut;
 
+use alloc::sync::Arc;
 use vck_common::{VckError, VckResult};
 use wdk_sys::{
     ntddk::{
         KeInitializeEvent, KeSetEvent, KeWaitForSingleObject, ObReferenceObjectByHandle,
         ObfDereferenceObject, PsCreateSystemThread, PsTerminateSystemThread, ZwClose,
     },
-    HANDLE, KEVENT, LARGE_INTEGER, _EVENT_TYPE::NotificationEvent, _KWAIT_REASON::Executive,
-    _MODE::KernelMode,
+    HANDLE, KEVENT, LARGE_INTEGER, NTSTATUS, _EVENT_TYPE::NotificationEvent,
+    _KWAIT_REASON::Executive, _MODE::KernelMode,
 };
 
 use crate::nt::{nt_success, STATUS_SUCCESS};
-use crate::registry::VolumeAttachRegistry;
+use crate::registry::{AttachedVolume, VolumeAttachRegistry};
+
+extern "system" {
+    fn KeExpandKernelStackAndCallout(
+        callout: Option<unsafe extern "C" fn(*mut c_void)>,
+        parameter: *mut c_void,
+        size: usize,
+    ) -> NTSTATUS;
+}
 
 /// Sectors processed per volume per loop iteration (64 KiB at 512-byte sectors
 /// to keep allocations small on a tight kernel stack).
@@ -37,6 +46,20 @@ const TICK_IDLE_100NS: i64 = -2_000_000; // 200 ms poll while idle
 struct SweepContext {
     registry: &'static VolumeAttachRegistry,
     stop_event: KEVENT,
+}
+
+/// Per-batch callout context (one per volume per loop iteration).
+struct StepCtx {
+    volume: Arc<AttachedVolume>,
+    result: Option<VckResult<bool>>,
+}
+
+/// Runs one sweep batch on the expanded stack so the storage driver call chain
+/// has enough room. The default system thread stack (~12 KiB) is exhausted by
+/// `IoBuildSynchronousFsdRequest` + `IofCallDriver` + AES-XTS crypto.
+unsafe extern "C" fn step_callout(param: *mut c_void) {
+    let cx = &mut *(param as *mut StepCtx);
+    cx.result = Some(cx.volume.sweep_step(BATCH_SECTORS));
 }
 
 pub struct SweepWorker {
@@ -136,7 +159,21 @@ unsafe extern "C" fn sweep_thread(context: *mut c_void) {
     loop {
         let mut active = false;
         for volume in ctx.registry.all() {
-            match volume.sweep_step(BATCH_SECTORS) {
+            let mut step = StepCtx { volume, result: None };
+            let expand_st = unsafe {
+                KeExpandKernelStackAndCallout(
+                    Some(step_callout),
+                    (&mut step as *mut StepCtx).cast::<c_void>(),
+                    SWEEP_STACK_SIZE,
+                )
+            };
+            let result = if expand_st >= 0 {
+                step.result.take().unwrap_or(Ok(false))
+            } else {
+                crate::driver_println!("sweep: KeExpand failed 0x{:08x}", expand_st);
+                Ok(false)
+            };
+            match result {
                 Ok(true) => active = true,
                 Ok(false) => {}
                 Err(err) => {

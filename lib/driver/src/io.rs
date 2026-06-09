@@ -419,3 +419,48 @@ impl SectorIo for LowerDeviceIo {
         self.run_sync(IRP_MJ_WRITE, lba, buf.as_ptr() as *mut u8, buf.len())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Utility: open a synchronous kernel handle to a volume NT path and send
+// no-in/no-out FSCTLs. Used by `handle_jvck_attach` for lock/dismount/unlock.
+// ---------------------------------------------------------------------------
+
+/// Open a synchronous kernel handle to `nt_path`. Returns `None` if the open
+/// fails (caller decides whether that is fatal).
+pub fn open_volume_handle_raw(nt_path: &str) -> Option<wdk_sys::HANDLE> {
+    let name = UnicodeString::from_str(nt_path);
+    let mut oa: OBJECT_ATTRIBUTES = unsafe { core::mem::zeroed() };
+    oa.Length = size_of::<OBJECT_ATTRIBUTES>() as u32;
+    oa.ObjectName = name.as_ptr();
+    oa.Attributes = OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE;
+
+    let mut handle: wdk_sys::HANDLE = null_mut();
+    let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
+    let status = unsafe {
+        ZwCreateFile(
+            &mut handle,
+            FILE_READ_DATA | FILE_WRITE_DATA | SYNCHRONIZE,
+            &mut oa,
+            &mut iosb,
+            null_mut(),
+            FILE_ATTRIBUTE_NORMAL,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            FILE_OPEN,
+            FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+            null_mut(),
+            0,
+        )
+    };
+    if nt_success(status) { Some(handle) } else { None }
+}
+
+/// Send a no-in/no-out FSCTL to `handle`. Returns the NTSTATUS.
+pub fn send_fsctl(handle: wdk_sys::HANDLE, code: u32) -> i32 {
+    let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
+    unsafe {
+        ZwFsControlFile(
+            handle, null_mut(), None, null_mut(), &mut iosb,
+            code, null_mut(), 0, null_mut(), 0,
+        )
+    }
+}

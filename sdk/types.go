@@ -56,6 +56,11 @@ type JvckVolumeAttachRequest struct {
 	UseHeader    uint32 `msgpack:"use_header"`
 	UseFooter    uint32 `msgpack:"use_footer"`
 	MetadataSize uint32 `msgpack:"metadata_size"`
+	// NT kernel device path (e.g. `\Device\HarddiskVolume3`). When supplied,
+	// the driver uses this path instead of the Win32 VolumePath for ZwCreateFile,
+	// allowing access even when the volume's filesystem is dismounted.
+	// Obtain via VolumeNTDevicePath before calling Attach.
+	NTDevicePath string `msgpack:"nt_device_path,omitempty"`
 }
 
 // JvckVolumeAttachResponse is the IOCTL_JVCK_ATTACH response structure.

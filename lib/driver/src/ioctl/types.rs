@@ -14,11 +14,11 @@ pub const STATE_PAUSED: i32 = 3;
 
 /// IOCTL_JVCK_ATTACH request.
 ///
-/// The driver only ever OPENS existing JVCK metadata: first-time metadata
-/// creation (FVEK/volume-id generation + footer write over an extended-DASD
-/// handle) is performed by the user-space SDK before attach. So the FVEK and
-/// volume id are not part of this request; the layout fields are advisory and
-/// are authoritatively recovered from the on-disk header.
+/// The driver only ever OPENS existing JVCK metadata. When `nt_device_path` is
+/// present (e.g. `\Device\HarddiskVolume3`), the driver uses it for
+/// ZwCreateFile/IoGetDeviceObjectPointer instead of the Win32 volume_path.
+/// This NT path works even when the filesystem is transiently dismounted during
+/// the lock → attach-below-FSD → dismount → unlock sequence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JvckVolumeAttachReq {
     pub volume_path: String,
@@ -32,6 +32,11 @@ pub struct JvckVolumeAttachReq {
     pub use_footer: u32,
     #[serde(default)]
     pub metadata_size: u32,
+    /// NT kernel device path (e.g. `\Device\HarddiskVolume3`). When non-empty,
+    /// used instead of volume_path for kernel-mode I/O so access works even if
+    /// the filesystem is transiently dismounted.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub nt_device_path: String,
 }
 
 /// IOCTL_JVCK_ATTACH response.

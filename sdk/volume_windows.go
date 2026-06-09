@@ -92,11 +92,15 @@ const (
 	fsctlGetVolumeBitmap        = 0x0009006f
 	fsctlGetRetrievalPointers   = 0x00090073
 	fsctlMoveFile               = 0x00090074
-	shrinkPrepare               = 1
-	shrinkCommit                = 2
-	shrinkAbort                 = 3
-	bitmapBufferSize            = 1 << 16
-	retrievalBufferSize         = 1 << 12
+	// CTL_CODE(FILE_DEVICE_FILE_SYSTEM=9, fn, METHOD_BUFFERED=0, FILE_ANY_ACCESS)
+	fsctlLockVolume     = 0x00090018 // fn=6
+	fsctlUnlockVolume   = 0x0009001c // fn=7
+	fsctlDismountVolume = 0x00090020 // fn=8
+	shrinkPrepare       = 1
+	shrinkCommit        = 2
+	shrinkAbort         = 3
+	bitmapBufferSize    = 1 << 16
+	retrievalBufferSize = 1 << 12
 )
 
 // ShrinkVolumeTail reserves raw sectors at the end of a volume using
@@ -490,6 +494,92 @@ func maxInt64(a int64, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+// VolumeNTDevicePath returns the NT kernel device path for a Win32 volume path
+// (e.g. `\\.\D:` → `\Device\HarddiskVolume3`). The NT path works with
+// ZwCreateFile regardless of whether a filesystem is currently mounted.
+func VolumeNTDevicePath(volumePath string) (string, error) {
+	// Extract drive letter portion (e.g. "D:" from "\\.\D:" or "D:\").
+	trimmed := strings.TrimSpace(volumePath)
+	var driveLetter string
+	if strings.HasPrefix(trimmed, `\\.\`) || strings.HasPrefix(trimmed, `\\?\`) {
+		rest := trimmed[4:]
+		if len(rest) >= 2 && rest[1] == ':' {
+			driveLetter = strings.ToUpper(rest[:2])
+		}
+	} else if len(trimmed) >= 2 && trimmed[1] == ':' {
+		driveLetter = strings.ToUpper(trimmed[:2])
+	}
+	if driveLetter == "" {
+		return "", fmt.Errorf("cannot extract drive letter from %q", volumePath)
+	}
+
+	// QueryDosDeviceW returns the NT path (e.g. `\Device\HarddiskVolume3`).
+	letter16, err := windows.UTF16PtrFromString(driveLetter)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]uint16, 256)
+	n, err := windows.QueryDosDevice(letter16, &buf[0], uint32(len(buf)))
+	if err != nil {
+		return "", fmt.Errorf("QueryDosDevice(%s) failed: %w", driveLetter, err)
+	}
+	if n == 0 {
+		return "", fmt.Errorf("QueryDosDevice(%s) returned empty result", driveLetter)
+	}
+	// Result is a NUL-terminated string (possibly multi-string); take the first.
+	return windows.UTF16ToString(buf[:n]), nil
+}
+
+// LockDismountVolume locks the volume for exclusive access and dismounts the
+// file system (e.g. NTFS), causing it to detach from the device stack. The
+// caller MUST call UnlockVolume with the returned handle to re-allow mounting.
+//
+// This is required before the kernel driver attaches its filter so that the
+// filter is inserted below the file system rather than above it. After the
+// IOCTL_JVCK_ATTACH call returns, call UnlockVolume so Windows re-mounts the
+// file system above the newly inserted filter.
+func LockDismountVolume(volumePath string) (windows.Handle, error) {
+	// FSCTL_LOCK_VOLUME requires that no other processes have open handles to
+	// files on the volume. Open with FILE_SHARE_READ|FILE_SHARE_WRITE to avoid
+	// blocking other opens, and retry up to 5 times to handle brief holds.
+	handle, err := openVolumeHandle(volumePath, windows.GENERIC_READ|windows.GENERIC_WRITE)
+	if err != nil {
+		return windows.InvalidHandle, err
+	}
+	var bytesReturned uint32
+	var lockErr error
+	for i := 0; i < 5; i++ {
+		lockErr = windows.DeviceIoControl(handle, fsctlLockVolume, nil, 0, nil, 0, &bytesReturned, nil)
+		if lockErr == nil {
+			break
+		}
+	}
+	if lockErr != nil {
+		windows.CloseHandle(handle)
+		return windows.InvalidHandle, fmt.Errorf("FSCTL_LOCK_VOLUME failed: %w", lockErr)
+	}
+	if err := windows.DeviceIoControl(handle, fsctlDismountVolume, nil, 0, nil, 0, &bytesReturned, nil); err != nil {
+		// Non-fatal: unlock and close so the volume is usable.
+		_ = windows.DeviceIoControl(handle, fsctlUnlockVolume, nil, 0, nil, 0, &bytesReturned, nil)
+		windows.CloseHandle(handle)
+		return windows.InvalidHandle, fmt.Errorf("FSCTL_DISMOUNT_VOLUME failed: %w", err)
+	}
+	return handle, nil
+}
+
+// UnlockVolume releases the exclusive lock held by LockDismountVolume, allowing
+// the OS to re-mount the file system above the driver's filter. Closes the
+// handle on return.
+func UnlockVolume(handle windows.Handle) error {
+	var bytesReturned uint32
+	err := windows.DeviceIoControl(handle, fsctlUnlockVolume, nil, 0, nil, 0, &bytesReturned, nil)
+	windows.CloseHandle(handle)
+	if err != nil {
+		return fmt.Errorf("FSCTL_UNLOCK_VOLUME failed: %w", err)
+	}
+	return nil
 }
 
 // VolumeLengthAndSectorSize returns the current raw volume length and bytes per

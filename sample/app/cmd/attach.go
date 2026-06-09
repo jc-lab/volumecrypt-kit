@@ -44,6 +44,14 @@ var attachCmd = &cobra.Command{
 			fmt.Println("Existing JVCK metadata found; reusing it.")
 		}
 
+		// Resolve the NT device path BEFORE any lock/dismount so that the driver
+		// can use it with ZwCreateFile regardless of filesystem mount state.
+		ntDevicePath, err := vck.VolumeNTDevicePath(volumeFlag)
+		if err != nil {
+			return fmt.Errorf("failed to resolve NT device path: %w", err)
+		}
+		fmt.Printf("NT device path: %s\n", ntDevicePath)
+
 		client, err := vck.Open()
 		if err != nil {
 			return fmt.Errorf("failed to connect to driver: %w", err)
@@ -56,6 +64,7 @@ var attachCmd = &cobra.Command{
 			UseHeader:    useHeaderFlag,
 			UseFooter:    useFooterFlag,
 			MetadataSize: metadataSizeFlag,
+			NTDevicePath: ntDevicePath,
 		})
 		if err != nil {
 			return err
