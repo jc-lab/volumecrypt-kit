@@ -23,6 +23,7 @@ DRIVER_RUSTFLAGS = -C target-feature=+crt-static --cfg aes_force_soft
 build-driver: testing/signing/MyTestDriverCert.cer
 	MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "call G:\\BuildEnv\\SetupBuildEnv.cmd && cd /d . && set RUSTFLAGS=$(DRIVER_RUSTFLAGS) && cargo build --release -p vck-sample-driver --target x86_64-pc-windows-msvc"
 	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver.ps1 -InputPath ./target/x86_64-pc-windows-msvc/release/vck_sample_driver.dll -OutputPath ./testing/artifacts/vck-sample-driver.sys
+	cp ./sample/driver/vck-sample-driver.inf ./testing/artifacts/vck-sample-driver.inf
 
 build-crypto-test-driver: testing/signing/MyTestDriverCert.cer
 	MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "call G:\\BuildEnv\\SetupBuildEnv.cmd && cd /d . && set RUSTFLAGS=$(DRIVER_RUSTFLAGS) && cargo build --release -p vck-crypto-test-driver --target x86_64-pc-windows-msvc"
