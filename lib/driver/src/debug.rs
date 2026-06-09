@@ -33,6 +33,25 @@ pub fn debug_print(args: fmt::Arguments<'_>) {
     }
 }
 
+// `IoGetRemainingStackSize` is a header inline (not an ntoskrnl export), so we
+// compute the same thing from the current RSP and the thread's stack limit.
+// `PsGetCurrentThreadStackLimit` IS a real export; declare it like the rest of
+// the kernel routines (resolved against ntoskrnl.lib at link time).
+extern "system" {
+    fn PsGetCurrentThreadStackLimit() -> usize;
+}
+
+/// Approximate remaining kernel stack in bytes (current RSP minus the thread
+/// stack limit). Useful for spotting stack-pressure on the metadata/crypto path.
+pub fn remaining_stack() -> u64 {
+    let rsp: usize;
+    unsafe {
+        core::arch::asm!("mov {}, rsp", out(reg) rsp, options(nomem, nostack, preserves_flags));
+    }
+    let limit = unsafe { PsGetCurrentThreadStackLimit() };
+    rsp.saturating_sub(limit) as u64
+}
+
 pub fn panic_print(info: &PanicInfo<'_>) -> ! {
     let mut writer = PanicWriter::new();
     let _ = writer.write_str("panic: ");

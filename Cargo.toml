@@ -35,6 +35,7 @@ hmac = { version = "0.12", default-features = false }
 irql = { version = "0.1.6" }
 messagepack-serde = { version = "0.2", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_bytes = { version = "0.11", default-features = false, features = ["alloc"] }
 sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
 thiserror = { version = "1", default-features = false }

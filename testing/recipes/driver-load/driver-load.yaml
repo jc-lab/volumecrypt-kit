@@ -73,15 +73,6 @@ steps:
         - "C:\\Temp\\vck-app.exe status"
       expect_exit_code: 0
 
-  - action: exec
-    timeout: 3000s
-    params:
-      cmd: "cmd.exe"
-      args:
-        - "/c"
-        - "ping -n 1000 127.0.0.1"
-      expect_exit_code: 0
-
   - action: shutdown
     timeout: 120s
 
@@ -94,5 +85,5 @@ panic:
       params:
         format: "win-dmp"
         output: "${{ output.dir}}/memory.dmp"
-    - action: shutdown
-      timeout: 1s
+    - action: poweroff
+      timeout: 5s

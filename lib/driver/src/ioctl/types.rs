@@ -21,15 +21,18 @@ pub const STATE_PAUSED: i32 = 3;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JvckVolumeAttachReq {
     pub volume_path: String,
+    // Byte fields are msgpack BIN on the wire (Go encodes `[]byte` as bin), so
+    // they go through serde_bytes rather than the default Vec<u8> = sequence.
+    #[serde(with = "serde_bytes")]
     pub vmk: Vec<u8>,
     pub use_header: u32,
     pub use_footer: u32,
     pub metadata_size: u32,
-    #[serde(default)]
+    #[serde(default, with = "serde_bytes")]
     pub fvek_key1: Vec<u8>,
-    #[serde(default)]
+    #[serde(default, with = "serde_bytes")]
     pub fvek_key2: Vec<u8>,
-    #[serde(default)]
+    #[serde(default, with = "serde_bytes")]
     pub volume_id: Vec<u8>,
 }
 

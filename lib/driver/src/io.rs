@@ -21,11 +21,28 @@ use wdk_sys::{
         IofCallDriver, KeInitializeEvent, KeWaitForSingleObject, ObfDereferenceObject,
     },
     FILE_READ_DATA, FILE_WRITE_DATA, IO_STATUS_BLOCK, IRP_MJ_READ, IRP_MJ_WRITE, KEVENT,
-    LARGE_INTEGER, PDEVICE_OBJECT, PFILE_OBJECT, _EVENT_TYPE::NotificationEvent,
+    LARGE_INTEGER, PDEVICE_OBJECT, PFILE_OBJECT, PIRP, _EVENT_TYPE::NotificationEvent,
     _KWAIT_REASON::Executive, _MODE::KernelMode,
 };
 
 use crate::nt::{nt_success, UnicodeString, STATUS_PENDING};
+
+/// Set the FileObject in the IRP's next stack location (the one the target
+/// driver will see). Volume/disk devices opened via `IoGetDeviceObjectPointer`
+/// dereference the FileObject for raw reads/writes/IOCTLs; a NULL one bugchecks.
+unsafe fn set_next_file_object(irp: PIRP, file_object: PFILE_OBJECT) {
+    if file_object.is_null() {
+        return;
+    }
+    let next = (*irp)
+        .Tail
+        .Overlay
+        .__bindgen_anon_2
+        .__bindgen_anon_1
+        .CurrentStackLocation
+        .offset(-1);
+    (*next).FileObject = file_object;
+}
 
 // METHOD_BUFFERED disk IOCTLs (CTL_CODE values are stable across SDKs).
 const IOCTL_DISK_GET_DRIVE_GEOMETRY: u32 = 0x0007_0000;
@@ -63,6 +80,11 @@ impl KernelVolumeIo {
                 &mut device_object,
             )
         };
+        crate::driver_println!(
+            "KVIO: IoGetDeviceObjectPointer status=0x{:08x} stack={}",
+            status,
+            crate::debug::remaining_stack()
+        );
         if !nt_success(status) {
             return Err(VckError::Io("IoGetDeviceObjectPointer failed".into()));
         }
@@ -86,6 +108,7 @@ impl KernelVolumeIo {
     fn query_geometry(&mut self) -> VckResult<()> {
         // DISK_GEOMETRY is 24 bytes; over-allocate a little for safety.
         let mut geom = [0u8; 32];
+        crate::driver_println!("KVIO: ioctl DRIVE_GEOMETRY");
         self.device_ioctl(IOCTL_DISK_GET_DRIVE_GEOMETRY, &mut geom)?;
         let bps_off = DISK_GEOMETRY_BYTES_PER_SECTOR_OFFSET;
         let bytes_per_sector =
@@ -96,16 +119,28 @@ impl KernelVolumeIo {
 
         // GET_LENGTH_INFORMATION { LARGE_INTEGER Length } -> 8 bytes.
         let mut len = [0u8; 8];
+        crate::driver_println!("KVIO: ioctl LENGTH_INFO (bps={})", bytes_per_sector);
         self.device_ioctl(IOCTL_DISK_GET_LENGTH_INFO, &mut len)?;
         let total_bytes = u64::from_le_bytes(len);
 
         self.sector_size = bytes_per_sector;
         self.total_sectors = total_bytes / bytes_per_sector as u64;
+        crate::driver_println!(
+            "KVIO: geometry bps={} total_sectors={}",
+            bytes_per_sector,
+            self.total_sectors
+        );
         Ok(())
     }
 
     /// Issue a synchronous METHOD_BUFFERED device IOCTL with no input buffer.
     fn device_ioctl(&self, code: u32, output: &mut [u8]) -> VckResult<()> {
+        crate::driver_println!(
+            "KVIO: device_ioctl code=0x{:08x} outlen={} stack={}",
+            code,
+            output.len(),
+            crate::debug::remaining_stack()
+        );
         let mut event: KEVENT = unsafe { core::mem::zeroed() };
         let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
 
@@ -113,6 +148,7 @@ impl KernelVolumeIo {
             KeInitializeEvent(&mut event, NotificationEvent, 0);
         }
 
+        crate::driver_println!("KVIO: IoBuildDeviceIoControlRequest");
         let irp = unsafe {
             IoBuildDeviceIoControlRequest(
                 code,
@@ -126,11 +162,15 @@ impl KernelVolumeIo {
                 &mut iosb,
             )
         };
+        crate::driver_println!("KVIO: irp_built={}", (!irp.is_null()) as u32);
         if irp.is_null() {
             return Err(VckError::Io("IoBuildDeviceIoControlRequest failed".into()));
         }
+        unsafe { set_next_file_object(irp, self.file_object) };
 
+        crate::driver_println!("KVIO: IofCallDriver (dev ioctl)");
         let mut status = unsafe { IofCallDriver(self.device_object, irp) };
+        crate::driver_println!("KVIO: IofCallDriver returned 0x{:08x}", status);
         if status == STATUS_PENDING {
             unsafe {
                 let _ = KeWaitForSingleObject(
@@ -142,6 +182,7 @@ impl KernelVolumeIo {
                 );
                 status = iosb.__bindgen_anon_1.Status;
             }
+            crate::driver_println!("KVIO: waited iosb=0x{:08x}", status);
         }
         if !nt_success(status) {
             return Err(VckError::Io("volume geometry IOCTL failed".into()));
@@ -169,6 +210,13 @@ impl KernelVolumeIo {
         if len == 0 {
             return Ok(());
         }
+        crate::driver_println!(
+            "KVIO: run_sync major={} lba={} len={} stack={}",
+            major,
+            lba,
+            len,
+            crate::debug::remaining_stack()
+        );
         let byte_offset = lba
             .checked_mul(self.sector_size as u64)
             .ok_or_else(|| VckError::Io("sector offset overflow".into()))?;
@@ -200,6 +248,7 @@ impl KernelVolumeIo {
         if irp.is_null() {
             return Err(VckError::Io("IoBuildSynchronousFsdRequest failed".into()));
         }
+        unsafe { set_next_file_object(irp, self.file_object) };
 
         let mut status = unsafe { IofCallDriver(self.device_object, irp) };
         if status == STATUS_PENDING {
@@ -216,6 +265,7 @@ impl KernelVolumeIo {
             }
         }
 
+        crate::driver_println!("KVIO: run_sync done status=0x{:08x}", status);
         if !nt_success(status) {
             return Err(VckError::Io("volume I/O IRP failed".into()));
         }

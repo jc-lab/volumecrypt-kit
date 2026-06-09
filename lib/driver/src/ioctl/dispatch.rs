@@ -42,6 +42,12 @@ pub fn dispatch_ioctl<A: IoctlAuthorization>(
     input: &[u8],
 ) -> VckResult<IoctlResponse> {
     auth.authorize(ctx)?;
+    crate::driver_println!(
+        "dispatch: ioctl=0x{:08x} authorized, input_len={} stack={}",
+        ctx.ioctl_code,
+        input.len(),
+        crate::debug::remaining_stack()
+    );
     match ctx.ioctl_code {
         IOCTL_VCK_GET_STATUS => handle_get_status(registry, input),
         IOCTL_VCK_START_ENCRYPT => handle_start_encrypt(registry, input),
@@ -132,7 +138,20 @@ fn handle_pause(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<Ioct
 }
 
 fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
+    crate::driver_println!(
+        "jvck_attach: enter, decoding request stack={}",
+        crate::debug::remaining_stack()
+    );
     let req: JvckVolumeAttachReq = decode_req(input)?;
+    crate::driver_println!(
+        "jvck_attach: decoded path={} vmk_len={} fvek1_len={} use_h={} use_f={} md_size={}",
+        req.volume_path,
+        req.vmk.len(),
+        req.fvek_key1.len(),
+        req.use_header,
+        req.use_footer,
+        req.metadata_size
+    );
 
     if registry.get(&req.volume_path).is_some() {
         return Err(VckError::Unsupported("volume already attached"));
@@ -142,30 +161,48 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         partition_guid: Guid::nil(),
         device_path: win32_volume_path_to_nt(&req.volume_path),
     };
+    crate::driver_println!(
+        "jvck_attach: begin nt_path={} stack={}",
+        volume_id.device_path,
+        crate::debug::remaining_stack()
+    );
 
     // Open existing JVCK metadata, or create it on first-time encryption using
     // the app-provided FVEK / volume id. `open`/`create` each consume a fresh
     // KernelVolumeIo (the failed `open` drops its handle).
-    let store = match JvckMetadataStore::open(KernelVolumeIo::open_query(&volume_id)?, &req.vmk) {
-        Ok(store) => store,
+    let probe_io = KernelVolumeIo::open_query(&volume_id)?;
+    crate::driver_println!("jvck_attach: open_query ok");
+    let store = match JvckMetadataStore::open(probe_io, &req.vmk) {
+        Ok(store) => {
+            crate::driver_println!("jvck_attach: existing metadata opened");
+            store
+        }
         Err(VckError::NotFound(_)) => {
+            crate::driver_println!("jvck_attach: no metadata, creating");
             let options = JvckMetadataOptions {
                 use_header: req.use_header,
                 use_footer: req.use_footer,
                 metadata_size: req.metadata_size,
             };
-            JvckMetadataStore::create(
-                KernelVolumeIo::open_query(&volume_id)?,
+            let create_io = KernelVolumeIo::open_query(&volume_id)?;
+            let created = JvckMetadataStore::create(
+                create_io,
                 &req.vmk,
                 options,
                 to_key(&req.fvek_key1, "fvek_key1")?,
                 to_key(&req.fvek_key2, "fvek_key2")?,
                 to_volume_id(&req.volume_id)?,
-            )?
+            )?;
+            crate::driver_println!("jvck_attach: metadata created");
+            created
         }
-        Err(err) => return Err(err),
+        Err(err) => {
+            crate::driver_println!("jvck_attach: open failed: {}", err);
+            return Err(err);
+        }
     };
 
+    crate::driver_println!("jvck_attach: load_metadata");
     let meta = store.load_metadata()?;
     let offset_sector = store.offset_sector();
     let data_sectors = store.data_sector_count();
@@ -187,6 +224,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
     // Cipher + raw volume I/O for the background sweep. The sweep_io device
     // pointer is resolved BEFORE the filter is attached, so it targets the
     // volume device directly (below our filter) and never re-enters the filter.
+    crate::driver_println!("jvck_attach: build cipher + sweep_io");
     let cipher = AesXtsCipher::new(meta.fvek_key1, meta.fvek_key2)?;
     let sweep_io: Arc<dyn SectorIo> = Arc::new(KernelVolumeIo::open_query(&volume_id)?);
 
@@ -202,6 +240,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         sweep_io,
     });
     registry.insert(volume.clone());
+    crate::driver_println!("jvck_attach: registered, attaching filter");
 
     // Attach a transparent filter above the volume so live filesystem I/O can
     // (later) be encrypted/decrypted in flight.
@@ -217,6 +256,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
             return Err(err);
         }
     }
+    crate::driver_println!("jvck_attach: filter attached, done");
 
     encode_resp(&JvckVolumeAttachResp {
         offset_sector,

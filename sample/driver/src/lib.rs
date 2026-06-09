@@ -10,6 +10,7 @@ mod provider;
 
 pub use provider::VckVolumeProvider;
 
+use core::ffi::c_void;
 use core::panic::PanicInfo;
 
 use spin::{Lazy, Mutex};
@@ -40,6 +41,43 @@ const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as i32;
 const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000_000Du32 as i32;
 const STATUS_INVALID_DEVICE_REQUEST: NTSTATUS = 0xC000_0010u32 as i32;
 const STATUS_BUFFER_TOO_SMALL: NTSTATUS = 0xC000_0023u32 as i32;
+
+// The metadata/crypto path uses a large stack frame; run IOCTL dispatch on an
+// expanded kernel stack so the (deep) storage stack below us has headroom.
+const DISPATCH_STACK_SIZE: usize = 0x8000; // 32 KiB
+
+extern "system" {
+    fn KeExpandKernelStackAndCallout(
+        callout: Option<unsafe extern "C" fn(*mut c_void)>,
+        parameter: *mut c_void,
+        size: usize,
+    ) -> NTSTATUS;
+}
+
+/// Context passed to the expanded-stack dispatch callout.
+struct ExpandCtx {
+    ioctl_code: u32,
+    requestor_mode: RequestorMode,
+    input_ptr: *const u8,
+    input_len: usize,
+    result: Option<vck_driver::VckResult<alloc::vec::Vec<u8>>>,
+}
+
+/// Runs the actual IOCTL dispatch on the expanded stack.
+unsafe extern "C" fn dispatch_callout(parameter: *mut c_void) {
+    let cx = &mut *(parameter as *mut ExpandCtx);
+    let input: &[u8] = if cx.input_len == 0 {
+        &[]
+    } else {
+        core::slice::from_raw_parts(cx.input_ptr, cx.input_len)
+    };
+    let auth_ctx = IoctlAuthContext {
+        ioctl_code: cx.ioctl_code,
+        requestor_mode: cx.requestor_mode,
+        requestor_token: None,
+    };
+    cx.result = Some(dispatch_ioctl(&PROVIDER, &REGISTRY, &auth_ctx, input));
+}
 
 /// Kernel driver entry point.
 ///
@@ -193,13 +231,37 @@ unsafe extern "C" fn dispatch_device_control(
         _ => RequestorMode::User,
     };
 
-    let auth_ctx = IoctlAuthContext {
+    // Run the dispatch on an expanded kernel stack (the metadata/crypto path is
+    // stack-hungry and calls down the storage stack). Fall back to the current
+    // stack if expansion fails.
+    let mut ex = ExpandCtx {
         ioctl_code,
         requestor_mode,
-        requestor_token: None,
+        input_ptr: input.as_ptr(),
+        input_len: input.len(),
+        result: None,
+    };
+    let callout_status = unsafe {
+        KeExpandKernelStackAndCallout(
+            Some(dispatch_callout),
+            (&mut ex as *mut ExpandCtx).cast::<c_void>(),
+            DISPATCH_STACK_SIZE,
+        )
+    };
+    let dispatch_result = if callout_status >= 0 {
+        ex.result
+            .take()
+            .unwrap_or_else(|| Err(vck_driver::VckError::Io("dispatch callout did not run".into())))
+    } else {
+        let auth_ctx = IoctlAuthContext {
+            ioctl_code,
+            requestor_mode,
+            requestor_token: None,
+        };
+        dispatch_ioctl(&PROVIDER, &REGISTRY, &auth_ctx, input)
     };
 
-    match dispatch_ioctl(&PROVIDER, &REGISTRY, &auth_ctx, input) {
+    match dispatch_result {
         Ok(response) => {
             if response.len() > output_len {
                 complete_irp(irp, STATUS_BUFFER_TOO_SMALL, 0);

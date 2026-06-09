@@ -139,11 +139,12 @@ steps:
 
 # Collect diagnostics on a bugcheck.
 panic:
+  action_delay: 60s
   steps:
     - action: dump
       timeout: 300s
       params:
         format: "win-dmp"
         output: "${{ output.dir }}/memory.dmp"
-    - action: shutdown
-      timeout: 1s
+    - action: poweroff
+      timeout: 5s

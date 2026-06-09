@@ -34,6 +34,22 @@ invoke_driver_build() {
 - 실제 VM 안에서 테스트가 필요한 경우 test recipe 을 작성하고 Makefile 에서 테스트 할 수 있게 하세요.
 - VM 안에 10GB 용량의 `D:\` 파티션도 존재합니다.
 
+Debug Log 얻는 방법:
+- test recipe yaml 에 다음과 같이 0xe9 에 대해 debug.log 로 파일을 쓰도록 합니다.
+```yaml
+qemu:
+  extra_args:
+    - "-chardev"
+    - "file,id=debugout,path=${{ output.dir }}/debug.log"
+    - "-device"
+    - "isa-debugcon,iobase=0xe9,chardev=debugout"
+```
+- 그러면 lib/driver/src/debug.rs 을 통해 출력한 디버그 메세지를 읽을 수 있습니다.
+
+make 실행 방법:
+- 다음과 같이 msys64 에서 실행해야 합니다.
+- 예시) `C:/msys64/usr/bin/bash.exe -lc 'cd "$OLDPWD" 2>/dev/null; cd /d/workspace/volumecrypt-kit; make 필요한 명령' 2>&1` 
+
 ## 5. 구현
 
 - 구현 시 TODO.md 을 참고하고, 구현을 완료할 때마다 TODO.md 을 업데이트하세요.
