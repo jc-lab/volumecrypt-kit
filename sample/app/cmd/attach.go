@@ -43,6 +43,20 @@ var attachCmd = &cobra.Command{
 			return fmt.Errorf("failed to generate volume id: %w", err)
 		}
 
+		// Reserve space at the volume tail for the footer metadata replicas so
+		// the filesystem no longer occupies it; the driver then writes the JVCK
+		// metadata into that tail. Existing data volumes cannot use a header, so
+		// only the footer region is reserved. ShrinkVolumeTail targets an
+		// absolute size, so it is a no-op on re-attach.
+		reserved := uint64(useFooterFlag) * uint64(metadataSizeFlag)
+		if reserved == 0 {
+			return fmt.Errorf("--use-footer and --metadata-size must be greater than zero")
+		}
+		fmt.Printf("Reserving %d bytes at the volume tail for footer metadata...\n", reserved)
+		if err := vck.ShrinkVolumeTail(volumeFlag, reserved); err != nil {
+			return fmt.Errorf("failed to reserve volume tail: %w", err)
+		}
+
 		client, err := vck.Open()
 		if err != nil {
 			return fmt.Errorf("failed to connect to driver: %w", err)

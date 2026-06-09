@@ -21,7 +21,7 @@ use wdk_sys::{
 };
 use vck_driver::{
     device::{ControlDevice, DeviceExtension, DEVICE_KIND_FILTER},
-    filter::pass_through,
+    filter::{detach_filter, pass_through},
     ioctl::dispatch_ioctl,
     provider::{IoctlAuthContext, RequestorMode},
     SweepWorker, VolumeAttachRegistry,
@@ -101,6 +101,19 @@ unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
     if let Some(worker) = SWEEP.lock().take() {
         worker.stop();
     }
+
+    // Detach any volume filters still attached, so no filter device object
+    // outlives this driver's code.
+    for volume in REGISTRY.all() {
+        let filter_do = volume
+            .filter_device
+            .swap(core::ptr::null_mut(), core::sync::atomic::Ordering::AcqRel);
+        if !filter_do.is_null() {
+            detach_filter(filter_do);
+        }
+        REGISTRY.remove(&volume.volume_path);
+    }
+
     if let Some(control_device) = CONTROL_DEVICE.lock().take() {
         if let Err(err) = control_device.destroy() {
             vck_driver::driver_println!("sample-driver: control device destroy failed: {}", err);

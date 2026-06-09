@@ -88,7 +88,7 @@ impl SweepWorker {
             )
         };
         unsafe {
-            ZwClose(handle);
+            let _ = ZwClose(handle);
         }
         if !nt_success(ref_status) {
             // Thread is running but unjoinable: signal it to exit and fail.
@@ -151,7 +151,7 @@ unsafe extern "C" fn sweep_thread(context: *mut c_void) {
             break;
         }
     }
-    PsTerminateSystemThread(STATUS_SUCCESS);
+    let _ = PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
 /// Wait on the stop event for `timeout_100ns` (negative = relative). Returns

@@ -120,6 +120,45 @@ fn write_block<S: SectorIo>(
     io.write_sectors(lba, &sector)
 }
 
+fn read_metadata_at<S: SectorIo>(
+    io: &S,
+    sector_size: u32,
+    lba: u64,
+    vmk: &[u8],
+) -> VckResult<JvckMetadata> {
+    let block = read_block(io, sector_size, lba)?;
+    JvckMetadata::parse(&block, vmk)
+}
+
+/// Read the authoritative metadata to learn the layout (metadata_size, header /
+/// footer replica counts) WITHOUT knowing it in advance.
+///
+/// The volume's very last sector is always a footer Metadata block: the footer
+/// region sits at the end of the volume and, within a footer replica, the
+/// Metadata block is the last sector (`[vendor][Metadata]`). For header-only
+/// layouts (no footer) we fall back to sector 0 (`[Metadata][vendor]`).
+fn bootstrap<S: SectorIo>(
+    io: &S,
+    sector_size: u32,
+    volume_sectors: u64,
+    vmk: &[u8],
+) -> VckResult<JvckMetadata> {
+    if volume_sectors == 0 {
+        return Err(VckError::NotFound("empty volume"));
+    }
+    // A `JVCK` signature + valid Header CRC32 is checkable WITHOUT the VMK, so we
+    // can tell "blank volume" (-> NotFound, caller may create) apart from
+    // "metadata present but wrong VMK / corrupt" (-> propagate the auth error,
+    // so the caller never overwrites a real volume).
+    for lba in [volume_sectors - 1, 0] {
+        let block = read_block(io, sector_size, lba)?;
+        if JvckMetadata::verify_crc(&block).is_ok() {
+            return JvckMetadata::parse(&block, vmk);
+        }
+    }
+    Err(VckError::NotFound("no JVCK metadata present"))
+}
+
 impl<S: SectorIo> JvckMetadataStore<S> {
     /// Open an existing JVCK volume: locate a valid replica (last sector first,
     /// then first sector), authenticate with `vmk`, and compute geometry.
@@ -130,25 +169,9 @@ impl<S: SectorIo> JvckMetadataStore<S> {
         }
         let volume_sectors = io.total_sectors();
 
-        // Probe the last sector (footer fast path), then sector 0 (header).
-        let mut probes = Vec::new();
-        if volume_sectors > 0 {
-            probes.push(volume_sectors - 1);
-        }
-        probes.push(0);
-
-        let mut found = None;
-        for lba in probes {
-            if lba >= volume_sectors {
-                continue;
-            }
-            let block = read_block(&io, sector_size, lba)?;
-            if let Ok(meta) = JvckMetadata::parse(&block, vmk) {
-                found = Some(meta);
-                break;
-            }
-        }
-        let template = found.ok_or(VckError::NotFound("no valid JVCK metadata replica"))?;
+        // The layout (metadata_size, replica counts) is read from the volume
+        // itself — always available in the last sector (footer Metadata).
+        let template = bootstrap(&io, sector_size, volume_sectors, vmk)?;
 
         let options = JvckMetadataOptions {
             use_header: template.header_replica_count as u32,
@@ -211,18 +234,21 @@ impl<S: SectorIo> JvckMetadataStore<S> {
     /// up-to-date metadata. Recovery policy: among valid replicas, pick the one
     /// with the largest `encrypted_offset`.
     pub fn load_metadata(&self) -> VckResult<JvckMetadata> {
-        let rs = replica_sectors(self.options.metadata_size, self.geometry.sector_size);
+        let sector_size = self.geometry.sector_size;
+        // Re-read the layout from the last sector every time so metadata_size /
+        // replica counts come from the volume, not a possibly-stale cache.
+        let boot = bootstrap(&self.io, sector_size, self.volume_sectors, &self.vmk)?;
+        let rs = replica_sectors(boot.metadata_size, sector_size);
         let lbas = metadata_sector_lbas(
             self.volume_sectors,
             rs,
-            self.options.use_header,
-            self.options.use_footer,
+            boot.header_replica_count as u32,
+            boot.footer_replica_count as u32,
         );
 
         let mut best: Option<JvckMetadata> = None;
         for lba in lbas {
-            let block = read_block(&self.io, self.geometry.sector_size, lba)?;
-            if let Ok(meta) = JvckMetadata::parse(&block, &self.vmk) {
+            if let Ok(meta) = read_metadata_at(&self.io, sector_size, lba, &self.vmk) {
                 let replace = match &best {
                     Some(b) => meta.encrypted_offset > b.encrypted_offset,
                     None => true,
