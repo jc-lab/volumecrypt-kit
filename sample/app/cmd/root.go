@@ -48,6 +48,7 @@ func init() {
 
 	// data-volume subcommands.
 	dataVolumeCmd.AddCommand(attachCmd)
+	dataVolumeCmd.AddCommand(detachCmd)
 	dataVolumeCmd.AddCommand(newEncryptCmd())
 
 	// os-volume subcommands.

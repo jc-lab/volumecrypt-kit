@@ -13,12 +13,17 @@ build-common:
 testing/signing/MyTestDriverCert.cer: ./testing/signing/generate.sh
 	OUT_DIR=./testing/signing ./testing/signing/generate.sh
 
+# Driver-only rustflags: force soft AES (the kernel cannot safely use AES-NI/XMM
+# without saving extended processor state) and link the static CRT. panic=abort
+# comes from the workspace [profile] (test-safe; see Cargo.toml).
+DRIVER_RUSTFLAGS = -C target-feature=+crt-static --cfg aes_force_soft
+
 build-driver: testing/signing/MyTestDriverCert.cer
-	MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "call G:\\BuildEnv\\SetupBuildEnv.cmd && cd /d . && cargo build -p vck-sample-driver --target x86_64-pc-windows-msvc"
+	MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "call G:\\BuildEnv\\SetupBuildEnv.cmd && cd /d . && set RUSTFLAGS=$(DRIVER_RUSTFLAGS) && cargo build -p vck-sample-driver --target x86_64-pc-windows-msvc"
 	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver.ps1 -InputPath ./target/x86_64-pc-windows-msvc/debug/vck_sample_driver.dll -OutputPath ./testing/artifacts/vck-sample-driver.sys
 
 build-crypto-test-driver: testing/signing/MyTestDriverCert.cer
-	MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "call G:\\BuildEnv\\SetupBuildEnv.cmd && cd /d . && cargo build -p vck-crypto-test-driver --target x86_64-pc-windows-msvc"
+	MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "call G:\\BuildEnv\\SetupBuildEnv.cmd && cd /d . && set RUSTFLAGS=$(DRIVER_RUSTFLAGS) && cargo build -p vck-crypto-test-driver --target x86_64-pc-windows-msvc"
 	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver.ps1 -InputPath ./target/x86_64-pc-windows-msvc/debug/vck_crypto_test_driver.dll -OutputPath ./testing/artifacts/vck-crypto-test-driver.sys
 
 build-loader:
@@ -42,6 +47,9 @@ test-vm-driver-load: $(TEST_VM_DIR) build-driver build-app
 
 test-vm-os-volume-prepare: $(TEST_VM_DIR) build-app
 	test-foundry.exe --vm-name=win11 test --output ./testing/results/os-volume-prepare --test ./testing/recipes/os-volume-prepare/os-volume-prepare.yaml
+
+test-vm-data-volume: $(TEST_VM_DIR) build-driver build-app
+	test-foundry.exe --vm-name=win11 test --output ./testing/results/data-volume --test ./testing/recipes/data-volume/data-volume.yaml
 
 test-vm-crypto-test: $(TEST_VM_DIR) build-crypto-test-driver
 	test-foundry.exe --vm-name=win11 test --output ./testing/results/crypto-test --test ./testing/recipes/crypto-test/crypto-test.yaml

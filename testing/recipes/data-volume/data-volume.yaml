@@ -1,0 +1,149 @@
+# Copyright 2026 JC-Lab
+# SPDX-License-Identifier: Apache-2.0
+
+name: "data-volume"
+description: "Attach a data volume (shrink tail + write footer metadata + attach filter), verify the volume stays usable through the pass-through filter, then detach."
+
+qemu:
+  extra_args:
+    - "-chardev"
+    - "file,id=debugout,path=${{ output.dir }}/debug.log"
+    - "-device"
+    - "isa-debugcon,iobase=0xe9,chardev=debugout"
+
+steps:
+  - action: wait-boot
+    timeout: 120s
+    params:
+      retry_interval: 5s
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-sample-driver.sys"
+      dst: "C:\\Temp\\vck-sample-driver.sys"
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-app.exe"
+      dst: "C:\\Temp\\vck-app.exe"
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "sc create VolumeCryptKitSample type= kernel start= demand binPath= C:\\Temp\\vck-sample-driver.sys"
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "verifier.exe"
+      args:
+        - "/volatile"
+        - "/adddriver"
+        - "vck-sample-driver.sys"
+
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'C:\\Temp' -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'D:\\' -ErrorAction SilentlyContinue"
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "sc start VolumeCryptKitSample"
+      expect_exit_code: 0
+
+  # Write a file BEFORE attaching, to confirm the filesystem survives shrink +
+  # metadata write + filter attach.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "echo hello-before-attach> D:\\vck-pretest.txt"
+      expect_exit_code: 0
+
+  # Attach: app shrinks the volume tail, driver writes footer metadata + attaches
+  # the (currently transparent) filter.
+  - action: exec
+    timeout: 120s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe data-volume attach --volume \\\\.\\D: --vmk AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8= --use-header 0 --use-footer 2 --metadata-size 131072"
+      expect_exit_code: 0
+
+  # The pre-existing file must still be readable through the filter.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "type D:\\vck-pretest.txt"
+      expect_exit_code: 0
+
+  # And the volume must still accept new writes through the filter.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "echo hello-after-attach> D:\\vck-posttest.txt && type D:\\vck-posttest.txt"
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe status --volume \\\\.\\D:"
+      expect_exit_code: 0
+
+  # Detach the filter before stopping the driver.
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe data-volume detach --volume \\\\.\\D:"
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "sc stop VolumeCryptKitSample"
+      expect_exit_code: 0
+
+  - action: shutdown
+    timeout: 120s
+
+# Collect diagnostics on a bugcheck.
+panic:
+  steps:
+    - action: dump
+      timeout: 300s
+      params:
+        format: "win-dmp"
+        output: "${{ output.dir }}/memory.dmp"
+    - action: shutdown
+      timeout: 1s
