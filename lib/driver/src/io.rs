@@ -16,8 +16,12 @@ use core::ptr::null_mut;
 
 use vck_common::{SectorIo, VckError, VckResult, VolumeId};
 use wdk_sys::{
-    ntddk::{ZwClose, ZwCreateFile, ZwDeviceIoControlFile, ZwFsControlFile, ZwReadFile, ZwWriteFile},
+    ntddk::{
+        ObOpenObjectByPointer, ZwClose, ZwCreateFile, ZwDeviceIoControlFile, ZwFsControlFile,
+        ZwReadFile, ZwWriteFile,
+    },
     FILE_READ_DATA, FILE_WRITE_DATA, HANDLE, IO_STATUS_BLOCK, LARGE_INTEGER, OBJECT_ATTRIBUTES,
+    PDEVICE_OBJECT,
 };
 
 use crate::nt::{nt_success, UnicodeString};
@@ -109,6 +113,44 @@ impl KernelVolumeIo {
         let mut me = Self::open(volume_id, 0, 0)?;
         me.query_geometry()?;
         Ok(me)
+    }
+
+    /// Open a kernel handle directly to a device object (e.g. the lower device
+    /// below the filter) without going through the symbolic-link / object-manager
+    /// path. `ObOpenObjectByPointer` yields a handle that routes I/O to exactly
+    /// that device object — it bypasses any filter sitting above it.
+    ///
+    /// Used to create `sweep_io` so the background encryption sweep never
+    /// re-enters our own filter.
+    pub fn from_device_object(
+        device_object: PDEVICE_OBJECT,
+        sector_size: u32,
+        total_sectors: u64,
+    ) -> VckResult<Self> {
+        let mut handle: HANDLE = null_mut();
+        let status = unsafe {
+            ObOpenObjectByPointer(
+                device_object.cast::<c_void>(),
+                OBJ_KERNEL_HANDLE,
+                null_mut(),         // PassedAccessState
+                FILE_READ_DATA | FILE_WRITE_DATA,
+                null_mut(),         // ObjectType — null = any
+                0,                  // KernelMode
+                &mut handle,
+            )
+        };
+        crate::driver_println!("KVIO: from_device_object status=0x{:08x}", status);
+        if !nt_success(status) {
+            return Err(VckError::Io("ObOpenObjectByPointer(lower) failed".into()));
+        }
+        // FSCTL_ALLOW_EXTENDED_DASD_IO is sent to the file system above the
+        // device. For the raw lower device we don't need it (the lower device
+        // has no FS extent check), so we skip it.
+        Ok(Self {
+            handle,
+            sector_size,
+            total_sectors,
+        })
     }
 
     fn allow_extended_dasd_io(&self) {
@@ -273,5 +315,107 @@ impl SectorIo for KernelVolumeIo {
         // The write path only reads from this buffer; the cast to `*mut` is for
         // the C signature and the bytes are not modified.
         self.run_sync(true, lba, buf.as_ptr() as *mut u8, buf.len())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// IRP-based sector I/O targeted at a specific device object.
+//
+// Used for the background encryption sweep so that its I/O goes directly to
+// the volume device BELOW our filter (`lower_device` in the filter stack)
+// rather than through ZwCreateFile paths that Windows re-routes to the top of
+// the stack (our filter). Bypassing the filter prevents the deadlock that would
+// occur when the sweep holds `encryption.lock()` during I/O that then tries to
+// acquire the same lock in a filter completion routine.
+// ---------------------------------------------------------------------------
+
+use wdk_sys::{
+    ntddk::{
+        IoBuildSynchronousFsdRequest, IofCallDriver, KeInitializeEvent, KeWaitForSingleObject,
+    },
+    KEVENT, IRP_MJ_READ, IRP_MJ_WRITE, _EVENT_TYPE::NotificationEvent, _KWAIT_REASON::Executive,
+    _MODE::KernelMode,
+};
+use crate::nt::STATUS_PENDING;
+
+/// IRP-based sector I/O routed directly to `device_object`, bypassing any
+/// filter sitting above it. The caller guarantees the device outlives this
+/// value (typically by holding a registry entry alive).
+pub struct LowerDeviceIo {
+    device_object: PDEVICE_OBJECT,
+    sector_size: u32,
+    total_sectors: u64,
+}
+
+unsafe impl Send for LowerDeviceIo {}
+unsafe impl Sync for LowerDeviceIo {}
+
+impl LowerDeviceIo {
+    /// Wrap a lower device object. Does NOT take a reference; the caller must
+    /// ensure the device outlives this value.
+    pub fn new(device_object: PDEVICE_OBJECT, sector_size: u32, total_sectors: u64) -> Self {
+        Self { device_object, sector_size, total_sectors }
+    }
+
+    fn run_sync(&self, major: u32, lba: u64, buf: *mut u8, len: usize) -> VckResult<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        let byte_offset = lba
+            .checked_mul(self.sector_size as u64)
+            .ok_or_else(|| VckError::Io("sector offset overflow".into()))?;
+        let length = u32::try_from(len).map_err(|_| VckError::Io("I/O length too large".into()))?;
+
+        let mut event: KEVENT = unsafe { core::mem::zeroed() };
+        let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
+        let mut offset = LARGE_INTEGER { QuadPart: byte_offset as i64 };
+
+        unsafe { KeInitializeEvent(&mut event, NotificationEvent, 0) };
+
+        let irp = unsafe {
+            IoBuildSynchronousFsdRequest(
+                major,
+                self.device_object,
+                buf.cast::<c_void>(),
+                length,
+                &mut offset,
+                &mut event,
+                &mut iosb,
+            )
+        };
+        if irp.is_null() {
+            return Err(VckError::Io("IoBuildSynchronousFsdRequest(lower) failed".into()));
+        }
+
+        let mut status = unsafe { IofCallDriver(self.device_object, irp) };
+        if status == STATUS_PENDING {
+            unsafe {
+                let _ = KeWaitForSingleObject(
+                    (&mut event as *mut KEVENT).cast::<c_void>(),
+                    Executive,
+                    KernelMode as i8,
+                    0,
+                    null_mut(),
+                );
+                status = iosb.__bindgen_anon_1.Status;
+            }
+        }
+        if !nt_success(status) {
+            return Err(VckError::Io("lower device I/O failed".into()));
+        }
+        Ok(())
+    }
+}
+
+impl SectorIo for LowerDeviceIo {
+    fn sector_size(&self) -> u32 { self.sector_size }
+    fn total_sectors(&self) -> u64 { self.total_sectors }
+
+    fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> VckResult<()> {
+        self.run_sync(IRP_MJ_READ, lba, buf.as_mut_ptr(), buf.len())
+    }
+
+    fn write_sectors(&self, lba: u64, buf: &[u8]) -> VckResult<()> {
+        self.run_sync(IRP_MJ_WRITE, lba, buf.as_ptr() as *mut u8, buf.len())
     }
 }

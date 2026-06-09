@@ -137,6 +137,17 @@ steps:
         - "C:\\Temp\\vck-app.exe status --volume \\\\.\\D:"
       expect_exit_code: 0
 
+  # Files written before and after attach must still read back correctly
+  # through the filter.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "type D:\\vck-pretest.txt && type D:\\vck-posttest.txt"
+      expect_exit_code: 0
+
   # Detach the filter before stopping the driver.
   - action: exec
     timeout: 60s

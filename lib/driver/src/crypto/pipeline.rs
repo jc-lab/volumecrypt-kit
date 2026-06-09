@@ -11,12 +11,12 @@
 
 use crate::crypto::aes_xts::AesXtsCipher;
 
-pub struct CryptoPipeline {
-    cipher: AesXtsCipher,
+pub struct CryptoPipeline<'a> {
+    cipher: &'a AesXtsCipher,
 }
 
-impl CryptoPipeline {
-    pub fn new(cipher: AesXtsCipher) -> Self {
+impl<'a> CryptoPipeline<'a> {
+    pub fn new(cipher: &'a AesXtsCipher) -> Self {
         Self { cipher }
     }
 

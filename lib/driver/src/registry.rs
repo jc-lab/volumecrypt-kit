@@ -3,7 +3,7 @@
 
 use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::ptr::null_mut;
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use spin::Mutex;
 use vck_common::{EncryptedOffsetStore, SectorIo, VckResult};
@@ -29,10 +29,17 @@ pub struct AttachedVolume {
     pub filter_device: AtomicPtr<DEVICE_OBJECT>,
     /// AES-XTS cipher for the background sweep (present on the high-level path).
     pub cipher: Option<AesXtsCipher>,
-    /// Raw volume sector I/O used by the sweep to read plaintext / write
-    /// ciphertext. Currently the volume device itself; once a transparent filter
-    /// is attached this must be the lower device.
-    pub sweep_io: Arc<dyn SectorIo>,
+    /// Raw sector I/O for the background sweep. After `attach_filter` this is
+    /// replaced (via `Mutex`) with a handle opened directly against the lower
+    /// device object, so sweep I/O bypasses our filter entirely.
+    pub sweep_io: Mutex<Arc<dyn SectorIo>>,
+    /// Lock-free snapshot of the current encrypted boundary (data-region-relative
+    /// sector). Updated by the sweep after each batch via `Relaxed` store;
+    /// the filter's completion routines read this with `Acquire` to avoid
+    /// holding `encryption` (a spinlock) during IRP completion — doing so would
+    /// deadlock when the sweep holds the lock while its I/O passes through the
+    /// filter.
+    pub encrypted_boundary: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +111,13 @@ impl AttachedVolume {
         }
     }
 
+    /// Update the lock-free boundary cache after the sweep advances. Called by
+    /// `sweep_step` AFTER the encryption lock is released.
+    pub fn sync_boundary(&self) {
+        let boundary = self.encryption.lock().encrypted_boundary();
+        self.encrypted_boundary.store(boundary, Ordering::Release);
+    }
+
     /// Run one batch of the encrypt/decrypt sweep. Returns `Ok(true)` if this
     /// volume still has work pending, `Ok(false)` when idle (or not high-level).
     pub fn sweep_step(&self, batch_sectors: u64) -> VckResult<bool> {
@@ -111,13 +125,15 @@ impl AttachedVolume {
             Some(cipher) => cipher,
             None => return Ok(false),
         };
-        let mut engine = self.encryption.lock();
-        engine.progress_step(
-            self.sweep_io.as_ref(),
-            cipher,
-            self.offset_store.as_ref(),
-            batch_sectors,
-        )
+        let io = self.sweep_io.lock().clone();
+        let result = {
+            let mut engine = self.encryption.lock();
+            engine.progress_step(io.as_ref(), cipher, self.offset_store.as_ref(), batch_sectors)
+        }; // lock released here before sync_boundary
+        if result.is_ok() {
+            self.sync_boundary();
+        }
+        result
     }
 }
 

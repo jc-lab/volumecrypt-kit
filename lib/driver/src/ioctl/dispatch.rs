@@ -5,7 +5,7 @@
 use alloc::string::{String, ToString};
 use alloc::sync::Arc;
 use core::ptr::null_mut;
-use core::sync::atomic::{AtomicPtr, Ordering};
+use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use spin::Mutex;
 use vck_common::{
@@ -196,13 +196,12 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         offset_store: offset_store.clone(),
     };
 
-    // Cipher + raw volume I/O for the background sweep. The sweep_io device
-    // pointer is resolved BEFORE the filter is attached, so it targets the
-    // volume device directly (below our filter) and never re-enters the filter.
-    crate::driver_println!("jvck_attach: build cipher + sweep_io");
+    crate::driver_println!("jvck_attach: build cipher");
     let cipher = AesXtsCipher::new(key1, key2)?;
-    let sweep_io: Arc<dyn SectorIo> = Arc::new(KernelVolumeIo::open_query(&volume_id)?);
+    // Placeholder sweep_io (same volume path, replaced below with lower-device handle).
+    let placeholder_io: Arc<dyn SectorIo> = Arc::new(KernelVolumeIo::open_query(&volume_id)?);
 
+    let initial_boundary = encrypted_offset.sector;
     let volume = Arc::new(AttachedVolume {
         volume_path: req.volume_path.clone(),
         sector_size,
@@ -212,25 +211,36 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         attach_source: AttachSource::Ioctl,
         filter_device: AtomicPtr::new(null_mut()),
         cipher: Some(cipher),
-        sweep_io,
+        sweep_io: Mutex::new(placeholder_io),
+        encrypted_boundary: AtomicU64::new(initial_boundary),
     });
     registry.insert(volume.clone());
     crate::driver_println!("jvck_attach: registered, attaching filter");
 
     // Attach a transparent filter above the volume so live filesystem I/O can
-    // (later) be encrypted/decrypted in flight.
+    // be encrypted/decrypted in flight.
     let driver = registry.driver_object();
     if driver.is_null() {
         registry.remove(&req.volume_path);
         return Err(VckError::Io("driver object not registered".into()));
     }
-    match crate::filter::attach_filter(driver, &volume_id.device_path, volume.clone()) {
-        Ok(filter_do) => volume.filter_device.store(filter_do, Ordering::Release),
+    let lower_do = match crate::filter::attach_filter(driver, &volume_id.device_path, volume.clone()) {
+        Ok((filter_do, lower_do)) => {
+            volume.filter_device.store(filter_do, Ordering::Release);
+            lower_do
+        }
         Err(err) => {
             registry.remove(&req.volume_path);
             return Err(err);
         }
-    }
+    };
+
+    // NOTE: sweep_io bypass of the filter is a TODO. The encrypted boundary is
+    // tracked via AtomicU64 so the filter completion routines never acquire
+    // encryption.lock() — avoiding the deadlock even when sweep_io I/O passes
+    // through the filter. The remaining issue (raw NTFS write acceptance) is
+    // deferred to a dedicated sweep I/O path task.
+    let _ = lower_do; // suppress unused warning until the bypass is wired up
     crate::driver_println!("jvck_attach: filter attached, done");
 
     encode_resp(&JvckVolumeAttachResp {

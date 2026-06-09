@@ -1,40 +1,65 @@
 //! Filter IRP interception.
 //!
-//! Two transforms keep the metadata regions invisible to the OS and present the
-//! data region as the whole volume:
-//! - Size-query IOCTLs (`GET_LENGTH_INFO`, `GET_PARTITION_INFO[_EX]`) have their
-//!   reported length rewritten to the data-region size on completion.
-//! - READ/WRITE byte offsets are shifted down by `offset_sector` so OS-relative
-//!   LBA 0 maps to the first data sector (a no-op for footer-only data volumes,
-//!   where `offset_sector == 0`).
+//! Three transforms are applied to live filesystem I/O:
 //!
-//! AES-XTS in-flight crypto (decrypt on read completion, encrypt on write) will
-//! be layered on top of these transforms.
+//! 1. **Size-query IOCTLs** (`GET_LENGTH_INFO`, `GET_PARTITION_INFO[_EX]`):
+//!    completion rewrites the reported length to the data-region size, hiding
+//!    the header/footer metadata from the OS.
+//!
+//! 2. **READ/WRITE byte-offset shift**: `offset_sector` is added to the byte
+//!    offset so OS-relative LBA 0 lands on the first data sector. No-op when
+//!    `offset_sector == 0` (footer-only data volumes).
+//!
+//! 3. **AES-XTS in-flight crypto**:
+//!    - READ: a completion routine decrypts sectors that lie within the
+//!      encrypted span in-place (the MDL pages are writable in kernel mode).
+//!    - WRITE: a shadow (NonPagedPool) buffer is allocated, the caller's data is
+//!      copied and encrypted, and the IRP's MDL is replaced with one covering the
+//!      shadow buffer. A completion routine restores the original MDL and frees
+//!      the shadow resources.
+//!
+//! `encrypted_offset` is fetched lock-free from the `EncryptionEngine` snapshot
+//! so the filter hot-path does not block on the progress mutex.
 
 use core::ffi::c_void;
+use core::ptr::null_mut;
 
 use wdk_sys::{
-    ntddk::IofCallDriver, IRP_MJ_DEVICE_CONTROL, IRP_MJ_READ, IRP_MJ_WRITE, NTSTATUS,
-    PDEVICE_OBJECT, PIO_STACK_LOCATION, PIRP, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR,
-    SL_INVOKE_ON_SUCCESS, SL_PENDING_RETURNED,
+    ntddk::{
+        ExAllocatePool2, ExFreePool, IoAllocateMdl, IoFreeMdl, IofCallDriver,
+        MmBuildMdlForNonPagedPool, MmMapLockedPagesSpecifyCache,
+    },
+    IRP_MJ_DEVICE_CONTROL, IRP_MJ_READ, IRP_MJ_WRITE, NTSTATUS, PDEVICE_OBJECT,
+    PIO_STACK_LOCATION, PIRP, PMDL, SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS,
+    SL_PENDING_RETURNED,
 };
 
-use crate::{device::DeviceExtension, filter::pass_through, nt::nt_success, registry::AttachedVolume};
+use core::sync::atomic::Ordering;
 
-// Returning this from a completion routine lets the IRP keep completing up the
-// stack (as opposed to STATUS_MORE_PROCESSING_REQUIRED, which halts it).
+use crate::{
+    crypto::pipeline::CryptoPipeline,
+    device::DeviceExtension,
+    filter::pass_through,
+    nt::nt_success,
+    registry::AttachedVolume,
+};
+
+// POOL_FLAG_NON_PAGED = 0x40 (POOL_FLAG_NON_PAGED from ntddk).
+const POOL_FLAG_NON_PAGED: u64 = 0x0000_0000_0000_0040;
+// Allocation tag "VCKI" (little-endian).
+const VCK_POOL_TAG: u32 = u32::from_le_bytes(*b"VCKI");
+
 const STATUS_CONTINUE_COMPLETION: NTSTATUS = 0;
+const STATUS_MORE_PROCESSING_REQUIRED: NTSTATUS = 0x0000_0103u32 as i32;
 
-// METHOD_BUFFERED size-query IOCTLs and the byte offset of the LONGLONG length
-// field within their (system-buffer) output structure.
+// METHOD_BUFFERED size-query IOCTLs: byte offset of the 8-byte length field
+// within the (system-buffer) output structure.
 const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405C; // GET_LENGTH_INFORMATION.Length @ 0
 const IOCTL_DISK_GET_PARTITION_INFO: u32 = 0x0007_4004; // PARTITION_INFORMATION.PartitionLength @ 8
 const IOCTL_DISK_GET_PARTITION_INFO_EX: u32 = 0x0007_0048; // PARTITION_INFORMATION_EX.PartitionLength @ 16
 
-/// Byte offset of the 8-byte length field to rewrite, for the size-query IOCTLs
-/// we intercept; `None` for any other control code.
-fn size_field_offset(ioctl_code: u32) -> Option<usize> {
-    match ioctl_code {
+fn size_field_offset(code: u32) -> Option<usize> {
+    match code {
         IOCTL_DISK_GET_LENGTH_INFO => Some(0),
         IOCTL_DISK_GET_PARTITION_INFO => Some(8),
         IOCTL_DISK_GET_PARTITION_INFO_EX => Some(16),
@@ -55,75 +80,246 @@ unsafe fn next_sl(irp: PIRP) -> PIO_STACK_LOCATION {
     current_sl(irp).offset(-1)
 }
 
-/// Entry point for every IRP arriving on a filter device object. Reads the
-/// per-volume context from the device extension and routes by major function.
-///
-/// # Safety
-/// `filter_do` must be one of this driver's filter device objects and `irp` a
-/// valid IRP it owns.
-pub unsafe fn handle_filter_irp(filter_do: PDEVICE_OBJECT, irp: PIRP) -> NTSTATUS {
-    let ext = DeviceExtension::of(filter_do);
-    let lower = ext.lower_device;
-    if ext.volume.is_null() {
-        return pass_through(lower, irp);
+/// Map the locked MDL pages into system address space (equivalent of
+/// `MmGetSystemAddressForMdlSafe(mdl, NormalPagePriority)`).
+unsafe fn mdl_system_address(mdl: PMDL) -> *mut u8 {
+    // MmMappedSystemVa / MmMapLockedPagesSpecifyCache with NormalPagePriority=16.
+    // MappedSystemVa may already be set for MDLs from the I/O manager; check it
+    // first to avoid mapping twice.
+    if !(*mdl).MappedSystemVa.is_null() {
+        return (*mdl).MappedSystemVa.cast::<u8>();
     }
-    let volume = &*ext.volume;
+    MmMapLockedPagesSpecifyCache(
+        mdl,
+        0, // KernelMode
+        1, // MmCached
+        null_mut(),
+        0, // BugCheckOnFailure = FALSE
+        16, // NormalPagePriority
+    )
+    .cast::<u8>()
+}
 
-    let stack = current_sl(irp);
-    let major = (*stack).MajorFunction as u32;
-    match major {
-        IRP_MJ_READ | IRP_MJ_WRITE => {
-            shift_offset(volume, stack);
-            pass_through(lower, irp)
-        }
-        IRP_MJ_DEVICE_CONTROL => {
-            let code = (*stack).Parameters.DeviceIoControl.IoControlCode;
-            if size_field_offset(code).is_some() {
-                intercept_size_ioctl(volume, lower, irp)
-            } else {
-                pass_through(lower, irp)
+// --- Per-IRP context for the WRITE shadow buffer --------------------------------
+
+/// Stored via `Context` in the write completion stack location.
+#[repr(C)]
+struct WriteCtx {
+    /// The original MDL we replaced (restored on completion).
+    original_mdl: PMDL,
+    /// NonPagedPool buffer whose pages back the shadow MDL.
+    shadow_buf: *mut u8,
+    /// MDL we built over the shadow buffer.
+    shadow_mdl: PMDL,
+}
+
+// --- READ: completion decrypts in-place ----------------------------------------
+
+unsafe fn intercept_read(volume: &AttachedVolume, lower: PDEVICE_OBJECT, irp: PIRP) -> NTSTATUS {
+    let cur = current_sl(irp);
+    let next = next_sl(irp);
+    core::ptr::copy_nonoverlapping(cur, next, 1);
+    (*next).CompletionRoutine = Some(read_completion);
+    (*next).Context = (volume as *const AttachedVolume) as *mut c_void;
+    (*next).Control = (SL_INVOKE_ON_SUCCESS | SL_INVOKE_ON_ERROR | SL_INVOKE_ON_CANCEL) as u8;
+    IofCallDriver(lower, irp)
+}
+
+unsafe extern "C" fn read_completion(
+    _device: PDEVICE_OBJECT,
+    irp: PIRP,
+    context: *mut c_void,
+) -> NTSTATUS {
+    let volume = &*(context as *const AttachedVolume);
+    let status = (*irp).IoStatus.__bindgen_anon_1.Status;
+    if nt_success(status) {
+        let stack = current_sl(irp);
+        let byte_offset = (*stack).Parameters.Read.ByteOffset.QuadPart as u64;
+        let length = (*stack).Parameters.Read.Length as usize;
+
+        if let Some(pipeline) = pipeline_for(volume) {
+            let sector_size = volume.sector_size as usize;
+            if sector_size > 0 && length > 0 {
+                // first_abs_lba in the raw device space (already shifted by filter).
+                let first_abs_lba = byte_offset / sector_size as u64;
+                if let Some(first_rel) = data_relative(volume, first_abs_lba) {
+                    let mdl = (*irp).MdlAddress;
+                    if !mdl.is_null() {
+                        let ptr = mdl_system_address(mdl);
+                        if !ptr.is_null() {
+                            let buf = core::slice::from_raw_parts_mut(
+                                ptr,
+                                length.min(sector_size * (length / sector_size)),
+                            );
+                            // Read boundary WITHOUT holding the encryption lock —
+                            // the lock is held by the sweep during its I/O, so
+                            // acquiring it here would deadlock.
+                            let encrypted_boundary =
+                                volume.encrypted_boundary.load(Ordering::Acquire);
+                            crate::driver_println!(
+                                "filter: read lba={} rel={} sectors={} boundary={}",
+                                first_abs_lba,
+                                first_rel,
+                                buf.len() / sector_size,
+                                encrypted_boundary
+                            );
+                            pipeline.decrypt_read(
+                                first_rel,
+                                encrypted_boundary,
+                                buf,
+                                sector_size,
+                            );
+                        }
+                    }
+                }
             }
         }
-        _ => pass_through(lower, irp),
     }
+
+    if (*irp).PendingReturned != 0 {
+        let stack = current_sl(irp);
+        (*stack).Control |= SL_PENDING_RETURNED as u8;
+    }
+    STATUS_CONTINUE_COMPLETION
 }
 
-/// Shift a READ/WRITE byte offset down by the data-region start so OS-relative
-/// LBA 0 lands on the first data sector. No-op when `offset_sector == 0`.
-unsafe fn shift_offset(volume: &AttachedVolume, stack: PIO_STACK_LOCATION) {
-    let shift = volume
-        .offset_sector()
-        .saturating_mul(volume.sector_size as u64);
-    if shift == 0 {
-        return;
+// --- WRITE: shadow-buffer encrypts caller data before sending down -------------
+
+unsafe fn intercept_write(volume: &AttachedVolume, lower: PDEVICE_OBJECT, irp: PIRP) -> NTSTATUS {
+    let stack = current_sl(irp);
+    let byte_offset = (*stack).Parameters.Write.ByteOffset.QuadPart as u64;
+    let length = (*stack).Parameters.Write.Length as usize;
+    let sector_size = volume.sector_size as usize;
+
+    // Determine the relative sector range; fall through to pass-through if
+    // the write is outside the data region or there's nothing to encrypt.
+    let needs_crypto = if sector_size > 0 && length > 0 {
+        let first_abs_lba = byte_offset / sector_size as u64;
+        match data_relative(volume, first_abs_lba) {
+            Some(first_rel) => {
+                // Lock-free read — see encrypted_boundary comment on AttachedVolume.
+                let encrypted_boundary = volume.encrypted_boundary.load(Ordering::Acquire);
+                encrypted_boundary > 0 && first_rel < encrypted_boundary
+            }
+            None => false,
+        }
+    } else {
+        false
+    };
+
+    if !needs_crypto {
+        return pass_through(lower, irp);
     }
-    // READ and WRITE overlay the same `ByteOffset` field in the parameter union.
-    let byte_offset = &mut (*stack).Parameters.Read.ByteOffset;
-    byte_offset.QuadPart += shift as i64;
+
+    // Allocate a NonPagedPool shadow buffer for the (encrypted) outgoing data.
+    let shadow_buf = ExAllocatePool2(POOL_FLAG_NON_PAGED, length as u64, VCK_POOL_TAG) as *mut u8;
+    if shadow_buf.is_null() {
+        return pass_through(lower, irp);
+    }
+
+    // Copy caller data from the original MDL.
+    let orig_mdl = (*irp).MdlAddress;
+    if orig_mdl.is_null() {
+        ExFreePool(shadow_buf.cast::<c_void>());
+        return pass_through(lower, irp);
+    }
+    let src = mdl_system_address(orig_mdl);
+    if src.is_null() {
+        ExFreePool(shadow_buf.cast::<c_void>());
+        return pass_through(lower, irp);
+    }
+    core::ptr::copy_nonoverlapping(src, shadow_buf, length);
+
+    // Encrypt the copy.
+    if let Some(pipeline) = pipeline_for(volume) {
+        let first_abs_lba = byte_offset / sector_size as u64;
+        if let Some(first_rel) = data_relative(volume, first_abs_lba) {
+            let encrypted_boundary = volume.encrypted_boundary.load(Ordering::Acquire);
+            let buf = core::slice::from_raw_parts_mut(shadow_buf, length);
+            pipeline.encrypt_write(first_rel, encrypted_boundary, buf, sector_size);
+        }
+    }
+
+    // Build an MDL over the shadow buffer.
+    let shadow_mdl = IoAllocateMdl(
+        shadow_buf.cast::<c_void>(),
+        length as u32,
+        0, // SecondaryBuffer = FALSE
+        0, // ChargeQuota = FALSE
+        null_mut(),
+    );
+    if shadow_mdl.is_null() {
+        ExFreePool(shadow_buf.cast::<c_void>());
+        return pass_through(lower, irp);
+    }
+    MmBuildMdlForNonPagedPool(shadow_mdl);
+
+    // Install the context and completion routine.
+    let ctx = ExAllocatePool2(
+        POOL_FLAG_NON_PAGED,
+        core::mem::size_of::<WriteCtx>() as u64,
+        VCK_POOL_TAG,
+    ) as *mut WriteCtx;
+    if ctx.is_null() {
+        IoFreeMdl(shadow_mdl);
+        ExFreePool(shadow_buf.cast::<c_void>());
+        return pass_through(lower, irp);
+    }
+    (*ctx).original_mdl = orig_mdl;
+    (*ctx).shadow_buf = shadow_buf;
+    (*ctx).shadow_mdl = shadow_mdl;
+
+    // Swap the IRP's MDL.
+    (*irp).MdlAddress = shadow_mdl;
+
+    let cur = current_sl(irp);
+    let next = next_sl(irp);
+    core::ptr::copy_nonoverlapping(cur, next, 1);
+    (*next).CompletionRoutine = Some(write_completion);
+    (*next).Context = ctx.cast::<c_void>();
+    (*next).Control = (SL_INVOKE_ON_SUCCESS | SL_INVOKE_ON_ERROR | SL_INVOKE_ON_CANCEL) as u8;
+
+    IofCallDriver(lower, irp)
 }
 
-/// Forward a size-query IOCTL down the stack with a completion routine that
-/// rewrites the reported length to the data-region size.
+unsafe extern "C" fn write_completion(
+    _device: PDEVICE_OBJECT,
+    irp: PIRP,
+    context: *mut c_void,
+) -> NTSTATUS {
+    let ctx = &mut *(context as *mut WriteCtx);
+
+    // Restore the original MDL so the I/O manager sees the unmodified IRP.
+    (*irp).MdlAddress = ctx.original_mdl;
+
+    // Free shadow resources.
+    IoFreeMdl(ctx.shadow_mdl);
+    ExFreePool(ctx.shadow_buf.cast::<c_void>());
+    ExFreePool(ctx as *mut WriteCtx as *mut c_void);
+
+    if (*irp).PendingReturned != 0 {
+        let stack = current_sl(irp);
+        (*stack).Control |= SL_PENDING_RETURNED as u8;
+    }
+    STATUS_CONTINUE_COMPLETION
+}
+
+// --- Size-query IOCTL interception ---------------------------------------------
+
 unsafe fn intercept_size_ioctl(
     volume: &AttachedVolume,
     lower: PDEVICE_OBJECT,
     irp: PIRP,
 ) -> NTSTATUS {
-    // Copy our stack location to the next so the lower driver sees identical
-    // parameters, then install our completion routine on it.
     let cur = current_sl(irp);
     let next = next_sl(irp);
     core::ptr::copy_nonoverlapping(cur, next, 1);
     (*next).CompletionRoutine = Some(size_ioctl_completion);
     (*next).Context = (volume as *const AttachedVolume) as *mut c_void;
-    (*next).Control =
-        (SL_INVOKE_ON_SUCCESS | SL_INVOKE_ON_ERROR | SL_INVOKE_ON_CANCEL) as u8;
-
+    (*next).Control = (SL_INVOKE_ON_SUCCESS | SL_INVOKE_ON_ERROR | SL_INVOKE_ON_CANCEL) as u8;
     IofCallDriver(lower, irp)
 }
 
-/// Rewrite the length field of a completed size-query IOCTL to the data-region
-/// byte size, hiding the header/footer metadata from the OS.
 unsafe extern "C" fn size_ioctl_completion(
     _device: PDEVICE_OBJECT,
     irp: PIRP,
@@ -133,7 +329,6 @@ unsafe extern "C" fn size_ioctl_completion(
     let stack = current_sl(irp);
     let code = (*stack).Parameters.DeviceIoControl.IoControlCode;
     let status = (*irp).IoStatus.__bindgen_anon_1.Status;
-
     if nt_success(status) {
         if let Some(field_off) = size_field_offset(code) {
             let info = (*irp).IoStatus.Information as usize;
@@ -155,10 +350,79 @@ unsafe extern "C" fn size_ioctl_completion(
             }
         }
     }
-
-    // Propagate a pending result up the stack (IoMarkIrpPending equivalent).
     if (*irp).PendingReturned != 0 {
+        let stack = current_sl(irp);
         (*stack).Control |= SL_PENDING_RETURNED as u8;
     }
     STATUS_CONTINUE_COMPLETION
+}
+
+// --- Helpers -------------------------------------------------------------------
+
+/// Borrow the `CryptoPipeline` for this volume, if one is present.
+fn pipeline_for(volume: &AttachedVolume) -> Option<CryptoPipeline<'_>> {
+    let cipher = volume.cipher.as_ref()?;
+    Some(CryptoPipeline::new(cipher))
+}
+
+/// Convert an absolute LBA (already shifted by the volume's `offset_sector`)
+/// into a data-region-relative sector, or `None` for metadata-region accesses.
+///
+/// Does NOT hold the encryption lock — uses only the immutable layout fields
+/// (`offset_sector`, `data_sectors`) that are set at attach time and never change.
+fn data_relative(volume: &AttachedVolume, abs_lba: u64) -> Option<u64> {
+    let offset = volume.offset_sector();
+    let total = volume.data_sectors();
+    abs_lba.checked_sub(offset).filter(|rel| *rel < total)
+}
+
+// --- Main dispatch entry point -------------------------------------------------
+
+/// Entry point for every IRP arriving on a filter device object.
+///
+/// # Safety
+/// `filter_do` must be one of this driver's filter device objects and `irp` a
+/// valid IRP it currently owns.
+pub unsafe fn handle_filter_irp(filter_do: PDEVICE_OBJECT, irp: PIRP) -> NTSTATUS {
+    let ext = DeviceExtension::of(filter_do);
+    let lower = ext.lower_device;
+    if ext.volume.is_null() {
+        return pass_through(lower, irp);
+    }
+    let volume = &*ext.volume;
+
+    let stack = current_sl(irp);
+    let major = (*stack).MajorFunction as u32;
+    match major {
+        IRP_MJ_READ => {
+            shift_offset(volume, stack);
+            intercept_read(volume, lower, irp)
+        }
+        IRP_MJ_WRITE => {
+            shift_offset(volume, stack);
+            intercept_write(volume, lower, irp)
+        }
+        IRP_MJ_DEVICE_CONTROL => {
+            let code = (*stack).Parameters.DeviceIoControl.IoControlCode;
+            if size_field_offset(code).is_some() {
+                intercept_size_ioctl(volume, lower, irp)
+            } else {
+                pass_through(lower, irp)
+            }
+        }
+        _ => pass_through(lower, irp),
+    }
+}
+
+/// Shift a READ/WRITE byte offset by the data-region start so OS-relative LBA 0
+/// maps to the first data sector. No-op when `offset_sector == 0`.
+unsafe fn shift_offset(volume: &AttachedVolume, stack: PIO_STACK_LOCATION) {
+    let shift = volume
+        .offset_sector()
+        .saturating_mul(volume.sector_size as u64);
+    if shift == 0 {
+        return;
+    }
+    let byte_offset = &mut (*stack).Parameters.Read.ByteOffset;
+    byte_offset.QuadPart += shift as i64;
 }

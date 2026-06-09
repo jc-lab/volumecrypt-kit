@@ -26,11 +26,15 @@ use crate::{
 /// Create a filter device and attach it above the volume named by
 /// `target_nt_path` (e.g. `\??\D:`). On success the returned device object's
 /// extension owns a reference to `volume` (released by [`detach_filter`]).
+/// Returns `(filter_device_object, lower_device_object)`.
+/// `lower_device_object` is the device immediately below the filter in the
+/// stack; use it to open a handle via `ObOpenObjectByPointer` for I/O that must
+/// bypass the filter (e.g. the encryption sweep).
 pub fn attach_filter(
     driver: *mut DRIVER_OBJECT,
     target_nt_path: &str,
     volume: Arc<AttachedVolume>,
-) -> VckResult<PDEVICE_OBJECT> {
+) -> VckResult<(PDEVICE_OBJECT, PDEVICE_OBJECT)> {
     let mut filter_do: PDEVICE_OBJECT = null_mut();
     let status = unsafe {
         IoCreateDevice(
@@ -81,7 +85,7 @@ pub fn attach_filter(
         (*filter_do).Flags &= !DO_DEVICE_INITIALIZING;
     }
 
-    Ok(filter_do)
+    Ok((filter_do, lower))
 }
 
 /// Detach and delete a filter device, releasing the `Arc<AttachedVolume>` held

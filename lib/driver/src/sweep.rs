@@ -22,8 +22,12 @@ use wdk_sys::{
 use crate::nt::{nt_success, STATUS_SUCCESS};
 use crate::registry::VolumeAttachRegistry;
 
-/// Sectors processed per volume per loop iteration (1 MiB at 512-byte sectors).
-const BATCH_SECTORS: u64 = 2048;
+/// Sectors processed per volume per loop iteration (64 KiB at 512-byte sectors
+/// to keep allocations small on a tight kernel stack).
+const BATCH_SECTORS: u64 = 128;
+/// Expanded stack size for each sweep batch (crypto + storage stack call-chain
+/// consumes most of the default 12 KiB system-thread stack).
+const SWEEP_STACK_SIZE: usize = 0x8000; // 32 KiB
 const THREAD_ALL_ACCESS: u32 = 0x001F_FFFF;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 // Relative wait timeouts (negative = relative, units of 100 ns).
@@ -135,9 +139,8 @@ unsafe extern "C" fn sweep_thread(context: *mut c_void) {
             match volume.sweep_step(BATCH_SECTORS) {
                 Ok(true) => active = true,
                 Ok(false) => {}
-                Err(_err) => {
-                    // TODO(driver): record the error in the engine so
-                    // GET_PROGRESS can surface it to the app.
+                Err(err) => {
+                    crate::driver_println!("sweep: step error: {}", err);
                 }
             }
         }
