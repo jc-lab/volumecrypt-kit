@@ -3,7 +3,7 @@ SHELL := /bin/bash
 
 export PATH := /d/programs:/c/Program Files/qemu:/c/Users/User/.cargo/bin:/c/Program Files/Go/bin:$(PATH)
 
-.PHONY: build-common build-driver build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-crypto-test clean
+.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-crypto-test clean
 
 TEST_VM_DIR = .testfoundry/win11
 
@@ -24,6 +24,10 @@ build-driver: testing/signing/MyTestDriverCert.cer
 	MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "call G:\\BuildEnv\\SetupBuildEnv.cmd && cd /d . && set RUSTFLAGS=$(DRIVER_RUSTFLAGS) && cargo build --release -p vck-sample-driver --target x86_64-pc-windows-msvc"
 	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver.ps1 -InputPath ./target/x86_64-pc-windows-msvc/release/vck_sample_driver.dll -OutputPath ./testing/artifacts/vck-sample-driver.sys
 	cp ./sample/driver/vck-sample-driver.inf ./testing/artifacts/vck-sample-driver.inf
+	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver-package.ps1 \
+	  -DriverSys ./testing/artifacts/vck-sample-driver.sys \
+	  -DriverInf ./testing/artifacts/vck-sample-driver.inf \
+	  -OutputDir ./testing/artifacts/vck-driver-pkg
 
 build-crypto-test-driver: testing/signing/MyTestDriverCert.cer
 	MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "call G:\\BuildEnv\\SetupBuildEnv.cmd && cd /d . && set RUSTFLAGS=$(DRIVER_RUSTFLAGS) && cargo build --release -p vck-crypto-test-driver --target x86_64-pc-windows-msvc"
@@ -51,7 +55,13 @@ test-vm-driver-load: $(TEST_VM_DIR) build-driver build-app
 test-vm-os-volume-prepare: $(TEST_VM_DIR) build-app
 	test-foundry.exe --headless --vm-name=win11 test --output ./testing/results/os-volume-prepare --test ./testing/recipes/os-volume-prepare/os-volume-prepare.yaml
 
-test-vm-data-volume: $(TEST_VM_DIR) build-driver build-app
+test-vm-data-volume: $(TEST_VM_DIR) build-driver build-driver-package build-app
+
+build-driver-package: testing/signing/MyTestDriverCert.cer testing/artifacts/vck-sample-driver.sys testing/artifacts/vck-sample-driver.inf
+	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver-package.ps1 \
+	  -DriverSys ./testing/artifacts/vck-sample-driver.sys \
+	  -DriverInf ./testing/artifacts/vck-sample-driver.inf \
+	  -OutputDir ./testing/artifacts/vck-driver-pkg
 	test-foundry.exe --headless --vm-name=win11 test --output ./testing/results/data-volume --test ./testing/recipes/data-volume/data-volume.yaml
 
 test-vm-crypto-test: $(TEST_VM_DIR) build-crypto-test-driver

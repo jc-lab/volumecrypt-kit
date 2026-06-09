@@ -62,15 +62,17 @@ vck-sample-driver.sys = 1,,
 ;;
 ;; Registry Entries
 ;;
-;; Register as UpperFilter for Disk Drives class ({4d36e967-e325-11ce-bfc1-08002be10318}).
-;; This causes PnP to call our AddDevice for every disk volume device object,
-;; BEFORE any filesystem driver (NTFS, FAT) attaches to it.
+;; Register as UpperFilter for the Volume device class.
+;; {71A27CDD-812A-11D0-BEC7-08002BE2092F} = "Volume" — represents logical disk
+;; volumes like \Device\HarddiskVolume5. AddDevice fires for each such volume
+;; BEFORE any filesystem (NTFS) mounts on it, giving us the correct filter
+;; position (between the volume device and the FSD).
 ;;
 ;; REG_MULTI_SZ append (0x00010008):
 ;;
 
 [vck-sample-driver.AddReg]
-HKLM,System\CurrentControlSet\Control\Class\{4d36e967-e325-11ce-bfc1-08002be10318},UpperFilters,0x00010008,VolumeCryptKitSample
+HKLM,System\CurrentControlSet\Control\Class\{71A27CDD-812A-11D0-BEC7-08002BE2092F},UpperFilters,0x00010008,VolumeCryptKitSample
 
 ;;
 ;; Strings

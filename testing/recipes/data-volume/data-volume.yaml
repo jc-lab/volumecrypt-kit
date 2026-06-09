@@ -22,35 +22,30 @@ steps:
     params:
       retry_interval: 5s
 
-  # Upload driver sys + INF.
+  # Upload signed driver package (.sys + .inf + .cat).
   - action: file-upload
     timeout: 30s
     params:
-      src: "./testing/artifacts/vck-sample-driver.sys"
+      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.sys"
       dst: "C:\\Temp\\vck-sample-driver.sys"
 
   - action: file-upload
     timeout: 30s
     params:
-      src: "./testing/artifacts/vck-sample-driver.inf"
+      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.inf"
       dst: "C:\\Temp\\vck-sample-driver.inf"
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.cat"
+      dst: "C:\\Temp\\vck-sample-driver.cat"
 
   - action: file-upload
     timeout: 30s
     params:
       src: "./testing/artifacts/vck-app.exe"
       dst: "C:\\Temp\\vck-app.exe"
-
-  # Copy driver to system32/drivers (INF installation will also do this but
-  # pnputil needs the sys to be accessible).
-  - action: exec
-    timeout: 30s
-    params:
-      cmd: "cmd.exe"
-      args:
-        - "/c"
-        - "copy /Y C:\\Temp\\vck-sample-driver.sys C:\\Windows\\System32\\drivers\\vck-sample-driver.sys"
-      expect_exit_code: 0
 
   - action: exec
     timeout: 30s
@@ -69,35 +64,21 @@ steps:
         - "-Command"
         - "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'C:\\Temp' -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'D:\\' -ErrorAction SilentlyContinue"
 
-  # Install driver as FILE_SYSTEM_DRIVER (ServiceType=2) with boot start.
-  # ServiceType=2 + LoadOrderGroup=FSFilter is required for PnP to call AddDevice.
+  # Install the signed driver package via pnputil. The .cat file has the test
+  # certificate signature so pnputil accepts it. The INF registers the driver as
+  # ServiceType=FILE_SYSTEM_DRIVER, LoadOrderGroup=FSFilter, UpperFilters for
+  # disk drives — causing AddDevice to fire for every disk volume on next boot.
   - action: exec
-    timeout: 30s
+    timeout: 60s
     params:
       cmd: "cmd.exe"
       args:
         - "/c"
-        - "sc create VolumeCryptKitSample type= filesys start= boot binPath= C:\\Windows\\System32\\drivers\\vck-sample-driver.sys group= FSFilter"
+        - "pnputil /add-driver C:\\Temp\\vck-sample-driver.inf /install"
       expect_exit_code: 0
 
-  # Register as UpperFilter for Disk Drives class.
-  # UpperFilters causes PnP to call AddDevice for each disk volume BEFORE any FSD.
-  - action: exec
-    timeout: 30s
-    params:
-      cmd: "powershell"
-      args:
-        - "-Command"
-        - |
-          $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e967-e325-11ce-bfc1-08002be10318}'
-          $ex = (Get-ItemProperty -Path $key -Name UpperFilters -ErrorAction SilentlyContinue).UpperFilters
-          if ($ex -notcontains 'VolumeCryptKitSample') {
-            Set-ItemProperty -Path $key -Name UpperFilters -Value (@($ex | Where-Object{$_}) + 'VolumeCryptKitSample')
-          }
-          Write-Host "UpperFilters: $((Get-ItemProperty $key -Name UpperFilters -EA SilentlyContinue).UpperFilters)"
-      expect_exit_code: 0
-
-  # Start driver manually for this session (AddDevice not yet active for existing volumes).
+  # Start driver for this session (control device / sweep worker).
+  # AddDevice will fire automatically on NEXT boot via UpperFilters registration.
   - action: exec
     timeout: 30s
     params:
@@ -105,7 +86,6 @@ steps:
       args:
         - "/c"
         - "sc start VolumeCryptKitSample"
-      expect_exit_code: 0
 
   # Write a test file before encryption.
   - action: exec

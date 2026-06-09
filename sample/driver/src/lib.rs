@@ -142,18 +142,37 @@ pub unsafe extern "system" fn DriverEntry(
 /// to activate encryption without needing to do lock/dismount. NTFS mounts above
 /// our filter → correct transparent-encryption stack.
 unsafe extern "C" fn add_device(driver: PDRIVER_OBJECT, pdo: PDEVICE_OBJECT) -> NTSTATUS {
-    vck_driver::driver_println!("add_device: pdo={:p}", pdo);
+    use core::ffi::c_void;
+
+    // Query the PDO object name to identify which volume this is for.
+    let pdo_name: alloc::string::String = {
+        let mut buf = [0u8; 256];
+        let mut ret_len: u32 = 0;
+        let st = wdk_sys::ntddk::ObQueryNameString(
+            pdo.cast::<c_void>(), buf.as_mut_ptr().cast(), 256, &mut ret_len,
+        );
+        if st >= 0 {
+            let name_len = u16::from_le_bytes([buf[0], buf[1]]) as usize / 2;
+            let name_ptr = usize::from_le_bytes(buf[8..16].try_into().unwrap_or([0;8]));
+            if name_len > 0 && name_ptr != 0 {
+                let chars = core::slice::from_raw_parts(name_ptr as *const u16, name_len.min(64));
+                let mut s = alloc::string::String::new();
+                for &c in chars { if c >= 0x20 && c < 0x7F { s.push(c as u8 as char); } else { s.push('?'); } }
+                s
+            } else { alloc::string::String::new() }
+        } else { alloc::string::String::new() }
+    };
+    vck_driver::driver_println!("add_device: pdo={:p} name={}", pdo, pdo_name);
 
     // Attach an UNBOUND filter to the physical device object before any FSD mounts.
     // The filter has volume=NULL → all IRPs pass through transparently.
-    // IOCTL_JVCK_PREPARE will later find this filter by walking the device stack
-    // and bind it to a volume (activating encryption).
+    // IOCTL_JVCK_PREPARE will later find this filter by name in the PDO map.
     match vck_driver::filter::attach_filter_to_raw_device(driver, pdo) {
         Ok((filter_do, lower_do)) => {
             vck_driver::driver_println!(
                 "add_device: filter attached filter={:p} lower={:p}", filter_do, lower_do
             );
-            // Note: filter is unbound (volume=NULL). PREPARE walks the stack to find it.
+            REGISTRY.add_pdo_filter(pdo, filter_do, lower_do, pdo_name);
             STATUS_SUCCESS
         }
         Err(err) => {

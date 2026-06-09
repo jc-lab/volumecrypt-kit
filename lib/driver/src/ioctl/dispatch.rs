@@ -71,7 +71,11 @@ fn handle_get_status(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult
     // Check if our filter is correctly placed BELOW the FSD (AddDevice path).
     // This is true when find_our_filter_in_stack succeeds: means NTFS VCB is
     // above our filter in the device stack.
-    let filter_below_fsd = crate::filter::find_our_filter_in_stack(&nt_path).is_some();
+    let filter_below_fsd = crate::filter::find_filter_for_volume(
+        &nt_path,
+        |dev| registry.find_pdo_filter(dev),
+        |name| registry.find_pdo_filter_by_name(name),
+    ).is_some();
 
     if let Some(volume) = registry.get(&req.volume_path) {
         let snapshot = volume.encryption.lock().snapshot();
@@ -289,11 +293,11 @@ fn handle_jvck_prepare_adddevice_path(
 
     // If VMK provided, complete full attach (read metadata → cipher → sweep).
     if !req.vmk.is_empty() && !req.metadata_block.is_empty() {
-        let probe_io = KernelVolumeIo::open_query(&io_volume_id).map_err(|e| {
-            registry.remove(&req.volume_path);
-            crate::filter::detach_filter(filter_do);
-            e
-        })?;
+        // Use LowerDeviceIo to read metadata. This bypasses:
+        // 1. The filter (which now applies size hiding, reporting 20971008 sectors)
+        // 2. NTFS (which might cache/remap sectors)
+        // The raw partition has the metadata at the full partition's last sector.
+        let probe_io = LowerDeviceIo::new(lower_do, sector_size, total_sectors);
         let store = JvckMetadataStore::open(probe_io, &req.vmk).map_err(|e| {
             registry.remove(&req.volume_path);
             crate::filter::detach_filter(filter_do);
@@ -419,9 +423,13 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
     };
 
     // ── Try AddDevice path first ───────────────────────────────────────────
-    // After driver install + reboot, AddDevice has attached an unbound filter
-    // below NTFS. Find it by walking the device stack.
-    if let Some((filter_do, lower_do)) = crate::filter::find_our_filter_in_stack(&nt_path) {
+    // After driver install + reboot, AddDevice has attached an unbound filter.
+    // Find it via the PDO map (reliable; avoids VPB-vs-attachment ambiguity).
+    if let Some((filter_do, lower_do)) = crate::filter::find_filter_for_volume(
+        &nt_path,
+        |dev| registry.find_pdo_filter(dev),
+        |name| registry.find_pdo_filter_by_name(name),
+    ) {
         crate::driver_println!(
             "jvck_prepare: AddDevice filter found filter={:p} lower={:p}",
             filter_do, lower_do

@@ -11,11 +11,26 @@ use wdk_sys::{DEVICE_OBJECT, DRIVER_OBJECT};
 
 use crate::{crypto::aes_xts::AesXtsCipher, offset::engine::EncryptionEngine, provider::IoConfig};
 
+/// Entry in the AddDevice-time filter map.
+pub struct PdoFilterEntry {
+    pub pdo: *mut DEVICE_OBJECT,
+    pub filter_do: *mut DEVICE_OBJECT,
+    pub lower_do: *mut DEVICE_OBJECT,
+    /// NT object name of the PDO (e.g. `\Device\HarddiskVolume5`).
+    pub pdo_name: alloc::string::String,
+}
+unsafe impl Send for PdoFilterEntry {}
+unsafe impl Sync for PdoFilterEntry {}
+
 pub struct VolumeAttachRegistry {
     // volume_path (NT device path) -> AttachedVolume
     entries: Mutex<BTreeMap<String, Arc<AttachedVolume>>>,
     // Set once at DriverEntry; needed to create filter device objects.
     driver_object: AtomicPtr<DRIVER_OBJECT>,
+    /// PDO → filter mapping built by add_device. Used by PREPARE to find the
+    /// pre-attached filter without relying on device stack walking (which breaks
+    /// when NTFS mounts via VPB rather than IoAttachDeviceToDeviceStackSafe).
+    pdo_filters: Mutex<alloc::vec::Vec<PdoFilterEntry>>,
 }
 
 pub struct AttachedVolume {
@@ -55,7 +70,47 @@ impl VolumeAttachRegistry {
         Self {
             entries: Mutex::new(BTreeMap::new()),
             driver_object: AtomicPtr::new(null_mut()),
+            pdo_filters: Mutex::new(alloc::vec::Vec::new()),
         }
+    }
+
+    /// Called from add_device to record the PDO → filter mapping.
+    pub fn add_pdo_filter(
+        &self,
+        pdo: *mut DEVICE_OBJECT,
+        filter_do: *mut DEVICE_OBJECT,
+        lower_do: *mut DEVICE_OBJECT,
+        pdo_name: alloc::string::String,
+    ) {
+        crate::driver_println!("add_pdo_filter: name={} filter={:p}", pdo_name, filter_do);
+        self.pdo_filters.lock().push(PdoFilterEntry { pdo, filter_do, lower_do, pdo_name });
+    }
+
+    /// Look up the filter by device pointer address (fallback).
+    pub fn find_pdo_filter(&self, dev: *mut DEVICE_OBJECT) -> Option<(*mut DEVICE_OBJECT, *mut DEVICE_OBJECT)> {
+        let map = self.pdo_filters.lock();
+        for e in map.iter() {
+            if e.pdo == dev || e.lower_do == dev {
+                return Some((e.filter_do, e.lower_do));
+            }
+        }
+        None
+    }
+
+    /// Look up the filter by PDO name (e.g. `\Device\HarddiskVolume5`).
+    /// This is the primary lookup since Volume class PDOs may not match
+    /// the device object returned by IoGetDeviceObjectPointer.
+    pub fn find_pdo_filter_by_name(&self, nt_path: &str) -> Option<(*mut DEVICE_OBJECT, *mut DEVICE_OBJECT)> {
+        // Normalize: trim trailing slashes and case-fold.
+        let query = nt_path.trim_end_matches('\\').to_ascii_lowercase();
+        let map = self.pdo_filters.lock();
+        for e in map.iter() {
+            let name = e.pdo_name.trim_end_matches('\\').to_ascii_lowercase();
+            if name == query {
+                return Some((e.filter_do, e.lower_do));
+            }
+        }
+        None
     }
 
     /// Record the WDM driver object (set once at DriverEntry).

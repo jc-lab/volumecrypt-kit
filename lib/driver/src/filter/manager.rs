@@ -318,6 +318,104 @@ pub fn detach_filter(filter_do: PDEVICE_OBJECT) {
     }
 }
 
+/// Find our filter for the volume at `nt_path` using the PDO → filter map
+/// built by add_device. Falls back to stack-walk for compatibility.
+///
+/// When AddDevice fires before NTFS mounts, the filter is at the correct
+/// position. NTFS uses the VPB mechanism (not IoAttachDeviceToDeviceStackSafe)
+/// for mounting, so stack-walking via IoGetLowerDeviceObject from the NTFS VCB
+/// does NOT reach our filter. The PDO map approach is reliable.
+/// Find the filter for the volume at `nt_path` using:
+/// 1. Name-based PDO map lookup (primary — Volume class PDO ≠ namespace device object)
+/// 2. Device pointer lookup in PDO map (fallback)
+/// 3. Device stack walk (last resort)
+pub fn find_filter_for_volume<F, FN>(
+    nt_path: &str,
+    lookup_fn: F,
+    name_lookup_fn: FN,
+) -> Option<(PDEVICE_OBJECT, PDEVICE_OBJECT)>
+where
+    F: Fn(PDEVICE_OBJECT) -> Option<(PDEVICE_OBJECT, PDEVICE_OBJECT)>,
+    FN: Fn(&str) -> Option<(PDEVICE_OBJECT, PDEVICE_OBJECT)>,
+{
+    use wdk_sys::ntddk::{IoGetDeviceAttachmentBaseRef, ObfDereferenceObject};
+    use wdk_sys::{FILE_READ_DATA, PFILE_OBJECT};
+
+    let name = UnicodeString::from_str(nt_path);
+    let mut file_obj: PFILE_OBJECT = null_mut();
+    let mut vol_do: PDEVICE_OBJECT = null_mut();
+    let status = unsafe {
+        IoGetDeviceObjectPointer(name.as_ptr(), FILE_READ_DATA, &mut file_obj, &mut vol_do)
+    };
+    if !nt_success(status) || vol_do.is_null() {
+        return None;
+    }
+    unsafe { ObfDereferenceObject(file_obj.cast()) };
+
+    // Get the BASE device of the attachment stack for the volume. This is the
+    // device object that was the PDO when AddDevice was called.
+    let base_dev = unsafe { IoGetDeviceAttachmentBaseRef(vol_do) };
+    crate::driver_println!(
+        "find_filter: vol_do={:p} base_dev={:p} nt_path={}", vol_do, base_dev, nt_path
+    );
+    // Primary: name-based lookup using the actual device object name.
+    // vol_do might be e.g. \Device\HarddiskVolume5 even if nt_path=\??\D:.
+    // Query the name of vol_do directly.
+    let dev_name = unsafe {
+        use wdk_sys::ntddk::ObQueryNameString;
+        let mut buf = [0u8; 256];
+        let mut ret_len: u32 = 0;
+        let st = ObQueryNameString(vol_do.cast(), buf.as_mut_ptr().cast(), 256, &mut ret_len);
+        if st >= 0 {
+            let name_len = u16::from_le_bytes([buf[0], buf[1]]) as usize / 2;
+            let name_ptr = usize::from_le_bytes(buf[8..16].try_into().unwrap_or([0;8]));
+            if name_len > 0 && name_ptr != 0 {
+                let chars = core::slice::from_raw_parts(name_ptr as *const u16, name_len.min(64));
+                let mut s = alloc::string::String::new();
+                for &c in chars { if c >= 0x20 && c < 0x7F { s.push(c as u8 as char); } else { s.push('?'); } }
+                s
+            } else { alloc::string::String::new() }
+        } else { alloc::string::String::new() }
+    };
+    crate::driver_println!("find_filter: vol_do_name='{}' nt_path='{}'", dev_name, nt_path);
+    if !dev_name.is_empty() {
+        if let Some(result) = name_lookup_fn(&dev_name) {
+            crate::driver_println!("find_filter: found via vol_do_name={}", dev_name);
+            return Some(result);
+        }
+    }
+    // Also try nt_path directly.
+    if let Some(result) = name_lookup_fn(nt_path) {
+        crate::driver_println!("find_filter: found via nt_path={}", nt_path);
+        return Some(result);
+    }
+
+    // Fallback: device pointer lookup
+    if !base_dev.is_null() {
+        unsafe { ObfDereferenceObject(base_dev.cast()) };
+        if let Some(result) = lookup_fn(base_dev) {
+            crate::driver_println!("find_filter: found via base_dev={:p}", base_dev);
+            return Some(result);
+        }
+    }
+    if let Some(result) = lookup_fn(vol_do) {
+        crate::driver_println!("find_filter: found via vol_do={:p}", vol_do);
+        return Some(result);
+    }
+    let top_dev = unsafe { wdk_sys::ntddk::IoGetAttachedDeviceReference(vol_do) };
+    if !top_dev.is_null() {
+        let result = lookup_fn(top_dev);
+        unsafe { wdk_sys::ntddk::ObfDereferenceObject(top_dev.cast()) };
+        if let Some(r) = result {
+            crate::driver_println!("find_filter: found via top_dev={:p}", top_dev);
+            return Some(r);
+        }
+    }
+
+    crate::driver_println!("find_filter: not found for {}", nt_path);
+    None
+}
+
 /// Walk the device stack from the top of `nt_path` downward and return the
 /// first filter device object that belongs to this driver, along with its
 /// `lower_device`.
@@ -334,25 +432,40 @@ pub fn find_our_filter_in_stack(nt_path: &str) -> Option<(PDEVICE_OBJECT, PDEVIC
     use wdk_sys::ntddk::{IoGetLowerDeviceObject, ObfDereferenceObject};
     use wdk_sys::{FILE_READ_DATA, PFILE_OBJECT};
 
+    use wdk_sys::ntddk::IoGetAttachedDeviceReference;
+
     let name = UnicodeString::from_str(nt_path);
     let mut file_obj: PFILE_OBJECT = null_mut();
-    let mut top_do: PDEVICE_OBJECT = null_mut();
+    let mut vol_do: PDEVICE_OBJECT = null_mut();
     let status = unsafe {
-        IoGetDeviceObjectPointer(name.as_ptr(), FILE_READ_DATA, &mut file_obj, &mut top_do)
+        IoGetDeviceObjectPointer(name.as_ptr(), FILE_READ_DATA, &mut file_obj, &mut vol_do)
     };
-    if !nt_success(status) || top_do.is_null() {
+    if !nt_success(status) || vol_do.is_null() {
         return None;
     }
     // Release the file object reference — we only need the device pointer.
     unsafe { ObfDereferenceObject(file_obj.cast()) };
 
+    // IoGetDeviceObjectPointer returns the device the path NAME maps to (e.g.
+    // HarddiskVolume5), which is NOT necessarily the stack top. Our filter
+    // may be ABOVE it. Use IoGetAttachedDeviceReference to get the true top,
+    // then walk downward to find our filter.
+    let top_do = unsafe { IoGetAttachedDeviceReference(vol_do) };
+    if top_do.is_null() {
+        return None;
+    }
+
     // Walk the attachment chain (top → bottom).
     unsafe {
-        // Reference top_do so IoGetLowerDeviceObject's decrement is safe.
-        wdk_sys::ntddk::ObfReferenceObject(top_do.cast());
+        // top_do is already referenced by IoGetAttachedDeviceReference.
         let mut current = top_do;
+        let mut depth = 0u32;
         loop {
             let ext = (*current).DeviceExtension as *const DeviceExtension;
+            let kind = if !ext.is_null() { (*ext).kind } else { 0xFFFF_FFFF };
+            crate::driver_println!(
+                "find_filter[{}]: do={:p} ext_kind=0x{:08x}", depth, current, kind
+            );
             if !ext.is_null() && (*ext).kind == DEVICE_KIND_FILTER {
                 let lower = (*ext).lower_device;
                 ObfDereferenceObject(current.cast());
@@ -365,9 +478,12 @@ pub fn find_our_filter_in_stack(nt_path: &str) -> Option<(PDEVICE_OBJECT, PDEVIC
             let next = IoGetLowerDeviceObject(current);
             ObfDereferenceObject(current.cast());
             if next.is_null() {
+                crate::driver_println!("find_filter: reached base (depth={})", depth);
                 break;
             }
             current = next;
+            depth += 1;
+            if depth > 12 { break; }
         }
     }
     None
