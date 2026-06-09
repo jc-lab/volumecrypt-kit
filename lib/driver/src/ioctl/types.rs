@@ -12,6 +12,34 @@ pub const STATE_ENCRYPTING: i32 = 1;
 pub const STATE_DECRYPTING: i32 = 2;
 pub const STATE_PAUSED: i32 = 3;
 
+/// IOCTL_JVCK_PREPARE request (phase 1).
+///
+/// Attaches the volume filter and activates size hiding so NTFS does not place
+/// its VBR backup in the metadata region. After this returns, the app writes
+/// JVCK metadata (via EnsureJvckMetadata / FSCTL_ALLOW_EXTENDED_DASD_IO) and
+/// then calls IOCTL_JVCK_ATTACH to complete encryption setup.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JvckVolumePrepareReq {
+    pub volume_path: String,
+    /// NT kernel device path (e.g. `\Device\HarddiskVolume3`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub nt_device_path: String,
+    #[serde(default)]
+    pub use_header: u32,
+    #[serde(default)]
+    pub use_footer: u32,
+    #[serde(default)]
+    pub metadata_size: u32,
+}
+
+/// IOCTL_JVCK_PREPARE response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JvckVolumePrepareResp {
+    pub offset_sector: u64,
+    pub data_sectors: u64,
+    pub sector_size: u32,
+}
+
 /// IOCTL_JVCK_ATTACH request.
 ///
 /// The driver only ever OPENS existing JVCK metadata. When `nt_device_path` is

@@ -180,6 +180,67 @@ pub fn attach_filter_unbound(
     Ok((filter_do, lower))
 }
 
+/// Like [`attach_filter_unbound`] but takes a device object pointer directly
+/// instead of resolving one via `IoGetDeviceObjectPointer`. Use this when the
+/// device object is already known (e.g. obtained from an open file handle) and
+/// `IoGetDeviceObjectPointer` would fail (e.g. after the filesystem dismounts).
+pub fn attach_filter_to_raw_device(
+    driver: *mut DRIVER_OBJECT,
+    target_do: PDEVICE_OBJECT,
+) -> VckResult<(PDEVICE_OBJECT, PDEVICE_OBJECT)> {
+    let mut filter_do: PDEVICE_OBJECT = null_mut();
+    let status = unsafe {
+        IoCreateDevice(
+            driver,
+            DEVICE_EXTENSION_SIZE,
+            null_mut(),
+            FILE_DEVICE_DISK,
+            0,
+            0,
+            &mut filter_do,
+        )
+    };
+    if !nt_success(status) {
+        return Err(VckError::Io("IoCreateDevice(filter-raw) failed".into()));
+    }
+
+    let mut lower: PDEVICE_OBJECT = null_mut();
+    let status = unsafe { IoAttachDeviceToDeviceStackSafe(filter_do, target_do, &mut lower) };
+    if !nt_success(status) || lower.is_null() {
+        unsafe { IoDeleteDevice(filter_do) };
+        return Err(VckError::Io("IoAttachDeviceToDeviceStackSafe(raw) failed".into()));
+    }
+
+    unsafe {
+        let ext = (*filter_do).DeviceExtension as *mut DeviceExtension;
+        (*ext).kind = DEVICE_KIND_FILTER;
+        (*ext).lower_device = lower;
+        (*ext).volume = null_mut(); // bound later via filter_bind_volume
+
+        (*filter_do).Flags |= (*lower).Flags & (DO_BUFFERED_IO | DO_DIRECT_IO | DO_POWER_PAGABLE);
+        (*filter_do).DeviceType = (*lower).DeviceType;
+        (*filter_do).Characteristics = (*lower).Characteristics;
+        (*filter_do).Flags &= !DO_DEVICE_INITIALIZING;
+    }
+    Ok((filter_do, lower))
+}
+
+/// Replace the `AttachedVolume` bound to an existing filter device. The old
+/// volume Arc is properly dropped. Used by `handle_jvck_attach` to swap the
+/// provisional (PREPARE-phase) volume for the complete (FVEK-ready) volume.
+///
+/// # Safety
+/// `filter_do` must be a filter device object with a non-null `volume` pointer
+/// set by a previous `filter_bind_volume` call.
+pub unsafe fn filter_rebind_volume(filter_do: PDEVICE_OBJECT, volume: Arc<AttachedVolume>) {
+    let ext = (*filter_do).DeviceExtension as *mut DeviceExtension;
+    let old_ptr = (*ext).volume;
+    if !old_ptr.is_null() {
+        drop(Arc::from_raw(old_ptr));
+    }
+    (*ext).volume = Arc::into_raw(volume);
+}
+
 /// Bind an `AttachedVolume` to a previously unbound filter device (see
 /// [`attach_filter_unbound`]).
 ///

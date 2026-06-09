@@ -44,6 +44,10 @@ const FILE_SHARE_WRITE: u32 = 0x0000_0002;
 const FILE_OPEN: u32 = 0x0000_0001;
 const FILE_SYNCHRONOUS_IO_NONALERT: u32 = 0x0000_0020;
 const FILE_NON_DIRECTORY_FILE: u32 = 0x0000_0040;
+// Bypass the file system cache so ZwReadFile/ZwWriteFile go directly to the
+// underlying device. Critical for raw sector I/O on a mounted NTFS volume:
+// without this NTFS may serve reads from its internal cache (wrong data).
+const FILE_NO_INTERMEDIATE_BUFFERING: u32 = 0x0000_0008;
 const OBJ_CASE_INSENSITIVE: u32 = 0x0000_0040;
 const OBJ_KERNEL_HANDLE: u32 = 0x0000_0200;
 
@@ -81,7 +85,7 @@ impl KernelVolumeIo {
                 FILE_ATTRIBUTE_NORMAL,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 FILE_OPEN,
-                FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE,
+                FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_NO_INTERMEDIATE_BUFFERING,
                 null_mut(),
                 0,
             )
@@ -111,6 +115,16 @@ impl KernelVolumeIo {
     /// (`sector_size`, `total_sectors`) via disk IOCTLs.
     pub fn open_query(volume_id: &VolumeId) -> VckResult<Self> {
         let mut me = Self::open(volume_id, 0, 0)?;
+        me.query_geometry()?;
+        Ok(me)
+    }
+
+    /// Wrap an existing kernel handle (e.g. one already opened for lock/dismount)
+    /// as a KernelVolumeIo, querying geometry from it. The handle ownership is
+    /// transferred — `Drop` will call `ZwClose` on it.
+    pub fn from_handle_query(handle: wdk_sys::HANDLE) -> VckResult<Self> {
+        let mut me = Self { handle, sector_size: 0, total_sectors: 0 };
+        me.allow_extended_dasd_io();
         me.query_geometry()?;
         Ok(me)
     }

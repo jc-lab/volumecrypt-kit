@@ -18,34 +18,18 @@ var attachCmd = &cobra.Command{
 			return fmt.Errorf("invalid base64 VMK: %w", err)
 		}
 
-		// Reserve space at the volume tail for the footer metadata replicas so
-		// the filesystem no longer occupies it. Existing data volumes cannot use
-		// a header, so only the footer region is reserved. ShrinkVolumeTail
-		// targets an absolute size, so it is a no-op on re-attach.
-		reserved := uint64(useFooterFlag) * uint64(metadataSizeFlag)
-		if reserved == 0 {
+		if useFooterFlag == 0 || metadataSizeFlag == 0 {
 			return fmt.Errorf("--use-footer and --metadata-size must be greater than zero")
 		}
+
+		// Phase 0: reserve space at the volume tail (NTFS shrink).
+		reserved := uint64(useFooterFlag) * uint64(metadataSizeFlag)
 		fmt.Printf("Reserving %d bytes at the volume tail for footer metadata...\n", reserved)
 		if err := vck.ShrinkVolumeTail(volumeFlag, reserved); err != nil {
 			return fmt.Errorf("failed to reserve volume tail: %w", err)
 		}
 
-		// First-time encryption: generate the FVEK + volume id and write the JVCK
-		// footer metadata into the reserved tail (over an extended-DASD handle).
-		// A no-op when the volume already carries metadata (re-attach).
-		created, err := vck.EnsureJvckMetadata(volumeFlag, vmk, useHeaderFlag, useFooterFlag, metadataSizeFlag)
-		if err != nil {
-			return fmt.Errorf("failed to write JVCK metadata: %w", err)
-		}
-		if created {
-			fmt.Println("Wrote fresh JVCK metadata (first-time encryption).")
-		} else {
-			fmt.Println("Existing JVCK metadata found; reusing it.")
-		}
-
-		// Resolve the NT device path BEFORE any lock/dismount so that the driver
-		// can use it with ZwCreateFile regardless of filesystem mount state.
+		// Resolve the NT device path for the driver.
 		ntDevicePath, err := vck.VolumeNTDevicePath(volumeFlag)
 		if err != nil {
 			return fmt.Errorf("failed to resolve NT device path: %w", err)
@@ -58,12 +42,41 @@ var attachCmd = &cobra.Command{
 		}
 		defer client.Close()
 
-		resp, err := client.Attach(&vck.JvckVolumeAttachRequest{
+		// Phase 1: driver attaches filter + activates size hiding.
+		// NTFS remounts seeing only the data region → VBR backup goes to
+		// the last visible sector (inside NTFS extent), NOT our footer.
+		fmt.Println("Phase 1: attaching filter and hiding metadata region...")
+		prepResp, err := client.Prepare(&vck.JvckVolumePrepareRequest{
 			VolumePath:   volumeFlag,
-			VMK:          vmk,
+			NTDevicePath: ntDevicePath,
 			UseHeader:    useHeaderFlag,
 			UseFooter:    useFooterFlag,
 			MetadataSize: metadataSizeFlag,
+		})
+		if err != nil {
+			return fmt.Errorf("prepare failed: %w", err)
+		}
+		fmt.Printf("Phase 1 done. offset=%d data=%d sector_size=%d\n",
+			prepResp.OffsetSector, prepResp.DataSectors, prepResp.SectorSize)
+
+		// Phase 2: write JVCK footer metadata. The metadata region is now hidden
+		// from NTFS so NTFS cannot overwrite it with VBR backup data.
+		fmt.Println("Phase 2: writing JVCK footer metadata...")
+		created, err := vck.EnsureJvckMetadata(volumeFlag, vmk, useHeaderFlag, useFooterFlag, metadataSizeFlag)
+		if err != nil {
+			return fmt.Errorf("failed to write JVCK metadata: %w", err)
+		}
+		if created {
+			fmt.Println("Wrote fresh JVCK metadata (first-time encryption).")
+		} else {
+			fmt.Println("Existing JVCK metadata found; reusing it.")
+		}
+
+		// Phase 3: driver reads the metadata and completes encryption setup.
+		fmt.Println("Phase 3: completing attach (reading metadata + deriving keys)...")
+		resp, err := client.Attach(&vck.JvckVolumeAttachRequest{
+			VolumePath:   volumeFlag,
+			VMK:          vmk,
 			NTDevicePath: ntDevicePath,
 		})
 		if err != nil {

@@ -36,6 +36,29 @@ func (s *VolumeStatus) IsFullyEncrypted() bool {
 
 // ─── Data Volume: Attach / Detach ────────────────────────────────────────────
 
+// ─── Data Volume: Prepare / Attach (two-phase) ───────────────────────────────
+
+// JvckVolumePrepareRequest is the IOCTL_JVCK_PREPARE request (phase 1).
+//
+// The driver attaches the volume filter below the filesystem and activates size
+// hiding so NTFS remounts seeing only the data region. NTFS will NOT write its
+// VBR backup into the footer metadata region. After this call returns, the app
+// calls EnsureJvckMetadata to write the JVCK footer, then calls Attach.
+type JvckVolumePrepareRequest struct {
+	VolumePath   string `msgpack:"volume_path"`
+	NTDevicePath string `msgpack:"nt_device_path,omitempty"`
+	UseHeader    uint32 `msgpack:"use_header"`
+	UseFooter    uint32 `msgpack:"use_footer"`
+	MetadataSize uint32 `msgpack:"metadata_size"`
+}
+
+// JvckVolumePrepareResponse is the IOCTL_JVCK_PREPARE response.
+type JvckVolumePrepareResponse struct {
+	OffsetSector uint64 `msgpack:"offset_sector"`
+	DataSectors  uint64 `msgpack:"data_sectors"`
+	SectorSize   uint32 `msgpack:"sector_size"`
+}
+
 // JvckVolumeAttachRequest is the IOCTL_JVCK_ATTACH request structure.
 // It registers a Data Volume with the driver using the default JVCK format and
 // activates the encryption layer. offset_sector/total_sectors/encrypted_sector

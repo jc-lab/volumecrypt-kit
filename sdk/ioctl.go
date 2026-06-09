@@ -14,7 +14,8 @@ const (
 	ioctlStartDecrypt = 0x0022_2008
 	ioctlGetProgress  = 0x0022_200c
 	ioctlPause        = 0x0022_2010
-	ioctlJvckAttach   = 0x0022_2014 // JVCK-format Data Volume: activate encryption layer
+	ioctlJvckPrepare  = 0x0022_201c // JVCK phase-1: attach filter + hide metadata region
+	ioctlJvckAttach   = 0x0022_2014 // JVCK phase-2: read metadata + complete encryption setup
 	ioctlDetach       = 0x0022_2018 // Data Volume: release encryption layer
 )
 

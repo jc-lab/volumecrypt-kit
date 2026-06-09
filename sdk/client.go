@@ -32,7 +32,17 @@ func (c *Client) Close() error {
 	return windows.CloseHandle(c.handle)
 }
 
-// ─── Data Volume only ─────────────────────────────────────────────────────────
+// ─── Data Volume: two-phase Prepare + Attach ─────────────────────────────────
+
+// Prepare is phase 1 of Data Volume attachment. It attaches the volume filter
+// below the filesystem and activates size hiding so the footer metadata region
+// is invisible to NTFS. The app must call EnsureJvckMetadata after Prepare and
+// before Attach.
+func (c *Client) Prepare(req *JvckVolumePrepareRequest) (*JvckVolumePrepareResponse, error) {
+	return deviceControl[JvckVolumePrepareRequest, JvckVolumePrepareResponse](
+		c.handle, ioctlJvckPrepare, req,
+	)
+}
 
 // Attach activates the encryption layer on a Data Volume using the JVCK format.
 // It passes the VMK and the replica configuration (use_header/use_footer/metadata_size).
