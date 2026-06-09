@@ -122,6 +122,11 @@ pub struct VolumeStatus {
     pub total_sectors: u64,
     pub sector_size: u32,
     pub is_attached: bool,
+    /// true when the filter was placed BELOW the FSD via AddDevice (correct
+    /// position for transparent encryption). false when attached above the FSD
+    /// or when the driver needs a reboot to activate AddDevice.
+    #[serde(default)]
+    pub filter_below_fsd: bool,
 }
 
 /// IOCTL_VCK_GET_PROGRESS response.

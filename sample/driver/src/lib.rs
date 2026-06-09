@@ -89,6 +89,7 @@ pub unsafe extern "system" fn DriverEntry(
     registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
     let _ = registry_path;
+    vck_driver::driver_println!("DriverEntry: vck-sample-driver loading");
     let driver = match driver.as_mut() {
         Some(driver) => driver,
         None => return STATUS_INVALID_PARAMETER,

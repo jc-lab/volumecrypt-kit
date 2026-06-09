@@ -318,5 +318,60 @@ pub fn detach_filter(filter_do: PDEVICE_OBJECT) {
     }
 }
 
+/// Walk the device stack from the top of `nt_path` downward and return the
+/// first filter device object that belongs to this driver, along with its
+/// `lower_device`.
+///
+/// After `AddDevice` fires and NTFS mounts, the stack looks like:
+///   NTFS VCB → [Our Filter] → Raw Partition/Volume
+///
+/// `IoGetDeviceObjectPointer(nt_path)` returns the NTFS VCB.
+/// `IoGetLowerDeviceObject(NTFS_VCB)` returns Our Filter (since NTFS attached
+/// above it). We verify by checking `DeviceExtension->kind == DEVICE_KIND_FILTER`.
+///
+/// Returns `Some((filter_do, lower_do))` if found, `None` otherwise.
+pub fn find_our_filter_in_stack(nt_path: &str) -> Option<(PDEVICE_OBJECT, PDEVICE_OBJECT)> {
+    use wdk_sys::ntddk::{IoGetLowerDeviceObject, ObfDereferenceObject};
+    use wdk_sys::{FILE_READ_DATA, PFILE_OBJECT};
+
+    let name = UnicodeString::from_str(nt_path);
+    let mut file_obj: PFILE_OBJECT = null_mut();
+    let mut top_do: PDEVICE_OBJECT = null_mut();
+    let status = unsafe {
+        IoGetDeviceObjectPointer(name.as_ptr(), FILE_READ_DATA, &mut file_obj, &mut top_do)
+    };
+    if !nt_success(status) || top_do.is_null() {
+        return None;
+    }
+    // Release the file object reference — we only need the device pointer.
+    unsafe { ObfDereferenceObject(file_obj.cast()) };
+
+    // Walk the attachment chain (top → bottom).
+    unsafe {
+        // Reference top_do so IoGetLowerDeviceObject's decrement is safe.
+        wdk_sys::ntddk::ObfReferenceObject(top_do.cast());
+        let mut current = top_do;
+        loop {
+            let ext = (*current).DeviceExtension as *const DeviceExtension;
+            if !ext.is_null() && (*ext).kind == DEVICE_KIND_FILTER {
+                let lower = (*ext).lower_device;
+                ObfDereferenceObject(current.cast());
+                crate::driver_println!(
+                    "find_filter: found filter_do={:p} lower={:p}", current, lower
+                );
+                return Some((current, lower));
+            }
+            // Move to the next device below.
+            let next = IoGetLowerDeviceObject(current);
+            ObfDereferenceObject(current.cast());
+            if next.is_null() {
+                break;
+            }
+            current = next;
+        }
+    }
+    None
+}
+
 // Type alias kept for callers that referenced the old name.
 pub type FilterDevice = *mut DEVICE_OBJECT;

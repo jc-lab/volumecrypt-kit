@@ -25,6 +25,11 @@ var statusCmd = &cobra.Command{
 		fmt.Printf("State    : %d\n", st.State)
 		fmt.Printf("Progress : %.2f%% (%d / %d sectors)\n",
 			st.ProgressPercent(), st.EncryptedSector, st.TotalSectors)
+		if st.FilterBelowFsd {
+			fmt.Println("Filter   : below FSD (AddDevice) ✓")
+		} else {
+			fmt.Println("Filter   : NOT below FSD — reboot required for correct position")
+		}
 		return nil
 	},
 }

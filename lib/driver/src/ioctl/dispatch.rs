@@ -66,6 +66,13 @@ struct EmptyResponse {}
 
 fn handle_get_status(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
     let req: VolumeRequest = decode_req(input)?;
+    let nt_path = win32_volume_path_to_nt(&req.volume_path);
+
+    // Check if our filter is correctly placed BELOW the FSD (AddDevice path).
+    // This is true when find_our_filter_in_stack succeeds: means NTFS VCB is
+    // above our filter in the device stack.
+    let filter_below_fsd = crate::filter::find_our_filter_in_stack(&nt_path).is_some();
+
     if let Some(volume) = registry.get(&req.volume_path) {
         let snapshot = volume.encryption.lock().snapshot();
         encode_resp(&VolumeStatus {
@@ -75,6 +82,7 @@ fn handle_get_status(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult
             total_sectors: snapshot.total_sectors,
             sector_size: volume.sector_size,
             is_attached: true,
+            filter_below_fsd,
         })
     } else {
         encode_resp(&VolumeStatus {
@@ -84,6 +92,7 @@ fn handle_get_status(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult
             total_sectors: 0,
             sector_size: 0,
             is_attached: false,
+            filter_below_fsd,
         })
     }
 }
@@ -145,6 +154,200 @@ const FSCTL_UNLOCK_VOLUME: u32 = 0x0009_001c;
 const IOCTL_DISK_GET_DRIVE_GEOMETRY_PREPARE: u32 = 0x0007_0000;
 const IOCTL_DISK_GET_LENGTH_INFO_PREPARE: u32 = 0x0007_405C;
 
+/// PREPARE via the AddDevice path: filter is already below NTFS, use LowerDeviceIo
+/// for all I/O so we bypass NTFS write protection and PartMgr sector-0 guards.
+fn handle_jvck_prepare_adddevice_path(
+    registry: &VolumeAttachRegistry,
+    req: JvckVolumePrepareReq,
+    nt_path: String,
+    driver: *mut wdk_sys::DRIVER_OBJECT,
+    filter_do: wdk_sys::PDEVICE_OBJECT,
+    lower_do: wdk_sys::PDEVICE_OBJECT,
+) -> VckResult<IoctlResponse> {
+    use vck_common::jvck::metadata::{self, METADATA_BLOCK_SIZE};
+    use crate::crypto::aes_xts::AesXtsCipher;
+    use wdk_sys::ntddk::ZwDeviceIoControlFile;
+
+    // Query geometry (NTFS is mounted, ZwCreateFile works via existing filter pass-through).
+    let io_volume_id = VolumeId { partition_guid: Guid::nil(), device_path: nt_path.clone() };
+    let geom_io = KernelVolumeIo::open_query(&io_volume_id).map_err(|e| {
+        crate::driver_println!("jvck_prepare(add): geom open failed: {}", e);
+        e
+    })?;
+    let sector_size = geom_io.sector_size();
+    let total_sectors = geom_io.total_sectors();
+    crate::driver_println!("jvck_prepare(add): bps={} total={}", sector_size, total_sectors);
+    drop(geom_io);
+
+    // Compute replica geometry.
+    let rs = (req.metadata_size / sector_size) as u64;
+    let footer_sectors = req.use_footer as u64 * rs;
+    let header_sectors = req.use_header as u64 * rs;
+    let data_sectors = total_sectors.saturating_sub(header_sectors + footer_sectors);
+    let offset_sector = header_sectors;
+
+    // LowerDeviceIo targets the raw device below our filter.
+    // This bypasses NTFS, HarddiskVolume5, AND PartMgr (since we're below them all).
+    let lo = LowerDeviceIo::new(lower_do, sector_size, total_sectors);
+
+    // Write metadata replicas via LowerDeviceIo.
+    if !req.metadata_block.is_empty() {
+        if req.metadata_block.len() < METADATA_BLOCK_SIZE {
+            return Err(VckError::InvalidData("metadata_block too short"));
+        }
+        let replica_lbas = {
+            let mut v: alloc::vec::Vec<u64> = alloc::vec::Vec::new();
+            for i in 0..req.use_header as u64 { v.push(i * rs); }
+            let fs = total_sectors - (req.use_footer as u64 * rs);
+            for j in 0..req.use_footer as u64 { v.push(fs + j * rs + rs - 1); }
+            v
+        };
+        let mut sector_buf = alloc::vec![0u8; sector_size as usize];
+        let copy_len = METADATA_BLOCK_SIZE.min(sector_size as usize);
+        sector_buf[..copy_len].copy_from_slice(&req.metadata_block[..copy_len]);
+        for lba in &replica_lbas {
+            lo.write_sectors(*lba, &sector_buf).map_err(|e| {
+                crate::driver_println!("jvck_prepare(add): metadata write lba={} err: {}", lba, e);
+                e
+            })?;
+            crate::driver_println!("jvck_prepare(add): wrote metadata lba={}", lba);
+        }
+    }
+
+    // Encrypt sector 0 via LowerDeviceIo — bypasses PartMgr protection!
+    if !req.metadata_block.is_empty() && !req.vmk.is_empty() {
+        match metadata::decrypt_payload(&req.metadata_block[..METADATA_BLOCK_SIZE.min(req.metadata_block.len())], &req.vmk) {
+            Ok((_off, secrets)) => {
+                if let Ok(cipher) = AesXtsCipher::new(secrets.fvek_key1, secrets.fvek_key2) {
+                    let mut s0 = alloc::vec![0u8; sector_size as usize];
+                    if lo.read_sectors(0, &mut s0).is_ok() {
+                        cipher.encrypt_sector(0, &mut s0);
+                        match lo.write_sectors(0, &s0) {
+                            Ok(()) => crate::driver_println!("jvck_prepare(add): sector 0 encrypted"),
+                            Err(e) => crate::driver_println!("jvck_prepare(add): sector 0 write err: {}", e),
+                        }
+                    }
+                }
+            }
+            Err(e) => crate::driver_println!("jvck_prepare(add): decrypt_payload err: {}", e),
+        }
+    }
+
+    // Bind provisional volume (size hiding active).
+    let volume = Arc::new(AttachedVolume {
+        volume_path: req.volume_path.clone(),
+        sector_size,
+        io_config: IoConfig::AesXts {
+            key1: [0u8; 32], key2: [0u8; 32],
+            offset_sector,
+            encrypted_offset: vck_common::types::EncryptedOffset { sector: 0, total_sectors: data_sectors },
+            offset_store: Arc::new(DummyOffsetStore { total_sectors: data_sectors }),
+        },
+        encryption: Mutex::new(EncryptionEngine::new(
+            offset_sector,
+            vck_common::types::EncryptedOffset { sector: 0, total_sectors: data_sectors },
+        )),
+        offset_store: Arc::new(DummyOffsetStore { total_sectors: data_sectors }),
+        attach_source: AttachSource::Ioctl,
+        filter_device: AtomicPtr::new(filter_do),
+        cipher: None,
+        sweep_io: Mutex::new(Arc::new(DummySectorIo { sector_size, total_sectors: data_sectors })),
+        encrypted_boundary: AtomicU64::new(0),
+    });
+    registry.insert(volume.clone());
+    unsafe { crate::filter::filter_bind_volume(filter_do, volume.clone()) };
+    crate::driver_println!("jvck_prepare(add): provisional volume bound (AddDevice path)");
+
+    // Query storage device info for sweep_io path.
+    const IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D_1080;
+    const IOCTL_DISK_GET_PARTITION_INFO_EX: u32 = 0x0007_0048;
+    let (raw_partition_path, raw_disk_path, partition_start_lba) = 'paths: {
+        use crate::io::open_volume_handle_raw;
+        use wdk_sys::ntddk::ZwClose;
+        let mut sdn = [0u32; 3];
+        let mut partition_info = [0u8; 64];
+        if let Some(h) = open_volume_handle_raw(&nt_path) {
+            let mut iosb: wdk_sys::IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
+            unsafe {
+                ZwDeviceIoControlFile(h, null_mut(), None, null_mut(), &mut iosb,
+                    IOCTL_STORAGE_GET_DEVICE_NUMBER, null_mut(), 0, sdn.as_mut_ptr().cast(), 12);
+                ZwDeviceIoControlFile(h, null_mut(), None, null_mut(), &mut iosb,
+                    IOCTL_DISK_GET_PARTITION_INFO_EX, null_mut(), 0, partition_info.as_mut_ptr().cast(), 64);
+                let _ = ZwClose(h);
+            }
+        }
+        let disk_num = sdn[1];
+        let part_num = sdn[2];
+        let start_bytes = u64::from_le_bytes(partition_info[4..12].try_into().unwrap_or([0;8]));
+        let start_lba = start_bytes / sector_size as u64;
+        break 'paths (
+            alloc::format!(r"\Device\Harddisk{}\Partition{}", disk_num, part_num),
+            alloc::format!(r"\Device\Harddisk{}\DR0", disk_num),
+            start_lba,
+        );
+    };
+
+    // If VMK provided, complete full attach (read metadata → cipher → sweep).
+    if !req.vmk.is_empty() && !req.metadata_block.is_empty() {
+        let probe_io = KernelVolumeIo::open_query(&io_volume_id).map_err(|e| {
+            registry.remove(&req.volume_path);
+            crate::filter::detach_filter(filter_do);
+            e
+        })?;
+        let store = JvckMetadataStore::open(probe_io, &req.vmk).map_err(|e| {
+            registry.remove(&req.volume_path);
+            crate::filter::detach_filter(filter_do);
+            e
+        })?;
+        let store_offset = store.offset_sector();
+        let store_data = store.data_sector_count();
+        let store_bps = store.sector_size();
+        let encrypted_offset = EncryptedOffset {
+            sector: store.load_offset()?,
+            total_sectors: store_data,
+        };
+        let (key1, key2) = store.fvek_keys();
+        let (key1, key2) = (*key1, *key2);
+        let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
+        let io_config = IoConfig::AesXts {
+            key1, key2, offset_sector: store_offset,
+            encrypted_offset: encrypted_offset.clone(),
+            offset_store: offset_store.clone(),
+        };
+        let cipher = AesXtsCipher::new(key1, key2)?;
+        // sweep_io uses LowerDeviceIo — direct to raw disk, below PartMgr ✓
+        let sweep_io: Arc<dyn SectorIo> = Arc::new(
+            LowerDeviceIo::new(lower_do, store_bps, store_data)
+        );
+        registry.remove(&req.volume_path);
+        let boundary = encrypted_offset.sector;
+        let complete = Arc::new(AttachedVolume {
+            volume_path: req.volume_path.clone(),
+            sector_size: store_bps,
+            io_config,
+            encryption: Mutex::new(EncryptionEngine::new(store_offset, encrypted_offset)),
+            offset_store,
+            attach_source: AttachSource::Ioctl,
+            filter_device: AtomicPtr::new(filter_do),
+            cipher: Some(cipher),
+            sweep_io: Mutex::new(sweep_io),
+            encrypted_boundary: AtomicU64::new(boundary),
+        });
+        registry.insert(complete.clone());
+        unsafe { crate::filter::filter_rebind_volume(filter_do, complete) };
+        crate::driver_println!("jvck_prepare(add): fully attached offset={} data={}", store_offset, store_data);
+        return encode_resp(&JvckVolumePrepareResp {
+            offset_sector: store_offset, data_sectors: store_data, sector_size: store_bps,
+            raw_partition_path, raw_disk_path, partition_start_lba, fully_attached: true,
+        });
+    }
+
+    encode_resp(&JvckVolumePrepareResp {
+        offset_sector, data_sectors, sector_size,
+        raw_partition_path, raw_disk_path, partition_start_lba, fully_attached: false,
+    })
+}
+
 /// Dummy `EncryptedOffsetStore` used by provisional (pre-metadata) volumes.
 struct DummyOffsetStore {
     total_sectors: u64,
@@ -169,16 +372,18 @@ impl SectorIo for DummySectorIo {
     }
 }
 
-/// IOCTL_JVCK_PREPARE — Phase 1.
+/// IOCTL_JVCK_PREPARE — Unified attach + metadata write.
 ///
-/// Complete sequence (all while holding the volume lock):
-///   1. lock → dismount → re-lock (prevents NTFS from seeing or writing to the
-///      metadata region)
-///   2. Write the provided JVCK metadata_block to every replica LBA via
-///      vol_handle (ZwWriteFile, no FSD interference while locked/dismounted)
-///   3. Attach filter below FSD
-///   4. Bind provisional volume → size hiding active (NTFS sees only data region)
-///   5. unlock → FSD re-mounts above filter, never reaching the metadata region
+/// Two paths depending on whether AddDevice (reboot-based) pre-attached the filter:
+///
+/// **AddDevice path** (preferred, after driver install + reboot):
+///   The filter is already below NTFS. We find it via device stack walk, obtain
+///   `lower_do` (raw partition/disk device below PartMgr), use `LowerDeviceIo`
+///   for ALL I/O: metadata write + sector-0 encryption + sweep. No lock/dismount.
+///
+/// **Fallback path** (first install, no reboot yet):
+///   lock → dismount → re-lock → attach filter → write metadata → unlock.
+///   Same as before, with PartMgr protection for sector 0 bypassed by dismount.
 fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
     use crate::io::{open_volume_handle_raw, send_fsctl};
     use wdk_sys::ntddk::{
@@ -212,6 +417,20 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
     } else {
         win32_volume_path_to_nt(&req.volume_path)
     };
+
+    // ── Try AddDevice path first ───────────────────────────────────────────
+    // After driver install + reboot, AddDevice has attached an unbound filter
+    // below NTFS. Find it by walking the device stack.
+    if let Some((filter_do, lower_do)) = crate::filter::find_our_filter_in_stack(&nt_path) {
+        crate::driver_println!(
+            "jvck_prepare: AddDevice filter found filter={:p} lower={:p}",
+            filter_do, lower_do
+        );
+        return handle_jvck_prepare_adddevice_path(
+            registry, req, nt_path, driver, filter_do, lower_do,
+        );
+    }
+    crate::driver_println!("jvck_prepare: no pre-attached filter, using lock/dismount fallback");
 
     // Open vol_handle early — used for FSCTLs, geometry, metadata write.
     let vol_handle = open_volume_handle_raw(&nt_path);

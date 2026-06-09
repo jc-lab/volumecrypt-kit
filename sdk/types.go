@@ -19,6 +19,10 @@ type VolumeStatus struct {
 	TotalSectors    uint64          `msgpack:"total_sectors"`
 	SectorSize      uint32          `msgpack:"sector_size"`
 	IsAttached      bool            `msgpack:"is_attached"`
+	// FilterBelowFsd is true when the driver's filter is correctly placed BELOW
+	// the filesystem (via AddDevice at boot). false means the driver needs a
+	// reboot for the filter to be in the correct position.
+	FilterBelowFsd bool `msgpack:"filter_below_fsd"`
 }
 
 // ProgressPercent returns the encryption progress as a percentage.

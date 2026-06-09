@@ -3,10 +3,11 @@
 
 name: "data-volume"
 description: >
-  Data volume full flow with AddDevice:
-  1) Install driver as boot-start lower filter, shrink volume, write metadata.
-  2) Reboot → AddDevice fires before NTFS, filter below FSD.
-  3) Attach (provide VMK) → filter active, sweep can write via lower device.
+  Data volume encryption via AddDevice (correct filter position):
+  1) Install driver as boot-start, register LowerFilters, reboot.
+  2) After reboot, AddDevice fires BEFORE NTFS mounts → filter correctly below FSD.
+  3) PREPARE: metadata write + sector-0 encryption via LowerDeviceIo (no PartMgr issue).
+  4) Sweep starts from sector 1 via lower device (bypasses NTFS and PartMgr).
 
 qemu:
   extra_args:
@@ -21,21 +22,12 @@ steps:
     params:
       retry_interval: 5s
 
+  # Upload driver to System32/drivers (required for boot-start).
   - action: file-upload
     timeout: 30s
     params:
       src: "./testing/artifacts/vck-sample-driver.sys"
-      dst: "C:\\Temp\\vck-sample-driver.sys"
-
-  # Also copy to system drivers dir for boot-start installation.
-  - action: exec
-    timeout: 30s
-    params:
-      cmd: "cmd.exe"
-      args:
-        - "/c"
-        - "copy /Y C:\\Temp\\vck-sample-driver.sys C:\\Windows\\System32\\drivers\\vck-sample-driver.sys"
-      expect_exit_code: 0
+      dst: "C:\\Windows\\System32\\drivers\\vck-sample-driver.sys"
 
   - action: file-upload
     timeout: 30s
@@ -43,14 +35,14 @@ steps:
       src: "./testing/artifacts/vck-app.exe"
       dst: "C:\\Temp\\vck-app.exe"
 
-  # Install driver from system drivers dir as demand-start initially.
+  # Install as boot-start so PnP calls AddDevice before any FSD mounts.
   - action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
       args:
         - "/c"
-        - "sc create VolumeCryptKitSample type= kernel start= demand binPath= C:\\Windows\\System32\\drivers\\vck-sample-driver.sys"
+        - "sc create VolumeCryptKitSample type= kernel start= boot binPath= C:\\Windows\\System32\\drivers\\vck-sample-driver.sys"
       expect_exit_code: 0
 
   - action: exec
@@ -62,7 +54,6 @@ steps:
         - "/adddriver"
         - "vck-sample-driver.sys"
 
-  # Disable Windows Defender scan on test paths.
   - action: exec
     timeout: 60s
     params:
@@ -71,14 +62,32 @@ steps:
         - "-Command"
         - "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'C:\\Temp' -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'D:\\' -ErrorAction SilentlyContinue"
 
-  # Start driver (control device only; AddDevice not yet active on existing volumes).
+  # Register as LowerFilter for the disk drive class (Disk Drives class).
+  # GUID {4d36e967-e325-11ce-bfc1-08002be10318} = Disk Drives
+  # LowerFilters causes AddDevice to be called for each disk (and its volumes).
   - action: exec
     timeout: 30s
     params:
-      cmd: "cmd.exe"
+      cmd: "powershell"
       args:
-        - "/c"
-        - "sc start VolumeCryptKitSample"
+        - "-Command"
+        - |
+          # Disk Drives class
+          $diskKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e967-e325-11ce-bfc1-08002be10318}'
+          $ex = (Get-ItemProperty -Path $diskKey -Name LowerFilters -ErrorAction SilentlyContinue).LowerFilters
+          if ($ex -notcontains 'VolumeCryptKitSample') {
+            Set-ItemProperty -Path $diskKey -Name LowerFilters -Value (@($ex | Where-Object{$_}) + 'VolumeCryptKitSample')
+          }
+          Write-Host "Disk LowerFilters: $((Get-ItemProperty -Path $diskKey -Name LowerFilters -EA SilentlyContinue).LowerFilters)"
+          # Volume class
+          $volKey = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{71a27cdd-812a-11d0-bec7-08002be2092f}'
+          if (Test-Path $volKey) {
+            $ex2 = (Get-ItemProperty -Path $volKey -Name LowerFilters -ErrorAction SilentlyContinue).LowerFilters
+            if ($ex2 -notcontains 'VolumeCryptKitSample') {
+              Set-ItemProperty -Path $volKey -Name LowerFilters -Value (@($ex2 | Where-Object{$_}) + 'VolumeCryptKitSample')
+            }
+            Write-Host "Volume LowerFilters: $((Get-ItemProperty -Path $volKey -Name LowerFilters -EA SilentlyContinue).LowerFilters)"
+          }
       expect_exit_code: 0
 
   # Write a test file before encryption.
@@ -88,12 +97,69 @@ steps:
       cmd: "cmd.exe"
       args:
         - "/c"
-        - "echo hello-before-attach> D:\\vck-pretest.txt"
+        - "echo hello-before-reboot> D:\\vck-pretest.txt"
       expect_exit_code: 0
 
-  # Phase 1: shrink volume tail + write JVCK metadata + encrypt sector 0
-  # (PREPARE does lock/dismount to write sector 0; filter is NOT yet below NTFS
-  #  at this point, but sector 0 is written while locked).
+  # First reboot: activates boot-start driver + applies LowerFilters registration.
+  # After this boot AddDevice fires for the first time.
+  - action: reboot
+    timeout: 120s
+
+  - action: wait-boot
+    timeout: 2m0s
+    params:
+      retry_interval: 5s
+
+  # After first reboot: driver is loaded as boot-start, LowerFilters was applied.
+  # Rescan devices so PnP re-enumerates and calls AddDevice for existing volumes.
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - |
+          # Force PnP re-enumeration so AddDevice fires for existing volumes
+          # (PnP only auto-calls AddDevice for NEW devices; existing devices need rescan).
+          pnputil /scan-devices
+          Write-Host "PnP rescan complete"
+      expect_exit_code: 0
+
+  # Second reboot: LowerFilters changes took effect from FIRST reboot,
+  # so NOW AddDevice fires and places filter BELOW NTFS for D:.
+  # (LowerFilters persists across reboots; the FIRST boot had it registered
+  #  but PnP already enumerated before the key was written for some devices)
+  - action: reboot
+    timeout: 120s
+
+  - action: wait-boot
+    timeout: 2m0s
+    params:
+      retry_interval: 5s
+
+  # After reboot: AddDevice has fired. D: filter is below NTFS.
+  # Check if vck-app is accessible.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe status --volume \\\\.\\D:"
+      expect_exit_code: 0
+
+  # Volume-info before attach.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe volume-info --volume \\\\.\\D:"
+      expect_exit_code: 0
+
+  # Phase: shrink + PREPARE + attach (AddDevice path — no lock/dismount).
+  # filter_below_fsd should be true in status now.
   - action: exec
     timeout: 2m0s
     params:
@@ -103,7 +169,7 @@ steps:
         - "C:\\Temp\\vck-app.exe data-volume attach --volume \\\\.\\D: --vmk AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8= --use-header 0 --use-footer 2 --metadata-size 131072"
       expect_exit_code: 0
 
-  # Show size before reboot (NTFS sees reduced size via filter).
+  # Volume-info after attach: should show reduced size (metadata region hidden).
   - action: exec
     timeout: 30s
     params:
@@ -113,67 +179,7 @@ steps:
         - "C:\\Temp\\vck-app.exe volume-info --volume \\\\.\\D:"
       expect_exit_code: 0
 
-  # Detach filter (will be re-attached via AddDevice after reboot).
-  - action: exec
-    timeout: 30s
-    params:
-      cmd: "cmd.exe"
-      args:
-        - "/c"
-        - "C:\\Temp\\vck-app.exe data-volume detach --volume \\\\.\\D:"
-      expect_exit_code: 0
-
-  # Configure driver as boot-start so it loads before any filesystem drivers.
-  # boot-start → SERVICE_BOOT_START → PnP calls AddDevice during enumeration.
-  - action: exec
-    timeout: 30s
-    params:
-      cmd: "cmd.exe"
-      args:
-        - "/c"
-        - "sc config VolumeCryptKitSample start= boot"
-      expect_exit_code: 0
-
-  # Register as LowerFilter for disk volume class so PnP calls AddDevice
-  # before any FSD mounts. This places our filter BELOW the FSD.
-  # Disk Volume class GUID: {4d36e967-e325-11ce-bfc1-08002be10318}
-  - action: exec
-    timeout: 30s
-    params:
-      cmd: "powershell"
-      args:
-        - "-Command"
-        - |
-          $key = 'HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e967-e325-11ce-bfc1-08002be10318}'
-          $existing = (Get-ItemProperty -Path $key -Name LowerFilters -ErrorAction SilentlyContinue).LowerFilters
-          if ($existing -notcontains 'VolumeCryptKitSample') {
-            $new = @($existing | Where-Object { $_ }) + 'VolumeCryptKitSample'
-            Set-ItemProperty -Path $key -Name LowerFilters -Value $new
-          }
-          Write-Host "LowerFilters: $((Get-ItemProperty -Path $key -Name LowerFilters).LowerFilters)"
-      expect_exit_code: 0
-
-  # Stop driver before reboot.
-  - action: exec
-    timeout: 30s
-    params:
-      cmd: "cmd.exe"
-      args:
-        - "/c"
-        - "sc stop VolumeCryptKitSample"
-
-  - action: reboot
-    timeout: 30s
-
-  - action: wait-boot
-    timeout: 2m0s
-    params:
-      retry_interval: 5s
-
-  # After reboot: AddDevice has fired, filter is below NTFS on every volume.
-  # D: VBR (sector 0) is ciphertext; NTFS reads through filter → decrypted ✓
-
-  # Verify D: is accessible (NTFS mounted above filter, decryption active for s0).
+  # Pre-existing file must be readable through filter.
   - action: exec
     timeout: 30s
     params:
@@ -183,18 +189,38 @@ steps:
         - "type D:\\vck-pretest.txt"
       expect_exit_code: 0
 
-  # Volume info: should show full partition size (filter not yet activated for D:).
+  # Write new file through filter.
   - action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
       args:
         - "/c"
-        - "C:\\Temp\\vck-app.exe volume-info --volume \\\\.\\D:"
+        - "echo hello-after-attach> D:\\vck-posttest.txt && type D:\\vck-posttest.txt"
+      expect_exit_code: 0
+
+  # Status should show filter_below_fsd: true.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe status --volume \\\\.\\D:"
+      expect_exit_code: 0
+
+  # Detach and stop driver.
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe data-volume detach --volume \\\\.\\D:"
       expect_exit_code: 0
 
   - action: exec
-    timeout: 30s
+    timeout: 60s
     params:
       cmd: "cmd.exe"
       args:
