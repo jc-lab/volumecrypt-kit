@@ -82,7 +82,9 @@ var attachCmd = &cobra.Command{
 					FooterReplicaCount: uint8(useFooterFlag),
 					VolumeID:           volumeID,
 				}
-				block, encErr := header.EncodeMetadataBlock(fvek1, fvek2, 0, vmk)
+				// encrypted_offset=1 so the driver knows sector 0 will be
+				// pre-encrypted during PREPARE and the sweep starts from sector 1.
+				block, encErr := header.EncodeMetadataBlock(fvek1, fvek2, 1, vmk)
 				if encErr != nil {
 					return fmt.Errorf("failed to encode JVCK metadata: %w", encErr)
 				}
@@ -101,6 +103,7 @@ var attachCmd = &cobra.Command{
 			UseHeader:     useHeaderFlag,
 			UseFooter:     useFooterFlag,
 			MetadataSize:  metadataSizeFlag,
+			VMK:           vmk,
 			MetadataBlock: metadataBlock,
 		})
 		if err != nil {
@@ -109,19 +112,24 @@ var attachCmd = &cobra.Command{
 		fmt.Printf("Phase 2 done. offset=%d data=%d sector_size=%d\n",
 			prepResp.OffsetSector, prepResp.DataSectors, prepResp.SectorSize)
 
-		// Phase 3: driver reads the metadata and completes encryption setup.
-		fmt.Println("Phase 3: completing attach (reading metadata + deriving keys)...")
-		resp, err := client.Attach(&vck.JvckVolumeAttachRequest{
-			VolumePath:   volumeFlag,
-			VMK:          vmk,
-			NTDevicePath: ntDevicePath,
-		})
-		if err != nil {
-			return err
+		// If PREPARE completed full attach (VMK was provided), we're done.
+		// Otherwise (re-attach of existing volume), call Attach separately.
+		if prepResp.FullyAttached {
+			fmt.Printf("Fully attached via PREPARE. offset=%d data=%d sector_size=%d\n",
+				prepResp.OffsetSector, prepResp.DataSectors, prepResp.SectorSize)
+		} else {
+			fmt.Println("Phase 3: completing attach (reading metadata + deriving keys)...")
+			resp, err := client.Attach(&vck.JvckVolumeAttachRequest{
+				VolumePath:   volumeFlag,
+				VMK:          vmk,
+				NTDevicePath: ntDevicePath,
+			})
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Attached. offset_sector=%d total_sectors=%d sector_size=%d\n",
+				resp.OffsetSector, resp.TotalSectors, resp.SectorSize)
 		}
-
-		fmt.Printf("Attached. offset_sector=%d total_sectors=%d sector_size=%d\n",
-			resp.OffsetSector, resp.TotalSectors, resp.SectorSize)
 		return nil
 	},
 }

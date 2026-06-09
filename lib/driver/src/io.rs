@@ -469,6 +469,37 @@ pub fn open_volume_handle_raw(nt_path: &str) -> Option<wdk_sys::HANDLE> {
 }
 
 /// Send a no-in/no-out FSCTL to `handle`. Returns the NTSTATUS.
+/// Wraps a `SectorIo` and adds a fixed LBA offset to all reads/writes.
+///
+/// Used for sweep_io when targeting the raw disk device (`\Device\Harddisk0\DR0`)
+/// to bypass PartMgr's per-partition write protection. The `partition_start_lba`
+/// is added to every LBA so that logical partition sector 0 maps to the correct
+/// physical disk sector.
+pub struct OffsetSectorIo {
+    inner: alloc::sync::Arc<dyn vck_common::SectorIo>,
+    partition_start_lba: u64,
+}
+
+impl OffsetSectorIo {
+    pub fn new(
+        inner: alloc::sync::Arc<dyn vck_common::SectorIo>,
+        partition_start_lba: u64,
+    ) -> Self {
+        Self { inner, partition_start_lba }
+    }
+}
+
+impl vck_common::SectorIo for OffsetSectorIo {
+    fn sector_size(&self) -> u32 { self.inner.sector_size() }
+    fn total_sectors(&self) -> u64 { self.inner.total_sectors() }
+    fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> VckResult<()> {
+        self.inner.read_sectors(self.partition_start_lba + lba, buf)
+    }
+    fn write_sectors(&self, lba: u64, buf: &[u8]) -> VckResult<()> {
+        self.inner.write_sectors(self.partition_start_lba + lba, buf)
+    }
+}
+
 pub fn send_fsctl(handle: wdk_sys::HANDLE, code: u32) -> i32 {
     let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
     unsafe {

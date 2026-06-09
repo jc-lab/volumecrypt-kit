@@ -137,8 +137,36 @@ steps:
         - "C:\\Temp\\vck-app.exe status --volume \\\\.\\D:"
       expect_exit_code: 0
 
+  # Start progressive encryption of the data volume and wait for some progress.
+  # A 10 GiB full encrypt takes too long; we verify the sweep makes measurable
+  # progress (> 0 sectors) within 45 s.
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - |
+          & C:\Temp\vck-app.exe data-volume encrypt --volume \\.\D:
+          $deadline = (Get-Date).AddSeconds(45)
+          $progress = $false
+          do {
+            $out = & C:\Temp\vck-app.exe status --volume \\.\D: 2>&1 | Out-String
+            Write-Host $out
+            if ($out -match 'Encrypting|Idle') {
+              $m = [regex]::Match($out, '([\d]+)\s*/\s*\d+\s+sector')
+              if ($m.Success -and [int64]$m.Groups[1].Value -gt 0) {
+                $progress = $true; break
+              }
+            }
+            Start-Sleep -Seconds 3
+          } while ((Get-Date) -lt $deadline)
+          if ($progress) { Write-Host "SWEEP_PROGRESS_OK" } else { Write-Host "NO_SWEEP_PROGRESS" }
+          exit $(if ($progress) { 0 } else { 1 })
+      expect_exit_code: 0
+
   # Files written before and after attach must still read back correctly
-  # through the filter.
+  # through the filter (transparent decryption for encrypted sectors).
   - action: exec
     timeout: 30s
     params:

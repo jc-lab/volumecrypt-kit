@@ -30,20 +30,42 @@ pub struct JvckVolumePrepareReq {
     pub use_footer: u32,
     #[serde(default)]
     pub metadata_size: u32,
-    /// Pre-encoded JVCK Metadata block (512 bytes). The driver writes this to
-    /// every replica LBA while the volume lock is held (before unlock), so NTFS
-    /// can never overwrite the metadata region on re-mount.
+    /// VMK used to decrypt the metadata_block and recover the FVEK. Required
+    /// when metadata_block is non-empty (driver needs FVEK to encrypt sector 0).
+    #[serde(default, with = "serde_bytes")]
+    pub vmk: Vec<u8>,
+    /// Pre-encoded JVCK Metadata block (512 bytes, encoded with encrypted_offset=1
+    /// so the sweep starts from sector 1). Written to every replica LBA while locked.
     /// Empty means skip writing (re-attach to an already-prepared volume).
     #[serde(default, with = "serde_bytes")]
     pub metadata_block: Vec<u8>,
 }
 
 /// IOCTL_JVCK_PREPARE response.
+///
+/// When VMK was provided and metadata_block was non-empty, the driver
+/// completes full attach (cipher, sweep setup) and the response contains the
+/// final encryption geometry — same semantics as the old IOCTL_JVCK_ATTACH
+/// response, so the app can treat PREPARE as the single IOCTL that does
+/// everything.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JvckVolumePrepareResp {
     pub offset_sector: u64,
     pub data_sectors: u64,
     pub sector_size: u32,
+    /// Raw partition path (e.g. `\Device\Harddisk0\Partition1`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub raw_partition_path: String,
+    /// Raw disk path (e.g. `\Device\Harddisk0\DR0`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub raw_disk_path: String,
+    /// Partition start LBA on the physical disk.
+    #[serde(default)]
+    pub partition_start_lba: u64,
+    /// true when the volume is fully attached (cipher + sweep ready).
+    /// false when PREPARE was called without VMK (provisional-only mode).
+    #[serde(default)]
+    pub fully_attached: bool,
 }
 
 /// IOCTL_JVCK_ATTACH request.
@@ -71,6 +93,10 @@ pub struct JvckVolumeAttachReq {
     /// the filesystem is transiently dismounted.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub nt_device_path: String,
+    /// Raw partition path (e.g. `\Device\Harddisk0\Partition1`) returned by
+    /// IOCTL_JVCK_PREPARE. Used for sweep_io to bypass NTFS write protection.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub raw_partition_path: String,
 }
 
 /// IOCTL_JVCK_ATTACH response.

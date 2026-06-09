@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 )
 
@@ -192,6 +193,63 @@ func bytesEqual(a, b []byte) bool {
 // the sector size drops the remainder (the region never exceeds metadata_size).
 func replicaSectors(metadataSize, sectorSize uint32) uint64 {
 	return uint64(metadataSize / sectorSize)
+}
+
+// EncryptSector encrypts a single sector in-place using AES-XTS with the given
+// FVEK halves and the sector's data-region-relative sector number as the tweak.
+// This matches lib/common/src/xts.rs (XtsVolumeCipher::encrypt_sector).
+//
+// Used by the app to pre-encrypt sector 0 (VBR) before calling PREPARE so the
+// driver can write it to disk while the volume is locked+dismounted, bypassing
+// PartMgr's protection for sector 0 of mounted partitions.
+func EncryptSector(fvek1, fvek2 [32]byte, sectorNumber uint64, sector []byte) error {
+	if len(sector) == 0 || len(sector)%16 != 0 {
+		return fmt.Errorf("sector length must be a multiple of 16 bytes")
+	}
+	c1, err := aes.NewCipher(fvek1[:])
+	if err != nil {
+		return err
+	}
+	c2, err := aes.NewCipher(fvek2[:])
+	if err != nil {
+		return err
+	}
+
+	// Compute the XTS tweak for this sector: T = E_k2(sector_number_LE128)
+	var tweak [16]byte
+	binary.LittleEndian.PutUint64(tweak[:8], sectorNumber)
+	// high 8 bytes stay zero (128-bit sector number)
+	c2.Encrypt(tweak[:], tweak[:])
+
+	blockSize := 16
+	for i := 0; i < len(sector); i += blockSize {
+		// XOR with tweak
+		for j := 0; j < blockSize; j++ {
+			sector[i+j] ^= tweak[j]
+		}
+		// Encrypt with k1
+		c1.Encrypt(sector[i:i+blockSize], sector[i:i+blockSize])
+		// XOR with tweak again
+		for j := 0; j < blockSize; j++ {
+			sector[i+j] ^= tweak[j]
+		}
+		// Multiply tweak by x (GF(2^128) with polynomial x^128+x^7+x^2+x+1)
+		xtsGFMul(&tweak)
+	}
+	return nil
+}
+
+// xtsGFMul multiplies a 128-bit GF(2^128) element by x (the primitive element).
+func xtsGFMul(t *[16]byte) {
+	var carry byte
+	for i := 0; i < 16; i++ {
+		next := t[i] >> 7
+		t[i] = (t[i] << 1) | carry
+		carry = next
+	}
+	if carry != 0 {
+		t[0] ^= 0x87 // x^128 + x^7 + x^2 + x + 1
+	}
 }
 
 // metadataSectorLBAs returns the absolute LBA of every replica's Metadata sector

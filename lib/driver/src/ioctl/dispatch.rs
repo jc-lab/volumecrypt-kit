@@ -15,7 +15,7 @@ use vck_common::{
 
 use crate::{
     crypto::aes_xts::AesXtsCipher,
-    io::KernelVolumeIo,
+    io::{KernelVolumeIo, LowerDeviceIo, OffsetSectorIo},
     ioctl::codes::*,
     nt::win32_volume_path_to_nt,
     offset::engine::EncryptionEngine,
@@ -403,7 +403,226 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         }
     }
 
-    encode_resp(&JvckVolumePrepareResp { offset_sector, data_sectors, sector_size })
+    // Encrypt sector 0 (VBR) in the kernel while the volume is locked+dismounted.
+    // PartMgr blocks writes to partition sector 0 of MOUNTED partitions; writing
+    // while dismounted bypasses that check entirely.
+    //
+    // The FVEK is recovered from metadata_block + vmk. The metadata_block encodes
+    // encrypted_offset=1, so after PREPARE the sweep starts from sector 1.
+    if !req.metadata_block.is_empty() && !req.vmk.is_empty() {
+        use vck_common::jvck::metadata;
+        use crate::crypto::aes_xts::AesXtsCipher;
+        match metadata::decrypt_payload(&req.metadata_block[..metadata::METADATA_BLOCK_SIZE.min(req.metadata_block.len())], &req.vmk) {
+            Ok((_initial_offset, secrets)) => {
+                match AesXtsCipher::new(secrets.fvek_key1, secrets.fvek_key2) {
+                    Ok(cipher) => {
+                        let write_vol_id = VolumeId {
+                            partition_guid: Guid::nil(),
+                            device_path: nt_path.clone(),
+                        };
+                        match KernelVolumeIo::open(&write_vol_id, sector_size, total_sectors) {
+                            Ok(write_io) => {
+                                let mut s0 = alloc::vec![0u8; sector_size as usize];
+                                match write_io.read_sectors(0, &mut s0) {
+                                    Ok(()) => {
+                                        cipher.encrypt_sector(0, &mut s0);
+                                        match write_io.write_sectors(0, &s0) {
+                                            Ok(()) => crate::driver_println!("jvck_prepare: sector 0 encrypted and written"),
+                                            Err(e) => crate::driver_println!("jvck_prepare: sector 0 write err: {}", e),
+                                        }
+                                    }
+                                    Err(e) => crate::driver_println!("jvck_prepare: sector 0 read err: {}", e),
+                                }
+                            }
+                            Err(e) => crate::driver_println!("jvck_prepare: sector 0 io open err: {}", e),
+                        }
+                    }
+                    Err(e) => crate::driver_println!("jvck_prepare: cipher init err: {}", e),
+                }
+            }
+            Err(e) => crate::driver_println!("jvck_prepare: metadata decrypt err: {}", e),
+        }
+    }
+
+    // Query STORAGE_DEVICE_NUMBER from vol_handle_raw to find the raw partition
+    // path (e.g. `\Device\Harddisk0\Partition1`) for sweep_io in ATTACH.
+    // This path targets the physical disk partition below volmgr, which accepts
+    // direct IoBuildSynchronousFsdRequest block I/O.
+    // Query storage device number and partition start offset.
+    // raw_partition_path: for metadata I/O fallback
+    // raw_disk_path + partition_start_lba: for sweep_io (bypasses PartMgr sector-0 protection)
+    let (raw_partition_path, raw_disk_path, partition_start_lba) = {
+        use wdk_sys::ntddk::{ZwClose, ZwDeviceIoControlFile};
+        // IOCTL_STORAGE_GET_DEVICE_NUMBER: CTL_CODE(FILE_DEVICE_MASS_STORAGE=0x2D, 0x420, METHOD_BUFFERED, FILE_ANY_ACCESS)
+        const IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D_1080;
+        // IOCTL_DISK_GET_PARTITION_INFO_EX: CTL_CODE(FILE_DEVICE_DISK=7, 0x12, METHOD_BUFFERED, FILE_ANY_ACCESS)
+        const IOCTL_DISK_GET_PARTITION_INFO_EX: u32 = 0x0007_0048;
+
+        // STORAGE_DEVICE_NUMBER { DeviceType: u32, DeviceNumber: u32, PartitionNumber: u32 }
+        let mut sdn = [0u32; 3];
+        // PARTITION_INFORMATION_EX: PartitionStyle(4) + StartingOffset(8) + PartitionLength(8) + ...
+        // We only need the first 20 bytes: style(4) + StartingOffset(8) + PartitionLength(8)
+        let mut partition_info = [0u8; 64];
+        let mut disk_num = 0u32;
+        let mut part_num = 0u32;
+        let mut start_offset_bytes: u64 = 0;
+
+        if let Some(h) = open_volume_handle_raw(&nt_path) {
+            let mut iosb: wdk_sys::IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
+            let st1 = unsafe {
+                ZwDeviceIoControlFile(h, null_mut(), None, null_mut(), &mut iosb,
+                    IOCTL_STORAGE_GET_DEVICE_NUMBER, null_mut(), 0,
+                    sdn.as_mut_ptr().cast(), 12)
+            };
+            if crate::nt::nt_success(st1) {
+                disk_num = sdn[1];
+                part_num = sdn[2];
+            }
+            let st2 = unsafe {
+                ZwDeviceIoControlFile(h, null_mut(), None, null_mut(), &mut iosb,
+                    IOCTL_DISK_GET_PARTITION_INFO_EX, null_mut(), 0,
+                    partition_info.as_mut_ptr().cast(), 64)
+            };
+            if crate::nt::nt_success(st2) {
+                // PartitionStyle(4 bytes) + StartingOffset(8 bytes) at offset 4
+                start_offset_bytes = u64::from_le_bytes(
+                    partition_info[4..12].try_into().unwrap_or([0;8])
+                );
+            }
+            crate::driver_println!(
+                "jvck_prepare: disk={} part={} start_offset={}",
+                disk_num, part_num, start_offset_bytes
+            );
+            unsafe { let _ = ZwClose(h); }
+        }
+
+        let partition_path = if disk_num > 0 || part_num > 0 {
+            alloc::format!(r"\Device\Harddisk{}\Partition{}", disk_num, part_num)
+        } else { String::new() };
+        let disk_path = if disk_num > 0 || part_num > 0 {
+            alloc::format!(r"\Device\Harddisk{}\DR0", disk_num)
+        } else { String::new() };
+        let start_lba = start_offset_bytes / sector_size as u64;
+
+        (partition_path, disk_path, start_lba)
+    };
+    crate::driver_println!(
+        "jvck_prepare: raw_partition={} raw_disk={} start_lba={}",
+        raw_partition_path, raw_disk_path, partition_start_lba
+    );
+
+    // If VMK was provided, complete the full attach now: read metadata, build
+    // cipher, configure sweep_io, and replace the provisional volume.
+    // This merges the old two-IOCTL flow (PREPARE + ATTACH) into one.
+    if !req.vmk.is_empty() && !req.metadata_block.is_empty() {
+        let io_nt_path = if !req.nt_device_path.is_empty() {
+            req.nt_device_path.clone()
+        } else {
+            win32_volume_path_to_nt(&req.volume_path)
+        };
+        let io_volume_id = VolumeId {
+            partition_guid: Guid::nil(),
+            device_path: io_nt_path.clone(),
+        };
+
+        // Read metadata via KernelVolumeIo (NTFS has remounted above filter).
+        let probe_io = KernelVolumeIo::open_query(&io_volume_id).map_err(|err| {
+            crate::driver_println!("jvck_prepare: probe failed: {}, detaching", err);
+            registry.remove(&req.volume_path);
+            crate::filter::detach_filter(filter_do);
+            err
+        })?;
+        let partition_total = probe_io.total_sectors();
+        crate::driver_println!("jvck_prepare: probe ok total={}", partition_total);
+
+        let store = JvckMetadataStore::open(probe_io, &req.vmk).map_err(|err| {
+            crate::driver_println!("jvck_prepare: metadata open failed: {}, detaching", err);
+            registry.remove(&req.volume_path);
+            crate::filter::detach_filter(filter_do);
+            err
+        })?;
+
+        let store_offset = store.offset_sector();
+        let store_data = store.data_sector_count();
+        let store_bps = store.sector_size();
+        let encrypted_offset = EncryptedOffset {
+            sector: store.load_offset()?,
+            total_sectors: store_data,
+        };
+        let (key1, key2) = store.fvek_keys();
+        let (key1, key2) = (*key1, *key2);
+        let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
+        let io_config = IoConfig::AesXts {
+            key1, key2,
+            offset_sector: store_offset,
+            encrypted_offset: encrypted_offset.clone(),
+            offset_store: offset_store.clone(),
+        };
+        let cipher = AesXtsCipher::new(key1, key2).map_err(|err| {
+            registry.remove(&req.volume_path);
+            crate::filter::detach_filter(filter_do);
+            err
+        })?;
+
+        // sweep_io: prefer raw disk (bypass PartMgr), fall back to partition path.
+        let sweep_io: Arc<dyn SectorIo> = if !raw_disk_path.is_empty() && partition_start_lba > 0 {
+            let disk_id = VolumeId { partition_guid: Guid::nil(), device_path: raw_disk_path.clone() };
+            let disk_total = partition_start_lba + store_data + 1024;
+            crate::driver_println!("jvck_prepare: sweep via raw disk {} lba={}", raw_disk_path, partition_start_lba);
+            let disk_io = KernelVolumeIo::open(&disk_id, store_bps, disk_total).map_err(|e| {
+                registry.remove(&req.volume_path);
+                crate::filter::detach_filter(filter_do);
+                e
+            })?;
+            Arc::new(OffsetSectorIo::new(Arc::new(disk_io) as Arc<dyn SectorIo>, partition_start_lba))
+        } else if !raw_partition_path.is_empty() {
+            let part_id = VolumeId { partition_guid: Guid::nil(), device_path: raw_partition_path.clone() };
+            crate::driver_println!("jvck_prepare: sweep via raw partition {}", raw_partition_path);
+            Arc::new(KernelVolumeIo::open(&part_id, store_bps, store_data).map_err(|e| {
+                registry.remove(&req.volume_path);
+                crate::filter::detach_filter(filter_do);
+                e
+            })?)
+        } else {
+            Arc::new(KernelVolumeIo::open(&io_volume_id, store_bps, store_data).map_err(|e| {
+                registry.remove(&req.volume_path);
+                crate::filter::detach_filter(filter_do);
+                e
+            })?)
+        };
+
+        registry.remove(&req.volume_path);
+        let initial_boundary = encrypted_offset.sector;
+        let complete_volume = Arc::new(AttachedVolume {
+            volume_path: req.volume_path.clone(),
+            sector_size: store_bps,
+            io_config,
+            encryption: Mutex::new(EncryptionEngine::new(store_offset, encrypted_offset)),
+            offset_store,
+            attach_source: AttachSource::Ioctl,
+            filter_device: AtomicPtr::new(filter_do),
+            cipher: Some(cipher),
+            sweep_io: Mutex::new(sweep_io),
+            encrypted_boundary: AtomicU64::new(initial_boundary),
+        });
+        registry.insert(complete_volume.clone());
+        unsafe { crate::filter::filter_rebind_volume(filter_do, complete_volume) };
+        crate::driver_println!("jvck_prepare: fully attached offset={} data={}", store_offset, store_data);
+
+        return encode_resp(&JvckVolumePrepareResp {
+            offset_sector: store_offset,
+            data_sectors: store_data,
+            sector_size: store_bps,
+            raw_partition_path, raw_disk_path, partition_start_lba,
+            fully_attached: true,
+        });
+    }
+
+    encode_resp(&JvckVolumePrepareResp {
+        offset_sector, data_sectors, sector_size,
+        raw_partition_path, raw_disk_path, partition_start_lba,
+        fully_attached: false,
+    })
 }
 
 /// IOCTL_JVCK_ATTACH — Phase 2.
@@ -504,9 +723,33 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
 
     crate::driver_println!("jvck_attach: build cipher + sweep_io");
     let cipher = AesXtsCipher::new(key1, key2)?;
-    let sweep_io: Arc<dyn SectorIo> = Arc::new(
-        KernelVolumeIo::open(&io_volume_id, store_sector_size, store_data_sectors)?
-    );
+
+    // sweep_io must bypass both NTFS and the filter so that:
+    //   1. NTFS write protection for its own sectors (e.g. VBR at lba=0) doesn't block us
+    //   2. The filter doesn't double-encrypt already-in-memory-encrypted data
+    //
+    // `lower_do` (HarddiskVolume5) is managed by volmgr and may reject raw writes to
+    // NTFS-protected sectors (returns STATUS_ACCESS_DENIED for lba=0).
+    // `lower_do->Vpb->RealDevice` is the underlying partition device (e.g.
+    // \Device\Harddisk0\Partition1) which accepts all sector-aligned writes from
+    // kernel mode without NTFS or volume-manager protection.
+    // Get the raw partition device (Vpb->RealDevice of the volume device below
+    // our filter) for sweep_io. This bypasses NTFS and HarddiskVolume5's
+    // write protection (HarddiskVolume5 refuses raw writes to NTFS-protected
+    // sectors like lba=0 with STATUS_ACCESS_DENIED).
+    // Re-attach: sector 0 was already encrypted during the original PREPARE, so
+    // sweep starts from sector 1. Use raw partition path to bypass NTFS protection.
+    let sweep_io: Arc<dyn SectorIo> = if !req.raw_partition_path.is_empty() {
+        let part_id = VolumeId {
+            partition_guid: Guid::nil(),
+            device_path: req.raw_partition_path.clone(),
+        };
+        crate::driver_println!("jvck_attach: sweep_io via raw partition {}", req.raw_partition_path);
+        Arc::new(KernelVolumeIo::open(&part_id, store_sector_size, store_data_sectors)?)
+    } else {
+        crate::driver_println!("jvck_attach: sweep_io via volume (no raw path)");
+        Arc::new(KernelVolumeIo::open(&io_volume_id, store_sector_size, store_data_sectors)?)
+    };
 
     // Replace the provisional volume with the complete one. The filter_do stays;
     // we just swap the volume bound to its extension.
