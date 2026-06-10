@@ -44,7 +44,7 @@ use wdk_sys::{
 use crate::{
     crypto::aes_xts::AesXtsCipher,
     device::DeviceExtension,
-    io::{KernelVolumeIo, LowerDeviceIo},
+    io::LowerDeviceIo,
     offset::engine::EncryptionEngine,
     provider::IoConfig,
     registry::{global_registry, AttachSource, AttachedVolume},
@@ -163,19 +163,18 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
         return;
     }
 
-    // Open the raw lower device (bypassing our filter) and learn its geometry.
-    let probe = match KernelVolumeIo::from_device_object_query(lower_do) {
-        Ok(p) => p,
-        Err(e) => {
-            crate::driver_println!("handover_mount: geometry probe failed: {}", e);
-            return;
-        }
-    };
-    let sector_size = probe.sector_size();
-    let total_sectors = probe.total_sectors();
+    // Probe the raw lower device (bypassing our filter) over IRP IOCTLs. We use
+    // LowerDeviceIo (IoBuildDeviceIoControlRequest) rather than a device handle:
+    // an ObOpenObjectByPointer handle rejects ZwDeviceIoControlFile with
+    // OBJECT_TYPE_MISMATCH.
+    let mut footer_io = LowerDeviceIo::new(lower_do, 0, 0);
+    if let Err(e) = footer_io.query_geometry() {
+        crate::driver_println!("handover_mount: geometry probe failed: {}", e);
+        return;
+    }
 
     // Match this device's GPT partition GUID against the handover target.
-    match probe.read_gpt_partition_id() {
+    match footer_io.read_gpt_partition_id() {
         Ok(guid) => {
             if guid != handover.partition_guid {
                 crate::driver_println!(
@@ -191,11 +190,9 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
             return;
         }
     }
-    drop(probe);
 
     // Decrypt the footer metadata with the VMK to recover keys + geometry.
     // Footer I/O goes straight to the lower device, bypassing our filter.
-    let footer_io = LowerDeviceIo::new(lower_do, sector_size, total_sectors);
     let store = match JvckMetadataStore::open(footer_io, &handover.vmk) {
         Ok(s) => s,
         Err(e) => {

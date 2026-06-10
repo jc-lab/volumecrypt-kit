@@ -387,7 +387,8 @@ impl SectorIo for KernelVolumeIo {
 
 use wdk_sys::{
     ntddk::{
-        IoBuildSynchronousFsdRequest, IofCallDriver, KeInitializeEvent, KeWaitForSingleObject,
+        IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IofCallDriver,
+        KeInitializeEvent, KeWaitForSingleObject,
     },
     KEVENT, IRP_MJ_READ, IRP_MJ_WRITE, _EVENT_TYPE::NotificationEvent, _KWAIT_REASON::Executive,
     _MODE::KernelMode,
@@ -411,6 +412,85 @@ impl LowerDeviceIo {
     /// ensure the device outlives this value.
     pub fn new(device_object: PDEVICE_OBJECT, sector_size: u32, total_sectors: u64) -> Self {
         Self { device_object, sector_size, total_sectors }
+    }
+
+    /// Send a METHOD_BUFFERED disk IOCTL (no input) directly to the device via an
+    /// IRP. Unlike a handle opened with `ObOpenObjectByPointer` (which is a device
+    /// handle and rejects `ZwDeviceIoControlFile` with `OBJECT_TYPE_MISMATCH`),
+    /// `IoBuildDeviceIoControlRequest` + `IofCallDriver` works against the raw
+    /// lower device object.
+    fn device_ioctl(&self, code: u32, out: &mut [u8]) -> VckResult<()> {
+        let mut event: KEVENT = unsafe { core::mem::zeroed() };
+        let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
+        unsafe { KeInitializeEvent(&mut event, NotificationEvent, 0) };
+
+        let irp = unsafe {
+            IoBuildDeviceIoControlRequest(
+                code,
+                self.device_object,
+                null_mut(),
+                0,
+                out.as_mut_ptr().cast::<c_void>(),
+                out.len() as u32,
+                0, // InternalDeviceIoControl = FALSE
+                &mut event,
+                &mut iosb,
+            )
+        };
+        if irp.is_null() {
+            return Err(VckError::Io("IoBuildDeviceIoControlRequest(lower) failed".into()));
+        }
+        let mut status = unsafe { IofCallDriver(self.device_object, irp) };
+        if status == STATUS_PENDING {
+            unsafe {
+                let _ = KeWaitForSingleObject(
+                    (&mut event as *mut KEVENT).cast::<c_void>(),
+                    Executive,
+                    KernelMode as i8,
+                    0,
+                    null_mut(),
+                );
+                status = iosb.__bindgen_anon_1.Status;
+            }
+        }
+        if !nt_success(status) {
+            return Err(VckError::Io("lower device IOCTL failed".into()));
+        }
+        Ok(())
+    }
+
+    /// Query the device geometry (`sector_size`, `total_sectors`) over IRP IOCTLs
+    /// and store it on `self`.
+    pub fn query_geometry(&mut self) -> VckResult<()> {
+        let mut geom = [0u8; 32];
+        self.device_ioctl(IOCTL_DISK_GET_DRIVE_GEOMETRY, &mut geom)?;
+        let off = DISK_GEOMETRY_BYTES_PER_SECTOR_OFFSET;
+        let bps = u32::from_le_bytes(geom[off..off + 4].try_into().unwrap());
+        if bps == 0 {
+            return Err(VckError::Io("lower device reported zero sector size".into()));
+        }
+        let mut len = [0u8; 8];
+        self.device_ioctl(IOCTL_DISK_GET_LENGTH_INFO, &mut len)?;
+        let total_bytes = u64::from_le_bytes(len);
+        self.sector_size = bps;
+        self.total_sectors = total_bytes / bps as u64;
+        Ok(())
+    }
+
+    /// Read this device's GPT unique partition GUID (`PartitionId`) over an IRP
+    /// `IOCTL_DISK_GET_PARTITION_INFO_EX`. Returns `NotFound` for non-GPT devices.
+    pub fn read_gpt_partition_id(&self) -> VckResult<vck_common::types::Guid> {
+        const PARTITION_STYLE_GPT: u32 = 1;
+        const GPT_PARTITION_ID_OFFSET: usize = 48;
+        let mut buf = [0u8; 144];
+        self.device_ioctl(IOCTL_DISK_GET_PARTITION_INFO_EX, &mut buf)?;
+        let style = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+        if style != PARTITION_STYLE_GPT {
+            return Err(VckError::NotFound("device is not GPT-partitioned"));
+        }
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&buf[GPT_PARTITION_ID_OFFSET..GPT_PARTITION_ID_OFFSET + 16]);
+        Ok(vck_common::types::guid_from_windows_bytes(id))
     }
 
     fn run_sync(&self, major: u32, lba: u64, buf: *mut u8, len: usize) -> VckResult<()> {
