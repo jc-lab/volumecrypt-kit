@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"encoding/base64"
 	"encoding/hex"
@@ -94,19 +95,43 @@ func newOSVolumeEncryptCmd() *cobra.Command {
 			}
 			defer client.Close()
 
-			status, err := client.GetStatus(prepareResult.VolumePath)
+			// Write the JVCK footer metadata via IOCTL_JVCK_PREPARE. The block is
+			// encrypted with the FIXED OS VMK (the same one written to vck.json), so
+			// the loader/driver can recover the FVEK from the footer on the next
+			// boot. The driver writes the replicas below its AddDevice filter, which
+			// works on the live OS volume without lock/dismount.
+			vmk, err := hex.DecodeString(osVolumeVmkHex)
 			if err != nil {
-				return fmt.Errorf("OS volume preparation completed, but driver status query failed: %w", err)
+				return fmt.Errorf("failed to decode fixed OS volume VMK: %w", err)
 			}
-			if !status.IsAttached {
-				fmt.Println("Preparation complete. Driver OS-volume attach path is not ready yet, so encryption was not started.")
-				return nil
+			metadataBlock, err := buildOSVolumeMetadataBlock(prepareResult.VolumePath, vmk)
+			if err != nil {
+				return err
 			}
+			ntDevicePath, err := vck.VolumeNTDevicePath(prepareResult.VolumePath)
+			if err != nil {
+				return fmt.Errorf("failed to resolve NT device path: %w", err)
+			}
+			fmt.Println("Writing JVCK footer metadata (IOCTL_JVCK_PREPARE)...")
+			prepResp, err := client.Prepare(&vck.JvckVolumePrepareRequest{
+				VolumePath:    prepareResult.VolumePath,
+				NTDevicePath:  ntDevicePath,
+				UseHeader:     0,
+				UseFooter:     osVolumeFooterReplicaCount,
+				MetadataSize:  osVolumeMetadataSize,
+				VMK:           vmk,
+				MetadataBlock: metadataBlock,
+			})
+			if err != nil {
+				return fmt.Errorf("OS volume metadata prepare failed: %w", err)
+			}
+			fmt.Printf("Metadata written. offset_sector=%d data_sectors=%d sector_size=%d fully_attached=%t\n",
+				prepResp.OffsetSector, prepResp.DataSectors, prepResp.SectorSize, prepResp.FullyAttached)
 
 			if err := client.StartEncrypt(&vck.EncryptRequest{
 				VolumePath: prepareResult.VolumePath,
 			}); err != nil {
-				return fmt.Errorf("OS volume preparation completed, but encryption start failed: %w", err)
+				return fmt.Errorf("OS volume encryption start failed: %w", err)
 			}
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -285,6 +310,51 @@ func verifyPreparedOSVolume(volumePath string) (*osVolumePrepareResult, error) {
 		VckJSONPath:   vckJSONPath,
 		BootCopyPath:  bootCopyPath,
 	}, nil
+}
+
+// buildOSVolumeMetadataBlock builds the 512-byte JVCK footer metadata block for
+// the OS volume, encrypted with the fixed OS `vmk`. A freshly generated FVEK and
+// volume ID are embedded; `encrypted_offset` starts at 0 so the sweep encrypts
+// from the first data sector. If metadata already exists on the volume (re-run),
+// an empty block is returned so the driver skips the write.
+func buildOSVolumeMetadataBlock(volumePath string, vmk []byte) ([]byte, error) {
+	length, sectorSize, err := vck.VolumeLengthAndSectorSize(volumePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query volume geometry: %w", err)
+	}
+	exists, err := vck.HasJvckMetadata(volumePath, uint64(length), sectorSize)
+	if err != nil {
+		return nil, fmt.Errorf("failed to probe existing metadata: %w", err)
+	}
+	if exists {
+		fmt.Println("Existing JVCK metadata found; reusing it (skip write).")
+		return nil, nil
+	}
+
+	var fvek1, fvek2 [32]byte
+	var volumeID [16]byte
+	if _, err := rand.Read(fvek1[:]); err != nil {
+		return nil, fmt.Errorf("failed to generate FVEK: %w", err)
+	}
+	if _, err := rand.Read(fvek2[:]); err != nil {
+		return nil, fmt.Errorf("failed to generate FVEK: %w", err)
+	}
+	if _, err := rand.Read(volumeID[:]); err != nil {
+		return nil, fmt.Errorf("failed to generate volume ID: %w", err)
+	}
+	header := &vck.JvckHeader{
+		MetadataVersion:    1,
+		MetadataSize:       osVolumeMetadataSize,
+		SectorSize:         sectorSize,
+		HeaderReplicaCount: 0,
+		FooterReplicaCount: osVolumeFooterReplicaCount,
+		VolumeID:           volumeID,
+	}
+	block, err := header.EncodeMetadataBlock(fvek1, fvek2, 0, vmk)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode JVCK metadata: %w", err)
+	}
+	return block[:], nil
 }
 
 func effectiveOSVolumePathFrom(value string) string {
