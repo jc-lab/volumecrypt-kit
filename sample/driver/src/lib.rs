@@ -27,6 +27,7 @@ use vck_driver::{
     provider::{IoctlAuthContext, RequestorMode},
     VolumeAttachRegistry,
 };
+use vck_sample_common::VckHandoverPayload;
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
@@ -110,6 +111,29 @@ pub unsafe extern "system" fn DriverEntry(
 
     // Needed by IOCTL_JVCK_ATTACH to create filter device objects.
     REGISTRY.set_driver_object(driver as *mut DRIVER_OBJECT);
+
+    // Publish the registry so the filter's PnP work item (a C callback that only
+    // receives a device object) can reach it to auto-attach the OS volume.
+    vck_driver::set_global_registry(&*REGISTRY);
+
+    // Best-effort: read the boot ACPI handover (`VCKD` table) published by the
+    // UEFI loader. Absent (NotFound) when booting without the loader — the OS
+    // volume auto-attach path then stays dormant and data volumes are unaffected.
+    match vck_driver::handover::read_handover::<VckHandoverPayload>() {
+        Ok(payload) => {
+            vck_driver::driver_println!(
+                "DriverEntry: ACPI handover present, OS partition {}",
+                payload.partition_guid
+            );
+            REGISTRY.set_handover(vck_driver::HandoverInfo {
+                partition_guid: payload.partition_guid,
+                vmk: payload.vmk,
+            });
+        }
+        Err(err) => {
+            vck_driver::driver_println!("DriverEntry: no ACPI handover ({})", err);
+        }
+    }
 
     // Register AddDevice so PnP calls us before any FSD mounts on a volume.
     // This allows attaching the filter BELOW the FSD (correct position for

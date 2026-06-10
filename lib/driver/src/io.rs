@@ -29,6 +29,9 @@ use crate::nt::{nt_success, UnicodeString};
 // METHOD_BUFFERED disk IOCTLs (CTL_CODE values are stable across SDKs).
 const IOCTL_DISK_GET_DRIVE_GEOMETRY: u32 = 0x0007_0000;
 const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405C;
+// IOCTL_DISK_GET_PARTITION_INFO_EX: CTL_CODE(FILE_DEVICE_DISK=7, 0x12,
+// METHOD_BUFFERED, FILE_ANY_ACCESS).
+const IOCTL_DISK_GET_PARTITION_INFO_EX: u32 = 0x0007_0048;
 // FSCTL_ALLOW_EXTENDED_DASD_IO: CTL_CODE(FILE_DEVICE_FILE_SYSTEM=9, 32,
 // METHOD_NEITHER=3, FILE_ANY_ACCESS=0) = (9<<16) | (32<<2) | 3.
 const FSCTL_ALLOW_EXTENDED_DASD_IO: u32 = 0x0009_0083;
@@ -165,6 +168,45 @@ impl KernelVolumeIo {
             sector_size,
             total_sectors,
         })
+    }
+
+    /// Open a kernel handle directly to `device_object` (bypassing any filter
+    /// above it) and query its geometry. Combines [`Self::from_device_object`]
+    /// with a geometry probe — used by the boot handover path to learn the raw
+    /// lower-device sector size / capacity before reading footer metadata.
+    pub fn from_device_object_query(device_object: PDEVICE_OBJECT) -> VckResult<Self> {
+        let mut me = Self::from_device_object(device_object, 0, 0)?;
+        me.query_geometry()?;
+        Ok(me)
+    }
+
+    /// Read the GPT unique partition GUID (`PARTITION_INFORMATION_GPT.PartitionId`)
+    /// of the underlying device via `IOCTL_DISK_GET_PARTITION_INFO_EX`.
+    ///
+    /// Returns `NotFound` if the device is not GPT-partitioned. The 16 raw GUID
+    /// bytes (at offset 48 of `PARTITION_INFORMATION_EX`, Microsoft mixed-endian
+    /// layout) are converted with [`vck_common::types::guid_from_windows_bytes`]
+    /// so the result matches the canonical GUID the loader carries in the
+    /// handover.
+    pub fn read_gpt_partition_id(&self) -> VckResult<vck_common::types::Guid> {
+        // PARTITION_INFORMATION_EX (x64) layout:
+        //   0  PartitionStyle (4) + pad (4)
+        //   8  StartingOffset (8)
+        //   16 PartitionLength (8)
+        //   24 PartitionNumber (4) + RewritePartition/IsServicePartition + pad
+        //   32 union { GPT { PartitionType[16], PartitionId[16], ... } }
+        // PartitionStyle: 0=MBR, 1=GPT, 2=RAW.
+        const PARTITION_STYLE_GPT: u32 = 1;
+        const GPT_PARTITION_ID_OFFSET: usize = 48;
+        let mut buf = [0u8; 144];
+        self.device_ioctl(IOCTL_DISK_GET_PARTITION_INFO_EX, &mut buf)?;
+        let style = u32::from_le_bytes(buf[0..4].try_into().unwrap());
+        if style != PARTITION_STYLE_GPT {
+            return Err(VckError::NotFound("device is not GPT-partitioned"));
+        }
+        let mut id = [0u8; 16];
+        id.copy_from_slice(&buf[GPT_PARTITION_ID_OFFSET..GPT_PARTITION_ID_OFFSET + 16]);
+        Ok(vck_common::types::guid_from_windows_bytes(id))
     }
 
     fn allow_extended_dasd_io(&self) {

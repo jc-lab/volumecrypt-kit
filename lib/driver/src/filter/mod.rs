@@ -2,6 +2,7 @@
 //! context, and IRP interception (size-query rewrite + read/write offset shift).
 
 pub mod context;
+pub mod handover_mount;
 pub mod io;
 pub mod irp;
 pub mod manager;

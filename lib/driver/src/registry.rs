@@ -6,10 +6,49 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use spin::Mutex;
-use vck_common::{EncryptedOffsetStore, SectorIo, VckResult};
+use vck_common::{types::Guid, EncryptedOffsetStore, SectorIo, VckResult};
 use wdk_sys::{DEVICE_OBJECT, DRIVER_OBJECT};
 
 use crate::{crypto::aes_xts::AesXtsCipher, offset::engine::EncryptionEngine, provider::IoConfig};
+
+/// Boot-time ACPI handover essentials, decoded once at `DriverEntry`.
+///
+/// The sample-specific payload type lives in `vck-sample-common`; the framework
+/// only needs these two generic fields to identify the OS volume (by GPT
+/// partition GUID) and decrypt its footer metadata (with the VMK).
+#[derive(Clone)]
+pub struct HandoverInfo {
+    /// GPT partition unique GUID of the OS volume to auto-attach.
+    pub partition_guid: Guid,
+    /// Key that decrypts the volume footer metadata to recover the FVEK.
+    pub vmk: Vec<u8>,
+}
+
+/// Process-wide pointer to the single `VolumeAttachRegistry`. Set once at
+/// `DriverEntry` via [`set_global_registry`] so the filter's PnP work item (a C
+/// callback that only receives a device object) can reach the registry to look
+/// up the handover and insert the auto-attached OS volume.
+static GLOBAL_REGISTRY: AtomicPtr<VolumeAttachRegistry> = AtomicPtr::new(null_mut());
+
+/// Record the process-wide registry pointer. `registry` must outlive the driver
+/// (a `'static`).
+pub fn set_global_registry(registry: &'static VolumeAttachRegistry) {
+    GLOBAL_REGISTRY.store(
+        registry as *const VolumeAttachRegistry as *mut VolumeAttachRegistry,
+        Ordering::Release,
+    );
+}
+
+/// Borrow the process-wide registry, if set.
+pub fn global_registry() -> Option<&'static VolumeAttachRegistry> {
+    let ptr = GLOBAL_REGISTRY.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        // Safety: set_global_registry only ever stores a 'static reference.
+        Some(unsafe { &*ptr })
+    }
+}
 
 /// Entry in the AddDevice-time filter map.
 pub struct PdoFilterEntry {
@@ -31,6 +70,9 @@ pub struct VolumeAttachRegistry {
     /// pre-attached filter without relying on device stack walking (which breaks
     /// when NTFS mounts via VPB rather than IoAttachDeviceToDeviceStackSafe).
     pdo_filters: Mutex<alloc::vec::Vec<PdoFilterEntry>>,
+    /// Boot ACPI handover (None if no loader published a `VCKD` table). Set once
+    /// at DriverEntry; read by the filter PnP path to auto-attach the OS volume.
+    handover: Mutex<Option<HandoverInfo>>,
 }
 
 pub struct AttachedVolume {
@@ -71,7 +113,21 @@ impl VolumeAttachRegistry {
             entries: Mutex::new(BTreeMap::new()),
             driver_object: AtomicPtr::new(null_mut()),
             pdo_filters: Mutex::new(alloc::vec::Vec::new()),
+            handover: Mutex::new(None),
         }
+    }
+
+    /// Store the boot ACPI handover essentials (called once at DriverEntry).
+    pub fn set_handover(&self, info: HandoverInfo) {
+        crate::driver_println!(
+            "registry: handover set partition_guid={}", info.partition_guid
+        );
+        *self.handover.lock() = Some(info);
+    }
+
+    /// Clone the stored handover, if a loader published one.
+    pub fn handover(&self) -> Option<HandoverInfo> {
+        self.handover.lock().clone()
     }
 
     /// Called from add_device to record the PDO → filter mapping.
@@ -84,6 +140,18 @@ impl VolumeAttachRegistry {
     ) {
         crate::driver_println!("add_pdo_filter: name={} filter={:p}", pdo_name, filter_do);
         self.pdo_filters.lock().push(PdoFilterEntry { pdo, filter_do, lower_do, pdo_name });
+    }
+
+    /// Return the recorded PDO object name for the given filter device object
+    /// (set by add_device). Used as the registry key for the handover OS volume.
+    pub fn pdo_name_for_filter(&self, filter_do: *mut DEVICE_OBJECT) -> Option<String> {
+        let map = self.pdo_filters.lock();
+        for e in map.iter() {
+            if e.filter_do == filter_do && !e.pdo_name.is_empty() {
+                return Some(e.pdo_name.clone());
+            }
+        }
+        None
     }
 
     /// Look up the filter by device pointer address (fallback).

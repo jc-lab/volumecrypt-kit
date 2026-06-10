@@ -6,8 +6,22 @@ use serde::{Deserialize, Serialize};
 ///
 /// NOTE: GPT partition GUIDs and UEFI `EFI_GUID` use a mixed-endian layout for
 /// the first three fields. Conversions to/from `uefi::Guid` must account for
-/// this; see TODO in the loader/driver glue.
+/// this; see [`guid_from_windows_bytes`].
 pub type Guid = uuid::Uuid;
+
+/// Build a [`Guid`] from the 16 raw bytes of a Windows `GUID` / GPT
+/// `PARTITION_INFORMATION_GPT.PartitionId` / `EFI_GUID` as they appear in
+/// memory.
+///
+/// Those structures store the first three fields (`Data1: u32`, `Data2: u16`,
+/// `Data3: u16`) little-endian and the trailing 8 bytes (`Data4`) as-is. The
+/// `uuid` crate's canonical (RFC 4122) byte order is big-endian for those
+/// fields, so the raw bytes must be read with `from_bytes_le` for the resulting
+/// `Guid` to match the canonical string the Go app writes into `vck.json`
+/// (which formats `Data1`/`Data2`/`Data3` as integers).
+pub fn guid_from_windows_bytes(bytes: [u8; 16]) -> Guid {
+    Guid::from_bytes_le(bytes)
+}
 
 /// Progressive-encryption progress state.
 ///
@@ -70,6 +84,21 @@ mod tests {
             total_sectors: 100,
         };
         assert!(done.is_fully_encrypted());
+    }
+
+    #[test]
+    fn guid_from_windows_bytes_matches_canonical() {
+        // Windows GUID in-memory bytes for {12345678-9abc-def0-1122-334455667788}:
+        // Data1=0x12345678 LE, Data2=0x9abc LE, Data3=0xdef0 LE, Data4 as-is.
+        let win = [
+            0x78, 0x56, 0x34, 0x12, // Data1 LE
+            0xbc, 0x9a, // Data2 LE
+            0xf0, 0xde, // Data3 LE
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, // Data4
+        ];
+        let guid = guid_from_windows_bytes(win);
+        let canonical = uuid::Uuid::parse_str("12345678-9abc-def0-1122-334455667788").unwrap();
+        assert_eq!(guid, canonical);
     }
 
     #[test]

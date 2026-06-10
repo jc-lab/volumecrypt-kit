@@ -17,7 +17,8 @@ use core::ffi::c_void;
 
 use wdk_sys::{
     ntddk::{ExFreePool, IofCallDriver, IofCompleteRequest},
-    CCHAR, IO_NO_INCREMENT, IRP_MJ_DEVICE_CONTROL, IRP_MJ_READ, IRP_MJ_WRITE, NTSTATUS,
+    CCHAR, IO_NO_INCREMENT, IRP_MJ_DEVICE_CONTROL, IRP_MJ_PNP, IRP_MJ_READ, IRP_MJ_WRITE,
+    IRP_MN_START_DEVICE, NTSTATUS,
     PDEVICE_OBJECT, PIO_STACK_LOCATION, PIRP,
     SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS, SL_PENDING_RETURNED,
 };
@@ -127,6 +128,34 @@ unsafe extern "C" fn size_ioctl_completion(
 }
 
 // ---------------------------------------------------------------------------
+// PnP interception (START_DEVICE → deferred OS-volume handover mount)
+// ---------------------------------------------------------------------------
+
+/// Handle a PnP IRP on a filter device. `IRP_MN_START_DEVICE` is passed down
+/// with a completion routine that auto-attaches the OS volume once the lower
+/// device has started; every other PnP minor function passes through untouched.
+unsafe fn handle_filter_pnp(
+    filter_do: PDEVICE_OBJECT,
+    lower: PDEVICE_OBJECT,
+    irp: PIRP,
+    stack: PIO_STACK_LOCATION,
+) -> NTSTATUS {
+    if (*stack).MinorFunction as u32 != IRP_MN_START_DEVICE {
+        return pass_through(lower, irp);
+    }
+    // Equivalent to IoCopyCurrentIrpStackLocationToNext: the completion routine
+    // needs our stack location preserved (we do NOT skip it here).
+    let cur  = current_sl(irp);
+    let next = next_sl(irp);
+    core::ptr::copy_nonoverlapping(cur, next, 1);
+    (*next).CompletionRoutine =
+        Some(crate::filter::handover_mount::on_start_device_completed);
+    (*next).Context = filter_do.cast();
+    (*next).Control = (SL_INVOKE_ON_SUCCESS | SL_INVOKE_ON_ERROR | SL_INVOKE_ON_CANCEL) as u8;
+    IofCallDriver(lower, irp)
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -168,15 +197,22 @@ pub unsafe fn handle_filter_irp(filter_do: PDEVICE_OBJECT, irp: PIRP) -> NTSTATU
     let ext   = DeviceExtension::of(filter_do);
     let lower = ext.lower_device;
 
+    let stack = current_sl(irp);
+    let major = (*stack).MajorFunction as u32;
+
+    // PnP is handled regardless of bind state: IRP_MN_START_DEVICE is where the
+    // OS volume is auto-attached from the ACPI handover (after the lower device
+    // starts). All other PnP IRPs pass through.
+    if major == IRP_MJ_PNP {
+        return handle_filter_pnp(filter_do, lower, irp, stack);
+    }
+
     if ext.volume.is_null() {
         return pass_through(lower, irp);
     }
     let volume = &*ext.volume;
     // The per-volume IO+sweep thread (present only for cipher-bound volumes).
     let vthread = ext.vthread;
-
-    let stack = current_sl(irp);
-    let major = (*stack).MajorFunction as u32;
 
     match major {
         IRP_MJ_READ => {
