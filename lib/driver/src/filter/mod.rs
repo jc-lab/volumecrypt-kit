@@ -4,6 +4,7 @@
 pub mod context;
 pub mod io;
 pub mod irp;
+pub mod irp_queue;
 pub mod manager;
 
 pub use context::FilterContext;

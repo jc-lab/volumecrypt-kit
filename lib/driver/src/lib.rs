@@ -11,6 +11,7 @@ extern crate alloc;
 pub mod crypto;
 pub mod debug;
 pub mod device;
+pub mod ntddk_ex;
 pub mod executor;
 pub mod filter;
 pub mod handover;

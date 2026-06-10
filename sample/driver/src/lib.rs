@@ -105,14 +105,20 @@ pub unsafe extern "system" fn DriverEntry(
         }
     }
 
+    // Start IRP io/worker queue threads — must be ready before any filter dispatch.
+    if !unsafe { vck_driver::filter::irp_queue::init() } {
+        vck_driver::driver_println!("sample-driver: irp_queue init failed");
+        if let Some(cd) = CONTROL_DEVICE.lock().take() { let _ = cd.destroy(); }
+        return STATUS_UNSUCCESSFUL;
+    }
+
     // Start the background encrypt/decrypt sweep worker.
     match SweepWorker::start(&REGISTRY) {
         Ok(worker) => *SWEEP.lock() = Some(worker),
         Err(err) => {
             vck_driver::driver_println!("sample-driver: sweep worker start failed: {}", err);
-            if let Some(control_device) = CONTROL_DEVICE.lock().take() {
-                let _ = control_device.destroy();
-            }
+            unsafe { vck_driver::filter::irp_queue::shutdown(); }
+            if let Some(cd) = CONTROL_DEVICE.lock().take() { let _ = cd.destroy(); }
             return STATUS_UNSUCCESSFUL;
         }
     }
@@ -190,15 +196,11 @@ fn panic(info: &PanicInfo<'_>) -> ! {
 }
 
 unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
-    // Stop the sweep worker first so it no longer touches the registry.
     if let Some(worker) = SWEEP.lock().take() {
         worker.stop();
     }
-
-    // Cleanly detach all encrypted volumes: lock + dismount + filter removal.
-    // ignore_open_files=true because we can't refuse to unload.
     vck_driver::ioctl::dispatch::detach_all_volumes(&REGISTRY);
-
+    vck_driver::filter::irp_queue::shutdown();
     if let Some(control_device) = CONTROL_DEVICE.lock().take() {
         if let Err(err) = control_device.destroy() {
             vck_driver::driver_println!("sample-driver: control device destroy failed: {}", err);
@@ -238,13 +240,12 @@ unsafe extern "C" fn dispatch_any(device_object: PDEVICE_OBJECT, irp: PIRP) -> N
             STATUS_SUCCESS
         }
         IRP_MJ_SHUTDOWN => {
-            // System is shutting down. Cleanly dismount all encrypted volumes so
-            // NTFS can flush and close without accessing stale encrypted data.
             vck_driver::driver_println!("sample-driver: IRP_MJ_SHUTDOWN — detaching volumes");
             if let Some(worker) = SWEEP.lock().take() {
                 worker.stop();
             }
             vck_driver::ioctl::dispatch::detach_all_volumes(&REGISTRY);
+            vck_driver::filter::irp_queue::shutdown();
             complete_irp(irp, STATUS_SUCCESS, 0);
             STATUS_SUCCESS
         }

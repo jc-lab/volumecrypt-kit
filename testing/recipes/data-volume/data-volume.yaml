@@ -17,37 +17,49 @@ qemu:
     - "isa-debugcon,iobase=0xe9,chardev=debugout"
 
 steps:
-  - action: wait-boot
+  - id: "wait-initial-boot"
+    name: "Wait for initial Windows boot"
+    action: wait-boot
     timeout: 120s
     params:
       retry_interval: 5s
 
   # Upload signed driver package (.sys + .inf + .cat).
-  - action: file-upload
+  - id: "upload-driver-sys"
+    name: "Upload signed driver SYS"
+    action: file-upload
     timeout: 30s
     params:
       src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.sys"
       dst: "C:\\Temp\\vck-sample-driver.sys"
 
-  - action: file-upload
+  - id: "upload-driver-inf"
+    name: "Upload signed driver INF"
+    action: file-upload
     timeout: 30s
     params:
       src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.inf"
       dst: "C:\\Temp\\vck-sample-driver.inf"
 
-  - action: file-upload
+  - id: "upload-driver-cat"
+    name: "Upload signed driver CAT"
+    action: file-upload
     timeout: 30s
     params:
       src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.cat"
       dst: "C:\\Temp\\vck-sample-driver.cat"
 
-  - action: file-upload
+  - id: "upload-vck-app"
+    name: "Upload VCK test application"
+    action: file-upload
     timeout: 30s
     params:
       src: "./testing/artifacts/vck-app.exe"
       dst: "C:\\Temp\\vck-app.exe"
 
-  - action: exec
+  - id: "enable-driver-verifier"
+    name: "Enable Driver Verifier for sample driver"
+    action: exec
     timeout: 30s
     params:
       cmd: "verifier.exe"
@@ -56,7 +68,9 @@ steps:
         - "/adddriver"
         - "vck-sample-driver.sys"
 
-  - action: exec
+  - id: "configure-defender-exclusions"
+    name: "Disable Defender realtime monitoring and add exclusions"
+    action: exec
     timeout: 60s
     params:
       cmd: "powershell"
@@ -68,7 +82,9 @@ steps:
   # certificate signature so pnputil accepts it. The INF registers the driver as
   # ServiceType=FILE_SYSTEM_DRIVER, LoadOrderGroup=FSFilter, UpperFilters for
   # disk drives — causing AddDevice to fire for every disk volume on next boot.
-  - action: exec
+  - id: "install-driver-package"
+    name: "Install signed driver package with pnputil"
+    action: exec
     timeout: 60s
     params:
       cmd: "cmd.exe"
@@ -79,7 +95,9 @@ steps:
 
   # Start driver for this session (control device / sweep worker).
   # AddDevice will fire automatically on NEXT boot via UpperFilters registration.
-  - action: exec
+  - id: "install-driver-package"
+    name: "Install signed driver package with pnputil"
+    action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
@@ -88,7 +106,9 @@ steps:
         - "sc start VolumeCryptKitSample"
 
   # Write a test file before encryption.
-  - action: exec
+  - id: "write-pre-reboot-test-file"
+    name: "Write pre-reboot test file to D volume"
+    action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
@@ -99,16 +119,22 @@ steps:
 
   # Reboot: on next boot, driver loads as FILE_SYSTEM_DRIVER (SERVICE_BOOT_START),
   # PnP calls AddDevice for each disk volume BEFORE NTFS mounts.
-  - action: reboot
+  - id: "reboot-for-add-device"
+    name: "Reboot to trigger AddDevice before NTFS mount"
+    action: reboot
     timeout: 120s
 
-  - action: wait-boot
+  - id: "wait-post-reboot-boot"
+    name: "Wait for Windows boot after driver registration reboot"
+    action: wait-boot
     timeout: 2m0s
     params:
       retry_interval: 5s
 
   # Check that AddDevice fired (should see add_device: pdo=... in debug.log).
-  - action: exec
+  - id: "check-driver-status-after-add-device"
+    name: "Check driver status after AddDevice"
+    action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
@@ -118,7 +144,9 @@ steps:
       expect_exit_code: 0
 
   # Volume info (should show full partition size until PREPARE activates size hiding).
-  - action: exec
+  - id: "check-volume-info-before-attach"
+    name: "Check D volume info before attach"
+    action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
@@ -128,7 +156,9 @@ steps:
       expect_exit_code: 0
 
   # Phase: shrink + PREPARE (uses AddDevice path if filter found, else fallback).
-  - action: exec
+  - id: "attach-data-volume"
+    name: "Attach data volume and prepare metadata"
+    action: exec
     timeout: 2m0s
     params:
       cmd: "cmd.exe"
@@ -138,7 +168,9 @@ steps:
       expect_exit_code: 0
 
   # Volume info after attach: reduced size if filter activated.
-  - action: exec
+  - id: "check-volume-info-after-attach"
+    name: "Check D volume info after attach"
+    action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
@@ -148,7 +180,9 @@ steps:
       expect_exit_code: 0
 
   # Status: should show filter_below_fsd=true if AddDevice fired.
-  - action: exec
+  - id: "check-filter-position-status"
+    name: "Check filter position status"
+    action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
@@ -157,8 +191,10 @@ steps:
         - "C:\\Temp\\vck-app.exe status --volume \\\\.\\D:"
       expect_exit_code: 0
 
-  # Pre-existing file must be readable.
-  - action: exec
+  # Pre-existing file must be readable (filter pass-through, boundary=0).
+  - id: "read-pretest-file-after-attach"
+    name: "Read pre-existing file after attach"
+    action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
@@ -168,7 +204,9 @@ steps:
       expect_exit_code: 0
 
   # Write new file through filter.
-  - action: exec
+  - id: "write-and-read-post-attach-file"
+    name: "Write and read post-attach file through filter"
+    action: exec
     timeout: 30s
     params:
       cmd: "cmd.exe"
@@ -177,8 +215,74 @@ steps:
         - "echo hello-after-attach> D:\\vck-posttest.txt && type D:\\vck-posttest.txt"
       expect_exit_code: 0
 
+  # Start progressive encryption (sweep begins from sector 0 via LowerDeviceIo).
+  - id: "start-progressive-encryption"
+    name: "Start progressive data volume encryption"
+    action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe data-volume encrypt --volume \\\\.\\D:"
+      expect_exit_code: 0
+
+  # Wait for the sweep to make measurable progress (> 0 sectors including sector 0).
+  # A 10 GiB full encrypt takes too long in CI; we just verify the sweep advances.
+  - id: "wait-for-encryption-progress"
+    name: "Wait for encryption sweep progress"
+    action: exec
+    timeout: 60s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - |
+          $deadline = (Get-Date).AddSeconds(45)
+          $ok = $false
+          do {
+            $out = & C:\Temp\vck-app.exe status --volume \\.\D: 2>&1 | Out-String
+            Write-Host $out.Trim()
+            if ($out -match 'Encrypting|Idle') {
+              $m = [regex]::Match($out, 'Progress\s*:\s*([\d.]+)%\s+\((\d+)')
+              if ($m.Success -and [int64]$m.Groups[2].Value -gt 0) {
+                $ok = $true; break
+              }
+            }
+            Start-Sleep -Seconds 3
+          } while ((Get-Date) -lt $deadline)
+          if ($ok) { Write-Host "SWEEP_OK" } else { Write-Host "NO_PROGRESS"; exit 1 }
+      expect_exit_code: 0
+
+  # Files written BEFORE encryption must still be readable (filter decrypts on read).
+  - id: "read-files-written-before-encryption"
+    name: "Read files written before encryption"
+    action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "type D:\\vck-pretest.txt && type D:\\vck-posttest.txt"
+      expect_exit_code: 0
+
+  # Write a new file AFTER encryption starts — filter must encrypt writes, then
+  # decrypt on subsequent reads.
+  - id: "write-and-read-during-encryption-file"
+    name: "Write and read file while encryption is active"
+    action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "echo hello-during-encrypt> D:\\vck-during.txt && type D:\\vck-during.txt"
+      expect_exit_code: 0
+
   # Detach and stop.
-  - action: exec
+  - id: "detach-data-volume"
+    name: "Detach data volume"
+    action: exec
     timeout: 60s
     params:
       cmd: "cmd.exe"
@@ -187,7 +291,9 @@ steps:
         - "C:\\Temp\\vck-app.exe data-volume detach --volume \\\\.\\D:"
       expect_exit_code: 0
 
-  - action: exec
+  - id: "stop-driver-service"
+    name: "Stop VolumeCryptKit sample driver service"
+    action: exec
     timeout: 60s
     params:
       cmd: "cmd.exe"
@@ -195,7 +301,9 @@ steps:
         - "/c"
         - "sc stop VolumeCryptKitSample"
 
-  - action: shutdown
+  - id: "shutdown-vm"
+    name: "Shutdown VM"
+    action: shutdown
     timeout: 2m0s
 
 panic:
