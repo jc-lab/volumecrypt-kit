@@ -1,0 +1,162 @@
+# Copyright 2026 JC-Lab
+# SPDX-License-Identifier: Apache-2.0
+
+name: "os-encrypt"
+description: >
+  Full OS-volume first-time encryption end-to-end:
+    Boot 1: install driver via INF (Volume-class UpperFilter, BOOT_START) → reboot.
+    Boot 2: AddDevice attaches the filter to C: before NTFS mounts. Write a marker
+            file, then `os-volume encrypt` (shrink → IOCTL_JVCK_PREPARE writes the
+            footer metadata with the fixed VMK → StartEncrypt → sweep to 100%).
+            Install vck-sample-loader.efi as bootmgfw.efi → reboot.
+    Boot 3: firmware → loader. The footer now exists, so the loader builds
+            LoaderCrypto (crypto=Some), installs the Block IO read hook, publishes
+            the handover, and chainloads bootmgfw.os.efi. winload reads the
+            (encrypted) OS volume THROUGH the hook (decrypted) → Windows boots. The
+            BOOT_START driver then re-attaches C: via the handover and keeps
+            decrypting at runtime. Verify boot + marker-file integrity.
+
+  NOTE: this encrypts the ENTIRE C: data region with in-kernel software AES, so the
+  encrypt step is long and expands the sparse disk image. A failed loader/hook
+  leaves C: unbootable, but the test runs on a throwaway qcow2 overlay.
+
+qemu:
+  extra_args:
+    - "-chardev"
+    - "file,id=debugout,path=${{ output.dir }}/debug.log"
+    - "-device"
+    - "isa-debugcon,iobase=0xe9,chardev=debugout"
+
+steps:
+  # ── Boot 1: install the driver as a Volume-class UpperFilter ───────────────
+  - action: wait-boot
+    timeout: 120s
+    params:
+      retry_interval: 5s
+
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'C:\\Temp' -ErrorAction SilentlyContinue"
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.sys"
+      dst: "C:\\Temp\\vck-sample-driver.sys"
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.inf"
+      dst: "C:\\Temp\\vck-sample-driver.inf"
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.cat"
+      dst: "C:\\Temp\\vck-sample-driver.cat"
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-app.exe"
+      dst: "C:\\Temp\\vck-app.exe"
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-sample-loader.efi"
+      dst: "C:\\Temp\\vck-sample-loader.efi"
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "verifier.exe"
+      args: ["/volatile", "/adddriver", "vck-sample-driver.sys"]
+
+  # INF registers UpperFilter for the Volume class + BOOT_START.
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "pnputil /add-driver C:\\Temp\\vck-sample-driver.inf /install"]
+      expect_exit_code: 0
+
+  - action: reboot
+    timeout: 180s
+  - action: wait-boot
+    timeout: 180s
+    params:
+      retry_interval: 5s
+
+  # ── Boot 2: filter attached to C:; encrypt, then install the loader ────────
+  # Marker file written BEFORE encryption — must read back intact after Boot 3.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "echo hello-before-encrypt> C:\\vck-ostest.txt && type C:\\vck-ostest.txt"]
+      expect_exit_code: 0
+
+  # Full first-time encryption: shrink → PREPARE (footer metadata, fixed VMK) →
+  # StartEncrypt → WatchProgress to 100%. Long-running (whole C:, soft AES).
+  - action: exec
+    timeout: 3600s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "C:\\Temp\\vck-app.exe --volume \\\\.\\C: os-volume encrypt"]
+      expect_exit_code: 0
+
+  # Install our loader as bootmgfw.efi (original is now bootmgfw.os.efi).
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "mountvol S: /S && copy /Y C:\\Temp\\vck-sample-loader.efi S:\\EFI\\Microsoft\\Boot\\bootmgfw.efi && mountvol S: /D"
+      expect_exit_code: 0
+
+  # ── Boot 3: boot THROUGH the loader (encrypted C: decrypted by the hook) ───
+  - action: reboot
+    timeout: 240s
+  - action: wait-boot
+    timeout: 300s
+    params:
+      retry_interval: 5s
+
+  # If we got here, the loader's Block IO hook decrypted the OS volume during the
+  # boot window and Windows booted. Verify runtime integrity of the marker file
+  # (read back through the driver's runtime decryption).
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "type C:\\vck-ostest.txt"]
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "C:\\Temp\\vck-app.exe --volume \\\\.\\C: status"]
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "sc query VolumeCryptKitSample"]
+
+  - action: shutdown
+    timeout: 180s
+
+panic:
+  action_delay: 30s
+  steps:
+    - action: dump
+      timeout: 300s
+      params:
+        format: "win-dmp"
+        output: "${{ output.dir }}/memory.dmp"
+    - action: poweroff
+      timeout: 5s

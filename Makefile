@@ -3,7 +3,7 @@ SHELL := /bin/bash
 
 export PATH := /d/programs:/c/Program Files/qemu:/c/Users/User/.cargo/bin:/c/Program Files/Go/bin:$(PATH)
 
-.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-crypto-test test-vm-os-handover clean
+.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-crypto-test test-vm-os-handover test-vm-os-encrypt clean
 
 TEST_VM_DIR = .testfoundry/win11
 
@@ -77,6 +77,14 @@ test-vm-crypto-test: $(TEST_VM_DIR) build-crypto-test-driver
 test-vm-os-handover: $(TEST_VM_DIR) build-driver build-app build-loader
 	rm -rf ./testing/results/os-handover
 	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/os-handover --test ./testing/recipes/os-handover/os-handover.yaml
+
+# Full OS-volume first-time encryption end-to-end: install driver (Volume
+# UpperFilter, boot-start) → reboot → encrypt whole C: → install loader →
+# reboot THROUGH loader (Block IO hook decrypts the boot window) → verify boot +
+# marker-file integrity. Long-running (encrypts all of C: with soft AES).
+test-vm-os-encrypt: $(TEST_VM_DIR) build-driver build-app build-loader
+	rm -rf ./testing/results/os-encrypt
+	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/os-encrypt --test ./testing/recipes/os-encrypt/os-encrypt.yaml
 
 clean:
 	cargo clean
