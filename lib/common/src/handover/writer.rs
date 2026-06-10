@@ -85,3 +85,80 @@ pub fn acpi_checksum(bytes: &[u8]) -> u8 {
     let sum = bytes.iter().fold(0u8, |acc, byte| acc.wrapping_add(*byte));
     0u8.wrapping_sub(sum)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handover::reader::AcpiHandoverReader;
+    use alloc::{vec, vec::Vec};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct TestPayload {
+        partition_guid: [u8; 16],
+        vmk: Vec<u8>,
+    }
+
+    impl HandoverPayload for TestPayload {
+        const ACPI_SIGNATURE: [u8; 4] = *b"VCKD";
+        const ACPI_OEM_ID: [u8; 6] = *b"SAMPLE";
+    }
+
+    fn sample() -> TestPayload {
+        TestPayload {
+            partition_guid: [
+                0x5a, 0x95, 0x77, 0x0f, 0x3e, 0xf6, 0x11, 0xf1,
+                0x8b, 0x5c, 0xb4, 0x2e, 0x99, 0x11, 0x84, 0x0a,
+            ],
+            vmk: (0u8..32).collect(),
+        }
+    }
+
+    #[test]
+    fn encode_produces_valid_acpi_header_and_zero_checksum() {
+        let table = AcpiHandoverWriter::new::<TestPayload>()
+            .encode(&sample())
+            .expect("encode");
+        assert_eq!(&table[0..4], b"VCKD");
+        assert_eq!(&table[10..16], b"SAMPLE");
+        // The ACPI checksum byte makes the whole-table sum zero.
+        let sum = table.iter().fold(0u8, |acc, b| acc.wrapping_add(*b));
+        assert_eq!(sum, 0);
+        // Reported length matches the buffer length.
+        let len = u32::from_le_bytes(table[4..8].try_into().unwrap()) as usize;
+        assert_eq!(len, table.len());
+    }
+
+    #[test]
+    fn round_trip_decode_recovers_payload() {
+        let original = sample();
+        let table = AcpiHandoverWriter::new::<TestPayload>()
+            .encode(&original)
+            .expect("encode");
+        let decoded: TestPayload = AcpiHandoverReader::decode(&table).expect("decode");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn find_and_decode_locates_table_in_a_larger_region() {
+        let table = AcpiHandoverWriter::new::<TestPayload>()
+            .encode(&sample())
+            .expect("encode");
+        // Embed the table after some unrelated leading bytes.
+        let mut region = vec![0xABu8; 64];
+        region.extend_from_slice(&table);
+        region.extend_from_slice(&[0xCDu8; 16]);
+        let decoded: TestPayload = AcpiHandoverReader::find_and_decode(&region).expect("find");
+        assert_eq!(decoded, sample());
+    }
+
+    #[test]
+    fn decode_rejects_corrupted_checksum() {
+        let mut table = AcpiHandoverWriter::new::<TestPayload>()
+            .encode(&sample())
+            .expect("encode");
+        let last = table.len() - 1;
+        table[last] ^= 0xFF; // corrupt payload tail → checksum no longer zero
+        assert!(AcpiHandoverReader::decode::<TestPayload>(&table).is_err());
+    }
+}
