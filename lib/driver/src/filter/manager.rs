@@ -98,7 +98,9 @@ pub fn attach_filter(
         let ext = (*filter_do).DeviceExtension as *mut DeviceExtension;
         (*ext).kind = DEVICE_KIND_FILTER;
         (*ext).lower_device = lower;
-        (*ext).volume = Arc::into_raw(volume);
+        (*ext).volume = Arc::into_raw(volume.clone());
+        (*ext).vthread = null_mut();
+        crate::filter::volume_thread::bind(filter_do, volume);
 
         // Inherit the relevant flags / type from the device below us.
         (*filter_do).Flags |= (*lower).Flags & (DO_BUFFERED_IO | DO_DIRECT_IO | DO_POWER_PAGABLE);
@@ -171,6 +173,7 @@ pub fn attach_filter_unbound(
         (*ext).kind = DEVICE_KIND_FILTER;
         (*ext).lower_device = lower;
         (*ext).volume = null_mut();
+        (*ext).vthread = null_mut();
 
         (*filter_do).Flags |= (*lower).Flags & (DO_BUFFERED_IO | DO_DIRECT_IO | DO_POWER_PAGABLE);
         (*filter_do).DeviceType = (*lower).DeviceType;
@@ -216,6 +219,7 @@ pub fn attach_filter_to_raw_device(
         (*ext).kind = DEVICE_KIND_FILTER;
         (*ext).lower_device = lower;
         (*ext).volume = null_mut(); // bound later via filter_bind_volume
+        (*ext).vthread = null_mut();
 
         (*filter_do).Flags |= (*lower).Flags & (DO_BUFFERED_IO | DO_DIRECT_IO | DO_POWER_PAGABLE);
         (*filter_do).DeviceType = (*lower).DeviceType;
@@ -238,7 +242,9 @@ pub unsafe fn filter_rebind_volume(filter_do: PDEVICE_OBJECT, volume: Arc<Attach
     if !old_ptr.is_null() {
         drop(Arc::from_raw(old_ptr));
     }
-    (*ext).volume = Arc::into_raw(volume);
+    (*ext).volume = Arc::into_raw(volume.clone());
+    // Start the volume thread (if cipher now present) or swap its current volume.
+    crate::filter::volume_thread::bind(filter_do, volume);
 }
 
 /// Bind an `AttachedVolume` to a previously unbound filter device (see
@@ -249,7 +255,9 @@ pub unsafe fn filter_rebind_volume(filter_do: PDEVICE_OBJECT, volume: Arc<Attach
 /// been bound or detached.
 pub unsafe fn filter_bind_volume(filter_do: PDEVICE_OBJECT, volume: Arc<AttachedVolume>) {
     let ext = (*filter_do).DeviceExtension as *mut DeviceExtension;
-    (*ext).volume = Arc::into_raw(volume);
+    (*ext).volume = Arc::into_raw(volume.clone());
+    // Start the volume thread if this volume carries a cipher.
+    crate::filter::volume_thread::bind(filter_do, volume);
 }
 
 /// Attach our filter to a specific device object (called from the
@@ -287,7 +295,9 @@ pub fn attach_filter_to_device(
         let ext = (*filter_do).DeviceExtension as *mut DeviceExtension;
         (*ext).kind = DEVICE_KIND_FILTER;
         (*ext).lower_device = lower;
-        (*ext).volume = Arc::into_raw(volume);
+        (*ext).volume = Arc::into_raw(volume.clone());
+        (*ext).vthread = null_mut();
+        crate::filter::volume_thread::bind(filter_do, volume);
 
         (*filter_do).Flags |= (*lower).Flags & (DO_BUFFERED_IO | DO_DIRECT_IO | DO_POWER_PAGABLE);
         (*filter_do).DeviceType = (*lower).DeviceType;
@@ -306,6 +316,14 @@ pub fn detach_filter(filter_do: PDEVICE_OBJECT) {
     }
     unsafe {
         let ext = (*filter_do).DeviceExtension as *mut DeviceExtension;
+        // Stop the per-volume IO+sweep thread FIRST so no thread touches the
+        // lower device or the volume Arc after this point.
+        if !(*ext).vthread.is_null() {
+            let vt = alloc::boxed::Box::from_raw((*ext).vthread);
+            vt.stop();
+            (*ext).vthread = null_mut();
+            // `vt` dropped here: drains any leftover IRPs + drops its volume Arc.
+        }
         if !(*ext).lower_device.is_null() {
             IoDetachDevice((*ext).lower_device);
             (*ext).lower_device = null_mut();

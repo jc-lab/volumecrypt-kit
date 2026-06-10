@@ -4,8 +4,8 @@
 pub mod context;
 pub mod io;
 pub mod irp;
-pub mod irp_queue;
 pub mod manager;
+pub mod volume_thread;
 
 pub use context::FilterContext;
 pub use io::handle_filter_irp;

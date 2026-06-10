@@ -110,6 +110,7 @@ fn handle_start_encrypt(
         .get(&req.volume_path)
         .ok_or(VckError::NotFound("volume is not attached"))?;
     volume.encryption.lock().start_encrypt();
+    unsafe { crate::filter::volume_thread::wake_for(&volume) };
     encode_resp(&EmptyResponse {})
 }
 
@@ -122,6 +123,7 @@ fn handle_start_decrypt(
         .get(&req.volume_path)
         .ok_or(VckError::NotFound("volume is not attached"))?;
     volume.encryption.lock().start_decrypt();
+    unsafe { crate::filter::volume_thread::wake_for(&volume) };
     encode_resp(&EmptyResponse {})
 }
 

@@ -9,10 +9,9 @@
 //! 2. **READ/WRITE byte-offset shift**: `offset_sector` is added to the byte
 //!    offset so OS-relative LBA 0 lands on the first data sector.
 //!
-//! 3. **AES-XTS in-flight crypto** via two dedicated PASSIVE_LEVEL threads:
-//!    - READ:  io_queue thread does synchronous lower read; worker_queue thread decrypts.
-//!    - WRITE: worker_queue thread encrypts into a shadow buffer; io_queue thread writes.
-//!    See `irp_queue.rs` for the full queue/thread implementation.
+//! 3. **AES-XTS in-flight crypto**: cipher-bound volumes route READ/WRITE to the
+//!    per-volume IO+sweep thread (`volume_thread.rs`), which serializes user I/O
+//!    with the background sweep. Volumes without a cipher pass through directly.
 
 use core::ffi::c_void;
 
@@ -27,7 +26,7 @@ use core::sync::atomic::Ordering;
 
 use crate::{
     device::DeviceExtension,
-    filter::{irp_queue, pass_through},
+    filter::pass_through,
     nt::nt_success,
     registry::AttachedVolume,
 };
@@ -173,6 +172,8 @@ pub unsafe fn handle_filter_irp(filter_do: PDEVICE_OBJECT, irp: PIRP) -> NTSTATU
         return pass_through(lower, irp);
     }
     let volume = &*ext.volume;
+    // The per-volume IO+sweep thread (present only for cipher-bound volumes).
+    let vthread = ext.vthread;
 
     let stack = current_sl(irp);
     let major = (*stack).MajorFunction as u32;
@@ -187,7 +188,13 @@ pub unsafe fn handle_filter_irp(filter_do: PDEVICE_OBJECT, irp: PIRP) -> NTSTATU
                 block_irp(irp, STATUS_ACCESS_DENIED);
                 return STATUS_ACCESS_DENIED;
             }
-            irp_queue::enqueue_read(irp, volume as *const _, lower)
+            // Cipher-bound volume: serialize through the volume thread (which
+            // also runs the sweep). No cipher: nothing to decrypt → pass through.
+            if !vthread.is_null() {
+                crate::filter::volume_thread::enqueue(vthread, irp, false)
+            } else {
+                pass_through(lower, irp)
+            }
         }
 
         IRP_MJ_WRITE => {
@@ -199,7 +206,11 @@ pub unsafe fn handle_filter_irp(filter_do: PDEVICE_OBJECT, irp: PIRP) -> NTSTATU
                 block_irp(irp, STATUS_ACCESS_DENIED);
                 return STATUS_ACCESS_DENIED;
             }
-            irp_queue::enqueue_write(irp, volume as *const _, lower)
+            if !vthread.is_null() {
+                crate::filter::volume_thread::enqueue(vthread, irp, true)
+            } else {
+                pass_through(lower, irp)
+            }
         }
 
         IRP_MJ_DEVICE_CONTROL => {

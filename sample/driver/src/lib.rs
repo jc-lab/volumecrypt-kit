@@ -22,10 +22,10 @@ use wdk_sys::{
 };
 use vck_driver::{
     device::{ControlDevice, DeviceExtension, DEVICE_KIND_FILTER},
-    filter::{detach_filter, handle_filter_irp},
+    filter::handle_filter_irp,
     ioctl::dispatch_ioctl,
     provider::{IoctlAuthContext, RequestorMode},
-    SweepWorker, VolumeAttachRegistry,
+    VolumeAttachRegistry,
 };
 
 #[global_allocator]
@@ -33,7 +33,6 @@ static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
 
 static CONTROL_DEVICE: Mutex<Option<ControlDevice>> = Mutex::new(None);
 static REGISTRY: Lazy<VolumeAttachRegistry> = Lazy::new(VolumeAttachRegistry::new);
-static SWEEP: Mutex<Option<SweepWorker>> = Mutex::new(None);
 static PROVIDER: VckVolumeProvider = VckVolumeProvider;
 
 const STATUS_SUCCESS: NTSTATUS = 0;
@@ -105,23 +104,9 @@ pub unsafe extern "system" fn DriverEntry(
         }
     }
 
-    // Start IRP io/worker queue threads — must be ready before any filter dispatch.
-    if !unsafe { vck_driver::filter::irp_queue::init() } {
-        vck_driver::driver_println!("sample-driver: irp_queue init failed");
-        if let Some(cd) = CONTROL_DEVICE.lock().take() { let _ = cd.destroy(); }
-        return STATUS_UNSUCCESSFUL;
-    }
-
-    // Start the background encrypt/decrypt sweep worker.
-    match SweepWorker::start(&REGISTRY) {
-        Ok(worker) => *SWEEP.lock() = Some(worker),
-        Err(err) => {
-            vck_driver::driver_println!("sample-driver: sweep worker start failed: {}", err);
-            unsafe { vck_driver::filter::irp_queue::shutdown(); }
-            if let Some(cd) = CONTROL_DEVICE.lock().take() { let _ = cd.destroy(); }
-            return STATUS_UNSUCCESSFUL;
-        }
-    }
+    // IO + background sweep are handled by per-volume threads, created at bind
+    // (filter_bind_volume / filter_rebind_volume) and stopped at detach. No
+    // global IO/sweep threads are needed.
 
     // Needed by IOCTL_JVCK_ATTACH to create filter device objects.
     REGISTRY.set_driver_object(driver as *mut DRIVER_OBJECT);
@@ -196,11 +181,8 @@ fn panic(info: &PanicInfo<'_>) -> ! {
 }
 
 unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
-    if let Some(worker) = SWEEP.lock().take() {
-        worker.stop();
-    }
+    // detach_all_volumes detaches each filter, which stops its per-volume thread.
     vck_driver::ioctl::dispatch::detach_all_volumes(&REGISTRY);
-    vck_driver::filter::irp_queue::shutdown();
     if let Some(control_device) = CONTROL_DEVICE.lock().take() {
         if let Err(err) = control_device.destroy() {
             vck_driver::driver_println!("sample-driver: control device destroy failed: {}", err);
@@ -241,11 +223,8 @@ unsafe extern "C" fn dispatch_any(device_object: PDEVICE_OBJECT, irp: PIRP) -> N
         }
         IRP_MJ_SHUTDOWN => {
             vck_driver::driver_println!("sample-driver: IRP_MJ_SHUTDOWN — detaching volumes");
-            if let Some(worker) = SWEEP.lock().take() {
-                worker.stop();
-            }
+            // Each filter's per-volume thread is stopped during its detach.
             vck_driver::ioctl::dispatch::detach_all_volumes(&REGISTRY);
-            vck_driver::filter::irp_queue::shutdown();
             complete_irp(irp, STATUS_SUCCESS, 0);
             STATUS_SUCCESS
         }

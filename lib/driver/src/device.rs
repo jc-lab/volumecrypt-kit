@@ -34,6 +34,10 @@ pub struct DeviceExtension {
     /// Filter only: raw `Arc<AttachedVolume>` (via `Arc::into_raw`), released on
     /// detach.
     pub volume: *const AttachedVolume,
+    /// Filter only: owned per-volume IO+sweep thread (raw `Box` pointer), created
+    /// at bind, stopped and freed at detach. Null until a cipher-ready volume is
+    /// bound. See [`crate::filter::volume_thread::VolumeThread`].
+    pub vthread: *mut crate::filter::volume_thread::VolumeThread,
 }
 
 impl DeviceExtension {
@@ -81,6 +85,7 @@ impl ControlDevice {
             (*ext).kind = DEVICE_KIND_CONTROL;
             (*ext).lower_device = null_mut();
             (*ext).volume = null_mut();
+            (*ext).vthread = null_mut();
         }
 
         if let Err(err) = ntstatus_to_result(
