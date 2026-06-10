@@ -25,8 +25,8 @@ use spin::Mutex;
 use vck_common::SectorIo;
 use wdk_sys::{
     ntddk::{
-        ExAllocatePool2, ExFreePool, IofCompleteRequest,
-        KeInitializeEvent, KeSetEvent, KeWaitForSingleObject,
+        ExAllocatePool2, ExFreePool, IoAcquireCancelSpinLock, IoReleaseCancelSpinLock,
+        IofCompleteRequest, KeInitializeEvent, KeSetEvent, KeWaitForSingleObject,
         ObReferenceObjectByHandle, ObfDereferenceObject, PsCreateSystemThread, ZwClose,
     },
     CCHAR, HANDLE, IO_NO_INCREMENT, KEVENT, LARGE_INTEGER, NTSTATUS,
@@ -184,27 +184,32 @@ pub unsafe fn bind(filter_do: PDEVICE_OBJECT, volume: Arc<AttachedVolume>) {
 pub unsafe fn enqueue(vt: *mut VolumeThread, irp: PIRP, is_write: bool) -> NTSTATUS {
     let vt = &*vt;
 
-    // Clear any existing cancel routine so it cannot complete the IRP while we
-    // hold it; then check the Cancel flag (standard WDM ownership handoff).
-    IoSetCancelRoutine(irp, None);
-    if (*irp).Cancel != 0 {
-        complete_irp(irp, STATUS_CANCELLED, 0);
-        return STATUS_CANCELLED;
-    }
-
     let mut q = vt.queue.lock();
     if vt.shutdown.load(Ordering::Acquire) {
         drop(q);
         complete_irp(irp, STATUS_CANCELLED, 0);
         return STATUS_CANCELLED;
     }
-    // Mark pending before returning STATUS_PENDING.
+    // Mark pending before returning STATUS_PENDING. Cancellation is handled at
+    // dequeue (see `claim_irp`), so we install no cancel routine here.
     let sl = (*irp).Tail.Overlay.__bindgen_anon_2.__bindgen_anon_1.CurrentStackLocation;
     (*sl).Control |= SL_PENDING_RETURNED as u8;
     q.push_back(IrpEntry { irp, is_write });
     drop(q);
     vt.signal();
     STATUS_PENDING
+}
+
+/// Claim a dequeued IRP for processing: under the cancel spinlock, clear any
+/// cancel routine and read the Cancel flag. Returns true if the IRP was
+/// cancelled (and must be completed STATUS_CANCELLED instead of processed).
+unsafe fn claim_cancelled(irp: PIRP) -> bool {
+    let mut irql: u8 = 0;
+    IoAcquireCancelSpinLock(&mut irql);
+    IoSetCancelRoutine(irp, None);
+    let cancelled = (*irp).Cancel != 0;
+    IoReleaseCancelSpinLock(irql);
+    cancelled
 }
 
 /// Wake the thread bound to `volume` (e.g. after start_encrypt transitions the
@@ -236,7 +241,15 @@ unsafe extern "C" fn thread_main(context: *mut c_void) {
         while n < MAX_IRP_BURST {
             let ep = vt.queue.lock().pop_front();
             match ep {
-                Some(ep) => { process_irp(&vol, ep); did = true; n += 1; }
+                Some(ep) => {
+                    if claim_cancelled(ep.irp) {
+                        complete_irp(ep.irp, STATUS_CANCELLED, 0);
+                    } else {
+                        process_irp(&vol, ep);
+                    }
+                    did = true;
+                    n += 1;
+                }
                 None => break,
             }
         }
