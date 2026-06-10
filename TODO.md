@@ -163,10 +163,14 @@
   →드라이버 로드. **13/13 통과.** debug.log(0xe9)로 확인: 로더 실행→체인로드→Windows 부팅→드라이버
   `read_handover`가 UEFI 변수 읽어 partition GUID 복원. 로더는 0xe9 debugcon으로도 로그
   (`lib/loader/src/debug.rs`). **참고: test-foundry는 `--headless` 필수**(없으면 wait-boot 타임아웃).
-- [ ] **남은 검증 (암호화 경로, VM 필수)**: footer metadata가 있는(=실제 암호화된) OS 볼륨에서
-  BlockIo 후킹(`crypto=Some`)으로 부팅 윈도우 동안 데이터 영역 복호화가 동작하는지 end-to-end 검증.
-  현재 handover 테스트는 암호화 전 상태(`crypto=None`, 후킹 미설치)만 검증함. OS 볼륨 footer metadata
-  쓰기 경로(드라이버 PREPARE를 C:에 적용 또는 전용 경로) 배선 필요.
+- [x] **암호화 경로 검증 완료**: `make test-vm-os-encrypt`(`testing/recipes/os-encrypt`) **21/21 통과**.
+  드라이버 INF 설치(Volume UpperFilter, boot-start)→재부팅→`os-volume encrypt --no-wait`(shrink+
+  IOCTL_JVCK_PREPARE footer 쓰기+StartEncrypt)→부분 암호화(~2.7GB)→로더 설치→로더 경유 재부팅.
+  Boot3에서 로더 `crypto=Some` BlockIo 후킹이 부팅 윈도우 복호화 + 드라이버가 handover로 C:
+  재바인딩해 런타임 복호화 → Windows 정상 부팅 + 마커 파일 무결성. (app 배선 step29, handover_mount
+  geometry IOCTL 버그 수정 step32 — `LowerDeviceIo`에 IRP `IoBuildDeviceIoControlRequest` 추가.)
+- [ ] (정밀화) 재부팅 전 in-flight sweep batch 경계 race(마지막 배치 암호화 ↔ boundary 영속화 순서)
+  검증/보강; 전체 암호화 시 소프트AES 속도 개선(현재 부분 암호화로만 검증).
 
 ---
 
