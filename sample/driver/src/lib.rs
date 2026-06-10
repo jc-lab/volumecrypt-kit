@@ -181,6 +181,20 @@ fn panic(info: &PanicInfo<'_>) -> ! {
 }
 
 unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
+    // An encrypted OS (system) volume is being decrypted live by this driver.
+    // Unloading would leave C: reading raw ciphertext → guaranteed corruption.
+    // Refuse by bugchecking with STATUS_INVALID_DEVICE_STATE as a parameter.
+    if REGISTRY.has_encrypted_os_volume() {
+        vck_driver::driver_println!(
+            "sample-driver: unload refused — OS volume encrypted; bugchecking"
+        );
+        const STATUS_INVALID_DEVICE_STATE: u64 = 0xC000_0184;
+        // Custom bug check code "VCK\0" — identifiable in the crash dump. P1 is
+        // STATUS_INVALID_DEVICE_STATE indicating why the unload was refused.
+        const VCK_BUGCHECK: u32 = 0x5643_4B00;
+        wdk_sys::ntddk::KeBugCheckEx(VCK_BUGCHECK, STATUS_INVALID_DEVICE_STATE, 0, 0, 0);
+    }
+
     // detach_all_volumes detaches each filter, which stops its per-volume thread.
     vck_driver::ioctl::dispatch::detach_all_volumes(&REGISTRY);
     if let Some(control_device) = CONTROL_DEVICE.lock().take() {

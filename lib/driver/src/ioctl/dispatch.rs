@@ -1045,6 +1045,16 @@ pub fn detach_volume_with_dismount(
 
 fn handle_detach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
     let req: VolumeRequest = decode_req(input)?;
+    // An OS (handover) volume with any encrypted sector cannot be detached: the
+    // live system volume would then read ciphertext. Refuse the request.
+    if let Some(volume) = registry.get(&req.volume_path) {
+        if volume.is_os_volume() && volume.has_encrypted_data() {
+            crate::driver_println!("detach: refused — OS volume is encrypted ({})", req.volume_path);
+            return Err(VckError::PermissionDenied(
+                "OS volume is encrypted; detach is not allowed",
+            ));
+        }
+    }
     detach_volume_with_dismount(registry, &req.volume_path, false).map_err(|e| {
         crate::driver_println!("detach: failed: {}", e);
         e

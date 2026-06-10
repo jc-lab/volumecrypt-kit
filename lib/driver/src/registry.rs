@@ -140,9 +140,30 @@ impl VolumeAttachRegistry {
     pub fn all(&self) -> Vec<Arc<AttachedVolume>> {
         self.entries.lock().values().cloned().collect()
     }
+
+    /// True if any attached OS (handover) volume has at least one encrypted
+    /// sector. Such a volume must not be detached and the driver must not unload
+    /// (doing so would leave the live OS volume reading ciphertext).
+    pub fn has_encrypted_os_volume(&self) -> bool {
+        self.entries
+            .lock()
+            .values()
+            .any(|v| v.is_os_volume() && v.has_encrypted_data())
+    }
 }
 
 impl AttachedVolume {
+    /// True when this volume was attached via the OS boot ACPI handover (i.e. it
+    /// is the system/OS volume), as opposed to a runtime IOCTL-attached data volume.
+    pub fn is_os_volume(&self) -> bool {
+        matches!(self.attach_source, AttachSource::Handover)
+    }
+
+    /// True when at least one sector has been encrypted (boundary advanced past 0).
+    pub fn has_encrypted_data(&self) -> bool {
+        self.encrypted_boundary.load(Ordering::Acquire) > 0
+    }
+
     pub fn offset_sector(&self) -> u64 {
         match &self.io_config {
             IoConfig::Passthrough => 0,
