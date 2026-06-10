@@ -26,6 +26,7 @@ const (
 )
 
 var osVolumePrepareOnly bool
+var osVolumeNoWait bool
 
 type osVolumePrepareResult struct {
 	VolumePath    string `json:"volume_path"`
@@ -134,6 +135,15 @@ func newOSVolumeEncryptCmd() *cobra.Command {
 				return fmt.Errorf("OS volume encryption start failed: %w", err)
 			}
 
+			// --no-wait: return as soon as the sweep is started, leaving the
+			// volume partially encrypted. Used by the reboot-through-loader test
+			// (the blocking WatchProgress below would prevent the test from
+			// rebooting while encryption is in progress).
+			if osVolumeNoWait {
+				fmt.Println("Encryption started (running in background; --no-wait).")
+				return nil
+			}
+
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
@@ -151,6 +161,7 @@ func newOSVolumeEncryptCmd() *cobra.Command {
 	}
 
 	cmd.Flags().BoolVar(&osVolumePrepareOnly, "prepare-only", false, "perform shrink/EFI/vck.json preparation only")
+	cmd.Flags().BoolVar(&osVolumeNoWait, "no-wait", false, "start encryption and return immediately (do not wait for completion)")
 	return cmd
 }
 

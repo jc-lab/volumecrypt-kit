@@ -98,13 +98,38 @@ steps:
       args: ["/c", "echo hello-before-encrypt> C:\\vck-ostest.txt && type C:\\vck-ostest.txt"]
       expect_exit_code: 0
 
-  # Full first-time encryption: shrink → PREPARE (footer metadata, fixed VMK) →
-  # StartEncrypt → WatchProgress to 100%. Long-running (whole C:, soft AES).
+  # First-time encryption: shrink → PREPARE (footer metadata, fixed VMK) →
+  # StartEncrypt, then return immediately (--no-wait). The sweep keeps running in
+  # the driver; we reboot while the volume is only PARTIALLY encrypted so the
+  # boot path exercises the loader's decrypt hook on real ciphertext without
+  # waiting for the (slow, whole-disk soft-AES) sweep to finish.
   - action: exec
-    timeout: 3600s
+    timeout: 240s
     params:
       cmd: "cmd.exe"
-      args: ["/c", "C:\\Temp\\vck-app.exe --volume \\\\.\\C: os-volume encrypt"]
+      args: ["/c", "C:\\Temp\\vck-app.exe --volume \\\\.\\C: os-volume encrypt --no-wait"]
+      expect_exit_code: 0
+
+  # Let the sweep encrypt a chunk of the data region (so the boot-time reads hit
+  # encrypted sectors), then proceed. Poll status; require the encrypted boundary
+  # to advance past a threshold before rebooting.
+  - action: exec
+    timeout: 300s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - |
+          $deadline = (Get-Date).AddSeconds(240)
+          $ok = $false
+          do {
+            $out = & C:\Temp\vck-app.exe --volume \\.\C: status 2>&1 | Out-String
+            Write-Host $out.Trim()
+            $m = [regex]::Match($out, '(\d+)\s*/\s*(\d+)')
+            if ($m.Success -and [int64]$m.Groups[1].Value -gt 262144) { $ok = $true; break }
+            Start-Sleep -Seconds 10
+          } while ((Get-Date) -lt $deadline)
+          if ($ok) { Write-Host "ENCRYPT_PROGRESS_OK" } else { Write-Host "INSUFFICIENT_PROGRESS"; exit 1 }
       expect_exit_code: 0
 
   # Install our loader as bootmgfw.efi (original is now bootmgfw.os.efi).
