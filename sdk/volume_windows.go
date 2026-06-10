@@ -471,13 +471,100 @@ func openMovablePath(path string, isDir bool) (windows.Handle, error) {
 	)
 }
 
-func volumeRootFromPath(volumePath string) (string, error) {
-	trimmed := strings.TrimSpace(volumePath)
-	if len(trimmed) >= 2 && trimmed[1] == ':' {
-		return strings.ToUpper(trimmed[:1]) + `:\`, nil
+// --- Volume path normalization ------------------------------------------------
+//
+// Accepted input formats for any `--volume` argument:
+//   - drive letter:        "D:", "D:\", "\\.\D:", "\\?\D:"
+//   - volume GUID path:    "\\?\Volume{GUID}", "\\?\Volume{GUID}\", "\\.\Volume{GUID}"
+//
+// Canonical form (for display + as the registry key sent to the driver) is the
+// volume GUID path "\\?\Volume{GUID}\". A device-open form (CreateFile-able raw
+// volume handle, no trailing backslash) is derived for I/O.
+
+var (
+	modkernel32                           = windows.NewLazySystemDLL("kernel32.dll")
+	procGetVolumeNameForVolumeMountPointW = modkernel32.NewProc("GetVolumeNameForVolumeMountPointW")
+)
+
+// isVolumeGUIDPath reports whether s is a "\\?\Volume{...}" / "\\.\Volume{...}" path.
+func isVolumeGUIDPath(s string) bool {
+	t := strings.TrimSpace(s)
+	return strings.HasPrefix(t, `\\?\Volume{`) || strings.HasPrefix(t, `\\.\Volume{`)
+}
+
+// volumeGUIDName extracts the "Volume{GUID}" DOS device name from a GUID path.
+func volumeGUIDName(s string) string {
+	t := strings.TrimSpace(s)
+	t = strings.TrimPrefix(t, `\\?\`)
+	t = strings.TrimPrefix(t, `\\.\`)
+	return strings.TrimSuffix(t, `\`)
+}
+
+// extractDriveLetter returns "D:" for any drive-letter form, or "" otherwise.
+func extractDriveLetter(s string) string {
+	t := strings.TrimSpace(s)
+	if strings.HasPrefix(t, `\\.\`) || strings.HasPrefix(t, `\\?\`) {
+		t = t[4:]
 	}
-	if len(trimmed) >= 6 && strings.HasPrefix(trimmed, `\\.\`) && trimmed[5] == ':' {
-		return strings.ToUpper(trimmed[4:5]) + `:\`, nil
+	if len(t) >= 2 && t[1] == ':' {
+		c := t[0]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return strings.ToUpper(t[:1]) + ":"
+		}
+	}
+	return ""
+}
+
+// getVolumeNameForMountPoint wraps GetVolumeNameForVolumeMountPointW. `mountPoint`
+// must end with a backslash (e.g. "D:\"). Returns "\\?\Volume{GUID}\".
+func getVolumeNameForMountPoint(mountPoint string) (string, error) {
+	mp, err := windows.UTF16PtrFromString(mountPoint)
+	if err != nil {
+		return "", err
+	}
+	buf := make([]uint16, 64) // "\\?\Volume{...}\" needs ~50 chars
+	r, _, e := procGetVolumeNameForVolumeMountPointW.Call(
+		uintptr(unsafe.Pointer(mp)),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf)),
+	)
+	if r == 0 {
+		return "", fmt.Errorf("GetVolumeNameForVolumeMountPoint(%s): %w", mountPoint, e)
+	}
+	return windows.UTF16ToString(buf), nil
+}
+
+// CanonicalVolumePath resolves any accepted volume input to its canonical volume
+// GUID path "\\?\Volume{GUID}\". Used for display and as the driver registry key.
+func CanonicalVolumePath(input string) (string, error) {
+	if isVolumeGUIDPath(input) {
+		return `\\?\` + volumeGUIDName(input) + `\`, nil
+	}
+	letter := extractDriveLetter(input)
+	if letter == "" {
+		return "", fmt.Errorf("unsupported volume path: %q", input)
+	}
+	return getVolumeNameForMountPoint(letter + `\`)
+}
+
+// volumeDeviceOpenPath returns a CreateFile-openable raw-volume device path
+// (no trailing backslash) for any accepted volume input.
+func volumeDeviceOpenPath(input string) (string, error) {
+	if isVolumeGUIDPath(input) {
+		return `\\?\` + volumeGUIDName(input), nil
+	}
+	if letter := extractDriveLetter(input); letter != "" {
+		return `\\.\` + letter, nil
+	}
+	return "", fmt.Errorf("unsupported volume path: %q", input)
+}
+
+func volumeRootFromPath(volumePath string) (string, error) {
+	if isVolumeGUIDPath(volumePath) {
+		return `\\?\` + volumeGUIDName(volumePath) + `\`, nil
+	}
+	if letter := extractDriveLetter(volumePath); letter != "" {
+		return letter + `\`, nil
 	}
 	return "", fmt.Errorf("unsupported volume path format: %s", volumePath)
 }
@@ -500,33 +587,28 @@ func maxInt64(a int64, b int64) int64 {
 // (e.g. `\\.\D:` → `\Device\HarddiskVolume3`). The NT path works with
 // ZwCreateFile regardless of whether a filesystem is currently mounted.
 func VolumeNTDevicePath(volumePath string) (string, error) {
-	// Extract drive letter portion (e.g. "D:" from "\\.\D:" or "D:\").
-	trimmed := strings.TrimSpace(volumePath)
-	var driveLetter string
-	if strings.HasPrefix(trimmed, `\\.\`) || strings.HasPrefix(trimmed, `\\?\`) {
-		rest := trimmed[4:]
-		if len(rest) >= 2 && rest[1] == ':' {
-			driveLetter = strings.ToUpper(rest[:2])
-		}
-	} else if len(trimmed) >= 2 && trimmed[1] == ':' {
-		driveLetter = strings.ToUpper(trimmed[:2])
-	}
-	if driveLetter == "" {
-		return "", fmt.Errorf("cannot extract drive letter from %q", volumePath)
+	// QueryDosDevice resolves a DOS device name to its NT target. The DOS name
+	// is "D:" for drive letters and "Volume{GUID}" for volume GUID paths.
+	var dosName string
+	if isVolumeGUIDPath(volumePath) {
+		dosName = volumeGUIDName(volumePath)
+	} else if letter := extractDriveLetter(volumePath); letter != "" {
+		dosName = letter
+	} else {
+		return "", fmt.Errorf("cannot resolve NT device path from %q", volumePath)
 	}
 
-	// QueryDosDeviceW returns the NT path (e.g. `\Device\HarddiskVolume3`).
-	letter16, err := windows.UTF16PtrFromString(driveLetter)
+	name16, err := windows.UTF16PtrFromString(dosName)
 	if err != nil {
 		return "", err
 	}
 	buf := make([]uint16, 256)
-	n, err := windows.QueryDosDevice(letter16, &buf[0], uint32(len(buf)))
+	n, err := windows.QueryDosDevice(name16, &buf[0], uint32(len(buf)))
 	if err != nil {
-		return "", fmt.Errorf("QueryDosDevice(%s) failed: %w", driveLetter, err)
+		return "", fmt.Errorf("QueryDosDevice(%s) failed: %w", dosName, err)
 	}
 	if n == 0 {
-		return "", fmt.Errorf("QueryDosDevice(%s) returned empty result", driveLetter)
+		return "", fmt.Errorf("QueryDosDevice(%s) returned empty result", dosName)
 	}
 	// Result is a NUL-terminated string (possibly multi-string); take the first.
 	return windows.UTF16ToString(buf[:n]), nil
@@ -593,7 +675,14 @@ func openVolumeHandle(volumePath string, access uint32) (windows.Handle, error) 
 		access = windows.GENERIC_READ
 	}
 
-	pathPtr, err := windows.UTF16PtrFromString(volumePath)
+	// Normalize any accepted format (D:, \\.\D:, \\?\Volume{GUID}) to a raw
+	// device path CreateFile can open.
+	devicePath, err := volumeDeviceOpenPath(volumePath)
+	if err != nil {
+		return 0, err
+	}
+
+	pathPtr, err := windows.UTF16PtrFromString(devicePath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to encode volume path: %w", err)
 	}

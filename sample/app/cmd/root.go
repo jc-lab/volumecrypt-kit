@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	vck "github.com/jc-lab/volumecrypt-kit/sdk"
 	"github.com/spf13/cobra"
 )
 
@@ -23,6 +24,19 @@ var rootCmd = &cobra.Command{
 	Use:   "vck-app",
 	Short: "VolumeCryptKit sample management CLI",
 	Long:  "vck-app manages OS/Data volume attach, encryption, decryption, and status via the VolumeCryptKit driver.",
+	// Normalize --volume (accepts "D:", "\\.\D:", "\\?\Volume{GUID}") to the
+	// canonical volume GUID path used for display and as the driver key.
+	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+		if volumeFlag == "" {
+			return nil
+		}
+		canonical, err := vck.CanonicalVolumePath(volumeFlag)
+		if err != nil {
+			return fmt.Errorf("invalid --volume %q: %w", volumeFlag, err)
+		}
+		volumeFlag = canonical
+		return nil
+	},
 }
 
 // osVolumeCmd groups OS volume subcommands.
