@@ -3,7 +3,7 @@ SHELL := /bin/bash
 
 export PATH := /d/programs:/c/Program Files/qemu:/c/Users/User/.cargo/bin:/c/Program Files/Go/bin:$(PATH)
 
-.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-crypto-test clean
+.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-crypto-test test-vm-os-handover clean
 
 TEST_VM_DIR = .testfoundry/win11
 
@@ -34,7 +34,9 @@ build-crypto-test-driver: testing/signing/MyTestDriverCert.cer
 	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver.ps1 -InputPath ./target/x86_64-pc-windows-msvc/release/vck_crypto_test_driver.dll -OutputPath ./testing/artifacts/vck-crypto-test-driver.sys
 
 build-loader:
-	cargo build -p vck-sample-loader --target x86_64-unknown-uefi
+	RUSTFLAGS="--cfg aes_force_soft" cargo build -p vck-sample-loader --target x86_64-unknown-uefi
+	mkdir -p testing/artifacts
+	cp ./target/x86_64-unknown-uefi/debug/vck-sample-loader.efi ./testing/artifacts/vck-sample-loader.efi
 
 build-app:
 	mkdir -p testing/artifacts
@@ -67,6 +69,14 @@ test-vm-data-volume: $(TEST_VM_DIR) build-driver-package build-app
 
 test-vm-crypto-test: $(TEST_VM_DIR) build-crypto-test-driver
 	test-foundry.exe  --vm-name=win11 test --output ./testing/results/crypto-test --test ./testing/recipes/crypto-test/crypto-test.yaml
+
+# Stage 3h: validate the UEFI loader -> driver ACPI handover end-to-end.
+# Prepares the OS volume (shrink/efi/vck.json), installs the loader as
+# bootmgfw.efi, reboots through the loader, then checks the driver's debug.log
+# for the handover-present line (proves XSDT injection + read_handover work).
+test-vm-os-handover: $(TEST_VM_DIR) build-driver build-app build-loader
+	rm -rf ./testing/results/os-handover
+	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/os-handover --test ./testing/recipes/os-handover/os-handover.yaml
 
 clean:
 	cargo clean

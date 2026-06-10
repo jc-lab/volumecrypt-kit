@@ -8,6 +8,8 @@ repository.workspace = true
 [dependencies]
 vck-common = { path = "../common", default-features = false, features = ["uefi"] }
 uefi = { version = "0.37", default-features = false }
+# Raw protocol structs (BlockIoProtocol) for vtable patching in the read hook.
+uefi-raw = "0.14"
 
 # AES-XTS volume decryption for the transparent Block IO read hook.
 aes.workspace = true

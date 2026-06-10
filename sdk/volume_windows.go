@@ -551,12 +551,22 @@ func CanonicalVolumePath(input string) (string, error) {
 // (no trailing backslash) for any accepted volume input.
 func volumeDeviceOpenPath(input string) (string, error) {
 	if isVolumeGUIDPath(input) {
-		return `\\?\` + volumeGUIDName(input), nil
+		// Raw volume device form: "\\.\Volume{GUID}" (no trailing backslash).
+		// The "\\?\Volume{GUID}\" canonical form (trailing backslash) opens the
+		// filesystem root, not the device, so it cannot be used for raw I/O.
+		return `\\.\` + volumeGUIDName(input), nil
 	}
 	if letter := extractDriveLetter(input); letter != "" {
 		return `\\.\` + letter, nil
 	}
 	return "", fmt.Errorf("unsupported volume path: %q", input)
+}
+
+// VolumeDeviceOpenPath converts any accepted volume path (drive letter or volume
+// GUID path) to its raw device-open form (`\\.\D:` or `\\.\Volume{GUID}`)
+// suitable for CreateFile / raw sector I/O.
+func VolumeDeviceOpenPath(input string) (string, error) {
+	return volumeDeviceOpenPath(input)
 }
 
 func volumeRootFromPath(volumePath string) (string, error) {

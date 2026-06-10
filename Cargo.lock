@@ -1066,6 +1066,7 @@ version = "0.1.0"
 dependencies = [
  "aes",
  "uefi",
+ "uefi-raw",
  "vck-common",
  "xts-mode",
 ]
@@ -1097,6 +1098,7 @@ dependencies = [
 name = "vck-sample-loader"
 version = "0.1.0"
 dependencies = [
+ "log",
  "uefi",
  "vck-common",
  "vck-loader",

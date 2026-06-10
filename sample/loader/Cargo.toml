@@ -13,4 +13,5 @@ path = "src/main.rs"
 vck-loader = { path = "../../lib/loader" }
 vck-common = { path = "../../lib/common", default-features = false, features = ["uefi"] }
 vck-sample-common = { path = "../common", features = ["uefi"] }
-uefi = { version = "0.37", default-features = false }
+uefi = { version = "0.37", default-features = false, features = ["alloc", "global_allocator", "panic_handler", "logger"] }
+log = { version = "0.4", default-features = false }

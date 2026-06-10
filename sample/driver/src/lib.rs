@@ -122,7 +122,7 @@ pub unsafe extern "system" fn DriverEntry(
     match vck_driver::handover::read_handover::<VckHandoverPayload>() {
         Ok(payload) => {
             vck_driver::driver_println!(
-                "DriverEntry: ACPI handover present, OS partition {}",
+                "DriverEntry: loader handover present, OS partition {}",
                 payload.partition_guid
             );
             REGISTRY.set_handover(vck_driver::HandoverInfo {

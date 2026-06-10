@@ -26,7 +26,7 @@
 | `make build-common` / `make test` | `vck-common` 빌드 / 호스트 단위테스트 | 호스트(msvc) — **현재 통과** |
 | `make build-driver` | `vck-sample-driver` → `vck-sample-driver.sys` | WEDK(G:\), `x86_64-pc-windows-msvc` |
 | `make build-crypto-test-driver` | `vck-crypto-test-driver` → `.sys` | WEDK |
-| `make build-loader` | `vck-sample-loader` | `x86_64-unknown-uefi` |
+| `make build-loader` | `vck-sample-loader` → `.efi` | `x86_64-unknown-uefi` (RUSTFLAGS `--cfg aes_force_soft`) — **현재 통과** |
 | `make build-app` | `vck-app.exe` (Go) | 호스트 — **현재 통과** |
 | `make test-vm-driver-load` / `test-vm-crypto-test` | test-foundry VM | win11 VM |
 
@@ -46,17 +46,19 @@
   tweak = **데이터영역 상대 섹터(`rel = lba - offset_sector`)**. loader/driver 모두 이 cipher 사용.
   (`lib/driver/src/crypto/aes_xts.rs`가 위임, 호스트 라운드트립 테스트 통과)
 - [x] ~~**`IoHooks` 객체 안전성**~~ — 해결: `IoHooks`를 동기 시그니처로 변경하여 `Arc<dyn IoHooks>` object-safe.
-- [ ] **GUID 엔디안 변환**: `lib/common/src/types.rs::Guid`(= `uuid::Uuid`) ↔ GPT/`EFI_GUID` 혼합
-  엔디안 변환 헬퍼 추가(파티션 매칭용).
-- [ ] **vck.json 파서 결정**: `sample/common/src/config.rs::VckConfig::parse_json`은 `no_std` JSON 파서 필요
-  (serde_json은 std). 파서 선택 또는 config 포맷을 `no_std` 친화 포맷으로 변경.
-- [ ] **loader BootServices 시그니처 정리**: uefi 0.37은 boot services를 전역 함수(`uefi::boot::*`)로 제공.
-  `lib/loader/src/provider.rs::LoaderProvider::on_init(&BootServices)`,
-  `sample/loader`의 `JvckMetadataStore::open_volume_footer_uefi(boot_services, ...)` 호출,
-  `VckConfig::load_from_esp(boot_services)`에서 `boot_services` 인자를 제거하고 전역 API로 통일.
-  (`lib/common`의 `open_volume_footer_uefi(partition_guid, vmk)` / `load_from_esp()`가 정답 시그니처)
-- [ ] **`DevicePath` 타입 확정**: `lib/loader` `LoaderConfig::next_loader`와
-  `sample/common::VckConfig::osloader_device_path` 반환형을 `uefi::proto::device_path::DevicePathBuffer`로 일치.
+- [x] **GUID 엔디안 변환**: `lib/common/src/types.rs::guid_from_windows_bytes(b: [u8;16])` 추가
+  (Windows/GPT `PartitionId`·`EFI_GUID`의 메모리 바이트 → `Uuid::from_bytes_le`로 canonical `Guid`).
+  드라이버가 `IOCTL_DISK_GET_PARTITION_INFO_EX`로 읽은 GPT `PartitionId`를 handover/`vck.json`의
+  canonical GUID와 매칭하는 데 사용. 호스트 단위테스트(`guid_from_windows_bytes_matches_canonical`) 통과.
+- [x] **vck.json 파서 결정**: `sample/common/src/config.rs`에 `no_std` 평면 JSON 객체 스캐너(문자열 값만) +
+  base64 디코더를 직접 구현. `parse_json`이 `partition_guid`(canonical GUID)/`vmk`(base64)/`osloader`
+  (기본값 `DEFAULT_OSLOADER`)를 파싱. 호스트 단위테스트 5개 통과.
+- [x] **loader BootServices 시그니처 정리**: uefi 0.37 전역 함수(`uefi::boot::*`)로 통일. `BootServices`
+  alias 제거, `LoaderProvider::on_init(&self)`, `VckConfig::load_from_esp()`,
+  `open_volume_footer_uefi(partition_guid, vmk)`, `osloader_device_path(&self)` 모두 인자 없는 형태로 일치.
+- [x] **`DevicePath` 타입 확정**: uefi 0.37엔 `DevicePathBuffer`가 없음 → 소유형은
+  `Box<uefi::proto::device_path::DevicePath>`(`DevicePath::to_boxed`). `LoaderConfig::next_loader`와
+  `VckConfig::osloader_device_path` 반환형을 이로 일치.
 
 ---
 
@@ -116,8 +118,17 @@
   **남은 것**: (2) transparent 볼륨 필터(아래).
 - [x] `lib/driver/src/device.rs::ControlDevice` — `create`(`IoCreateDevice` + `IoCreateSymbolicLink`,
   `DEVICE_NAME`/`SYMLINK_NAME`) / `destroy` 구현 완료. `DO_BUFFERED_IO` 설정 및 unload 시 삭제 경로 포함.
-- [ ] `lib/driver/src/handover.rs::read_handover::<P>()` — ACPI 테이블 영역 획득 후
-  `AcpiHandoverReader::find_and_decode`. 성공 시 VMK 보호 메모리 복사 + ACPI 버퍼 zeroize.
+- [x] `lib/driver/src/handover.rs::read_handover::<P>()` — `ZwQuerySystemInformation`
+  (SystemFirmwareTableInformation, provider `ACPI`, tableID `VCKD`)로 테이블 조회 후
+  `AcpiHandoverReader::decode`. plaintext VMK를 담은 커널 풀 버퍼는 owned `Vec`로 복사 후 zeroize+free.
+- [x] **OS 볼륨 부팅 auto-attach (Stage 2b)** — `lib/driver/src/filter/handover_mount.rs`:
+  `add_device`는 unbound 필터만 부착(기존), 실제 mount는 `IRP_MN_START_DEVICE` **완료 후**로
+  지연(필터가 START를 가로채 completion routine 설치 → PASSIVE면 직접, 아니면 `IoWorkItem`으로 위임 후 대기).
+  mount = 하위 디바이스 GPT `PartitionId`를 handover와 매칭 → `LowerDeviceIo`로 footer를 VMK
+  복호화(`JvckMetadataStore`) → FVEK/offset/cipher 파생 → `AttachSource::Handover` 볼륨 빌드 →
+  `filter_bind_volume`. handover 부재(로더 없음)면 no-op. `VolumeAttachRegistry`에 `HandoverInfo` 저장 +
+  `set_global_registry`(work item C 콜백용) 추가. `make build-driver` 통과. 실제 handover 경로 end-to-end는
+  Stage 3(로더) 통합 시 검증.
 - [ ] `lib/driver/src/provider.rs` — `AccessToken` 실제 토큰 래핑.
 
 > 검증 불변식: `ioctl/codes.rs`의 IOCTL 값과 `ioctl/types.rs`의 필드/태그는
@@ -127,26 +138,45 @@
 
 ## 3. UEFI 로더 — `lib/loader` + `sample/loader`
 
-- [ ] `lib/loader/src/hook/mod.rs::BlockIoHookEngine` — `install`/`uninstall`/`decrypt_after_read`
-  (대상 파티션 GUID 매칭, 원본 ReadBlocks/Ex 포인터 저장 후 vtable 교체).
-- [ ] `lib/loader/src/hook/block_io.rs` / `block_io2.rs` — `EFI_BLOCK_IO(2)_PROTOCOL` 후킹 본문.
-  훅 read: metadata 영역 passthrough → `rel = lba - offset_sector` → `rel < encrypted_offset`면
-  원본 read 후 AES-XTS 복호화.
-- [ ] `lib/loader/src/handover.rs::install_handover` — `AcpiHandoverWriter`로 VCKD 테이블 설치.
-- [ ] `lib/loader/src/chainload.rs::chainload_next` — `LoadImage`/`StartImage`로 다음 OS 로더 기동.
-- [ ] `sample/loader/src/provider.rs::VckLoaderProvider::on_init` — 골격은 ARCH 그대로(스텁).
-  cross-crate 호출(`VckConfig::load_from_esp`, `open_volume_footer_uefi`, `osloader_device_path`)이
-  실제로 동작하도록 §0의 시그니처 정리 반영.
-- [ ] `sample/loader/src/main.rs::efi_main` — 패닉 핸들러/얼로케이터 wiring, `VckLoaderProvider` 구동.
+- [x] `lib/loader/src/hook/mod.rs::BlockIoHookEngine` — `new`(AES-XTS cipher 구축)/`install`(대상 파티션
+  GPT GUID 매칭 → 원본 `read_blocks` 저장 + 인스턴스 필드 패치)/`uninstall`(복원)/`decrypt_after_read`
+  (섹터별 결정: header/footer passthrough, `rel < encrypted_offset.sector`면 AES-XTS 복호화) 구현.
+- [x] `lib/loader/src/hook/block_io.rs` — `EFI_BLOCK_IO_PROTOCOL.read_blocks` 후킹 본문 + 전역 side table
+  (protocol ptr→original/engine) + `efiapi` `hooked_read_blocks`(원본 read 후 `decrypt_after_read`).
+  **컴파일만 검증; 실제 부팅 미검증(3h).**
+  > `block_io2.rs`(EFI_BLOCK_IO2, async ReadBlocksEx)는 미후킹: Windows 부팅은 동기 BlockIo/
+  > SimpleFileSystem 경로로 OS 볼륨을 읽음. 필요 시 후속 보강.
+- [x] `lib/loader/src/handover.rs::install_handover` — **UEFI 런타임 변수**(`VckHandover`,
+  `vck_common::handover::HANDOVER_VAR_{NAME,GUID}`)에 msgpack payload를 `SetVariable`
+  (`BOOTSERVICE_ACCESS|RUNTIME_ACCESS`)로 발행. 드라이버는 `ExGetFirmwareEnvironmentVariable`로 읽음.
+  > **전환 사유:** 커널 `ZwQuerySystemInformation(SystemFirmwareTableInformation, "ACPI")`가
+  > Windows에서 `STATUS_NOT_IMPLEMENTED`(0xC0000002) 반환 → ACPI XSDT 주입 방식은 드라이버가 못 읽음.
+  > XSDT 주입 코드(`AcpiHandoverWriter::install_uefi`)는 남아있으나 미사용. **VM 부팅 검증 완료(3h).**
+- [x] `lib/loader/src/chainload.rs::chainload_next` — `uefi::boot::load_image(FromDevicePath)` +
+  `start_image`로 다음 OS 로더 기동.
+- [x] `sample/loader/src/provider.rs::VckLoaderProvider::on_init` — §0 시그니처 정리 반영, cross-crate
+  호출 실제 동작(`VckConfig::load_from_esp`, `open_volume_footer_uefi`, `osloader_device_path`).
+- [x] `sample/loader/src/main.rs::efi_main` — uefi feature(`global_allocator`/`panic_handler`/`logger`)로
+  얼로케이터·패닉·로거 wiring, `vck_loader::run(&provider)` 구동.
+- [x] **Stage 3h (handover 검증 완료)**: `make test-vm-os-handover`(recipe
+  `testing/recipes/os-handover/os-handover.yaml`) — prepare→로더를 bootmgfw.efi로 설치→**로더 경유 재부팅**
+  →드라이버 로드. **13/13 통과.** debug.log(0xe9)로 확인: 로더 실행→체인로드→Windows 부팅→드라이버
+  `read_handover`가 UEFI 변수 읽어 partition GUID 복원. 로더는 0xe9 debugcon으로도 로그
+  (`lib/loader/src/debug.rs`). **참고: test-foundry는 `--headless` 필수**(없으면 wait-boot 타임아웃).
+- [ ] **남은 검증 (암호화 경로, VM 필수)**: footer metadata가 있는(=실제 암호화된) OS 볼륨에서
+  BlockIo 후킹(`crypto=Some`)으로 부팅 윈도우 동안 데이터 영역 복호화가 동작하는지 end-to-end 검증.
+  현재 handover 테스트는 암호화 전 상태(`crypto=None`, 후킹 미설치)만 검증함. OS 볼륨 footer metadata
+  쓰기 경로(드라이버 PREPARE를 C:에 적용 또는 전용 경로) 배선 필요.
 
 ---
 
 ## 4. 샘플 드라이버 — `sample/driver`
 
-- [ ] `sample/driver/src/lib.rs::DriverEntry` — 최소 제어 경로는 구현 완료:
+- [x] `sample/driver/src/lib.rs::DriverEntry` — 제어 경로 + OS 볼륨 부팅 경로 배선 완료:
   컨트롤 디바이스 생성/언로드, `IRP_MJ_CREATE`/`CLOSE`/`CLEANUP`, `IRP_MJ_DEVICE_CONTROL`
-  → `ioctl::dispatch` 배선. 남은 작업은 `read_handover`, PnP 알림 등록(OS 볼륨 도착 시 `on_attach`),
-  attach registry 실제 채우기. `make test-vm-driver-load` 현재 통과.
+  → `ioctl::dispatch`, `AddDevice`(unbound 필터 부착), `set_global_registry`,
+  `read_handover::<VckHandoverPayload>()` best-effort → `REGISTRY.set_handover`. OS 볼륨 자동
+  attach는 필터의 START_DEVICE 완료 경로(`handover_mount`)가 처리. `make test-vm-driver-load` 통과.
 - [ ] `sample/driver/src/provider.rs::require_administrator` — 요청자 토큰의
   BUILTIN\Administrators 멤버십 검사. (`on_attach`/`authorize` 골격은 완료, 내부 store 호출은 §1·§2 의존)
 

@@ -22,6 +22,7 @@
 extern crate alloc;
 
 pub mod chainload;
+pub mod debug;
 pub mod handover;
 pub mod hook;
 pub mod provider;
@@ -31,3 +32,35 @@ pub use provider::{LoaderConfig, LoaderCrypto, LoaderProvider};
 
 // Re-export the hooking engine entry point for sample loaders.
 pub use hook::BlockIoHookEngine;
+
+use vck_common::VckResult;
+
+/// Drive the full loader flow for `provider`:
+///
+///   1. `on_init` — read config, decrypt footer metadata, derive crypto;
+///   2. if a high-level [`LoaderCrypto`] is present, install the transparent
+///      Block IO read hooks (they intentionally stay installed across the
+///      chainload so the OS loader reads the data region decrypted);
+///   3. inject the ACPI handover table (`VCKD`) into the XSDT for the driver;
+///   4. chainload the next OS loader.
+///
+/// On success control passes to the chained image and this does not return;
+/// any `Err` should abort the boot.
+pub fn run<P: LoaderProvider>(provider: &P) -> VckResult<()> {
+    loader_dbg!("run: start");
+    let config = provider.on_init()?;
+    loader_dbg!("run: on_init ok (crypto={})", config.crypto.is_some());
+
+    if let Some(crypto) = config.crypto {
+        // Leak the engine to a stable 'static address: the hooked read routine
+        // recovers it via a side table keyed by protocol pointer, and the hooks
+        // must outlive the chainload (the OS loader keeps reading through them).
+        let engine = alloc::boxed::Box::leak(alloc::boxed::Box::new(BlockIoHookEngine::new(crypto)?));
+        engine.install()?;
+        loader_dbg!("run: block io hook installed");
+    }
+
+    handover::install_handover(&config.handover_payload)?;
+    loader_dbg!("run: handover published (UEFI variable)");
+    chainload::chainload_next(&config.next_loader)
+}

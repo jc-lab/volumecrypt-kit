@@ -85,8 +85,12 @@ volumecrypt-kit/
 - 볼륨 메타데이터 타입 (`VolumeId`, `SectorRange`, `EncryptedOffset`)
 - UEFI→Driver 핸드오버 추상화
   - `HandoverPayload` 트레이트: `messagepack-serde`(no_std)를 통한 직렬화/역직렬화 인터페이스
-  - `AcpiHandoverWriter` (로더 측): `EfiRuntimeServicesData`로 msgpack 버퍼를 할당하고 커스텀 ACPI 테이블에 물리 주소를 기록
-  - `AcpiHandoverReader` (드라이버 측): ACPI 테이블에서 물리 주소를 읽어 msgpack 버퍼를 역직렬화
+  - **전송 방식: UEFI 런타임 변수**(`HANDOVER_VAR_NAME`=`VckHandover`, `HANDOVER_VAR_GUID`).
+    로더가 `SetVariable`(`BOOTSERVICE_ACCESS|RUNTIME_ACCESS`)로 msgpack payload를 발행하고,
+    드라이버가 `ExGetFirmwareEnvironmentVariable`로 읽어 `decode_payload`로 역직렬화. (VM 부팅 검증 완료)
+  - ~~`AcpiHandoverWriter`/`AcpiHandoverReader` (ACPI 커스텀 테이블 / XSDT 주입)~~ — 코드는 남아있으나
+    **미사용**: 커널 `ZwQuerySystemInformation(SystemFirmwareTableInformation,"ACPI")`가
+    `STATUS_NOT_IMPLEMENTED`라 드라이버가 ACPI 테이블을 못 읽음.
 - 공통 상수 및 유틸리티
 
 ```
@@ -242,16 +246,21 @@ IOCTL 디스패치는 요청을 처리하기 전에 `IoctlAuthorization::authori
 │                        OS Volume (System)                       │
 │                                                                 │
 │  [DriverEntry]                                                  │
-│    AcpiHandoverReader → VckHandoverPayload (partition_guid, vmk) │
-│      → VMK를 보호 메모리로 복사 후 ACPI 버퍼 zeroize             │
+│    read_handover → VckHandoverPayload (partition_guid, vmk)     │
+│      → HandoverInfo를 VolumeAttachRegistry에 저장               │
+│      → set_global_registry (PnP work item C 콜백용)            │
 │         │                                                       │
-│  [PnP 볼륨 도착 알림]                                           │
-│    VolumeProvider::on_attach(AttachContext { handover_data })   │
-│      → VMK로 볼륨 footer metadata 복호화                        │
-│        → FVEK·encrypted_offset·지오메트리 복원                  │
-│        → IoConfig::AesXts 반환                                  │
+│  [AddDevice]  볼륨 PDO에 unbound 필터만 부착                    │
+│         │                                                       │
+│  [필터가 IRP_MN_START_DEVICE 가로채기 → 완료 후]               │
+│    (completion routine, PASSIVE면 직접 / 아니면 IoWorkItem 위임 후 대기) │
+│    handover_mount::try_mount_handover_volume:                  │
+│      → 하위 디바이스 GPT PartitionId를 handover와 매칭          │
+│      → LowerDeviceIo로 footer metadata를 VMK 복호화            │
+│        → FVEK·encrypted_offset·지오메트리·cipher 복원           │
+│        → AttachSource::Handover 볼륨 빌드                       │
 │         → VolumeAttachRegistry에 등록                           │
-│         → 필터 드라이버 스택에 삽입                              │
+│         → filter_bind_volume (cipher 활성)                     │
 └─────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────┐
@@ -549,7 +558,7 @@ UEFI 환경에서 동작하는 로더 프레임워크입니다. `uefi` crate 기
 
 - `LoaderProvider` 트레이트 정의 (로더가 sample에게 요구하는 인터페이스)
 - `EFI_BLOCK_IO_PROTOCOL` 및 `EFI_BLOCK_IO2_PROTOCOL` 후킹 엔진
-- UEFI→Driver 핸드오버 데이터 기록 (`AcpiHandoverWriter` 래퍼)
+- UEFI→Driver 핸드오버 발행 (`install_handover` → UEFI 런타임 변수 `SetVariable`)
 - 다음 OS 로더 체인로드 유틸리티
 
 ```
@@ -561,7 +570,8 @@ lib/loader/
 │   │   ├── mod.rs
 │   │   ├── block_io.rs      # EFI_BLOCK_IO_PROTOCOL 후킹
 │   │   └── block_io2.rs     # EFI_BLOCK_IO2_PROTOCOL 후킹
-│   ├── handover.rs          # AcpiHandoverWriter 래퍼 (lib/common 사용)
+│   ├── handover.rs          # install_handover (UEFI 런타임 변수 SetVariable)
+│   ├── debug.rs             # 0xe9 debugcon 진단 출력
 │   └── chainload.rs         # 다음 EFI 바이너리 체인로드
 └── Cargo.toml
 ```
@@ -572,8 +582,9 @@ lib/loader/
 pub trait LoaderProvider: 'static {
     type Payload: HandoverPayload;
 
-    /// 로더 초기화 시 호출. 암호화 설정 및 핸드오버 페이로드 반환
-    fn on_init(&self, boot_services: &BootServices) -> VckResult<LoaderConfig<Self::Payload>>;
+    /// 로더 초기화 시 호출. 암호화 설정 및 핸드오버 페이로드 반환.
+    /// (uefi 0.37: boot services는 `uefi::boot::*` 전역 함수로 접근 — 인자 없음)
+    fn on_init(&self) -> VckResult<LoaderConfig<Self::Payload>>;
 
     /// Block IO Read 훅 (고수준 선택 시 lib가 AES-XTS 자동 처리)
     fn read_hook(&self, lba: u64, buf: &mut [u8]) -> VckResult<()> {

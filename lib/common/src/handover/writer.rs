@@ -57,25 +57,97 @@ impl AcpiHandoverWriter {
         Ok(table)
     }
 
+    /// Install the handover table so the OS sees it as a real ACPI table.
+    ///
+    /// A UEFI *configuration table* (`install_configuration_table`) is NOT
+    /// enough: Windows exposes ACPI tables (via
+    /// `ZwQuerySystemInformation(SystemFirmwareTableInformation, "ACPI", ...)`,
+    /// which the driver's `read_handover` uses) only from the RSDT/XSDT. So we
+    /// **inject** the table into the XSDT:
+    ///
+    ///   1. find the ACPI 2.0 RSDP via the UEFI config table,
+    ///   2. allocate the encoded table in `ACPI_RECLAIM` memory,
+    ///   3. clone the XSDT into a larger `ACPI_RECLAIM` buffer with one extra
+    ///      trailing 64-bit entry pointing at our table, fix its length+checksum,
+    ///   4. repoint `RSDP.XsdtAddress` at the new XSDT and fix both RSDP checksums.
+    ///
+    /// All ACPI integers are accessed unaligned (XSDT entries are not naturally
+    /// aligned), so reads/writes go through fixed-size byte buffers.
+    ///
+    /// SECURITY: the table holds the plaintext VMK. The driver copies it into
+    /// protected memory and zeroizes the ACPI buffer immediately after boot.
     #[cfg(feature = "uefi")]
-    pub fn install_uefi<P: HandoverPayload>(
-        &self,
-        payload: &P,
-        table_guid: &'static uefi::Guid,
-    ) -> VckResult<()> {
-        #[allow(unused_imports)]
+    pub fn install_uefi<P: HandoverPayload>(&self, payload: &P) -> VckResult<()> {
         use alloc::format;
         use core::ptr::copy_nonoverlapping;
-        use uefi::boot::{allocate_pool, install_configuration_table, MemoryType};
+        use uefi::boot::{allocate_pages, AllocateType, MemoryType};
+        use uefi::system::with_config_table;
+        use uefi::table::cfg::ConfigTableEntry;
 
         let table = self.encode(payload)?;
-        let ptr = allocate_pool(MemoryType::RUNTIME_SERVICES_DATA, table.len())
-            .map_err(|err| VckError::Io(format!("uefi allocate_pool failed: {err:?}")))?;
+
+        // (1) Locate the ACPI 2.0 RSDP physical address.
+        let rsdp_addr = with_config_table(|entries| {
+            entries
+                .iter()
+                .find(|e| e.guid == ConfigTableEntry::ACPI2_GUID)
+                .map(|e| e.address as u64)
+        })
+        .ok_or(VckError::NotFound("ACPI 2.0 RSDP not present"))?;
+        if rsdp_addr == 0 {
+            return Err(VckError::NotFound("ACPI 2.0 RSDP address is null"));
+        }
+
+        // Allocate `len` bytes in ACPI reclaim memory (page-granular). UEFI boot
+        // memory is identity-mapped, so the returned pointer is also the physical
+        // address recorded in ACPI structures.
+        fn alloc_acpi(len: usize) -> VckResult<*mut u8> {
+            let pages = len.div_ceil(4096).max(1);
+            allocate_pages(AllocateType::AnyPages, MemoryType::ACPI_RECLAIM, pages)
+                .map(|p| p.as_ptr())
+                .map_err(|e| VckError::Io(format!("allocate_pages(ACPI) failed: {e:?}")))
+        }
+
         unsafe {
-            copy_nonoverlapping(table.as_ptr(), ptr.as_ptr(), table.len());
-            install_configuration_table(table_guid, ptr.as_ptr().cast()).map_err(|err| {
-                VckError::Io(format!("uefi install_configuration_table failed: {err:?}"))
-            })?;
+            let rsdp = rsdp_addr as *mut u8;
+            // RSDP: xsdt_address is a u64 at offset 24; total length is a u32 at
+            // offset 20; checksum byte at 8 (first 20 bytes); extended checksum
+            // byte at 32 (whole `length`).
+            let xsdt_addr = read_u64_unaligned(rsdp.add(24));
+            if xsdt_addr == 0 {
+                return Err(VckError::NotFound("RSDP has no XSDT"));
+            }
+            let xsdt = xsdt_addr as *mut u8;
+            let xsdt_len = read_u32_unaligned(xsdt.add(4)) as usize;
+            if xsdt_len < ACPI_DESCRIPTION_HEADER_SIZE {
+                return Err(VckError::InvalidData("XSDT length too small"));
+            }
+
+            // (2) Place our table in ACPI reclaim memory.
+            let vck = alloc_acpi(table.len())?;
+            copy_nonoverlapping(table.as_ptr(), vck, table.len());
+
+            // (3) Clone XSDT with one extra trailing 64-bit entry.
+            let new_len = xsdt_len + 8;
+            let new_xsdt = alloc_acpi(new_len)?;
+            copy_nonoverlapping(xsdt, new_xsdt, xsdt_len);
+            write_u64_unaligned(new_xsdt.add(xsdt_len), vck as u64);
+            write_u32_unaligned(new_xsdt.add(4), new_len as u32);
+            *new_xsdt.add(9) = 0; // zero checksum byte before recomputing
+            let csum = acpi_checksum(core::slice::from_raw_parts(new_xsdt, new_len));
+            *new_xsdt.add(9) = csum;
+
+            // (4) Repoint RSDP at the new XSDT and fix both checksums.
+            write_u64_unaligned(rsdp.add(24), new_xsdt as u64);
+            *rsdp.add(8) = 0;
+            let c1 = acpi_checksum(core::slice::from_raw_parts(rsdp, 20));
+            *rsdp.add(8) = c1;
+            let rsdp_len = read_u32_unaligned(rsdp.add(20)) as usize;
+            if rsdp_len >= 33 {
+                *rsdp.add(32) = 0;
+                let c2 = acpi_checksum(core::slice::from_raw_parts(rsdp, rsdp_len));
+                *rsdp.add(32) = c2;
+            }
         }
         Ok(())
     }
@@ -84,6 +156,34 @@ impl AcpiHandoverWriter {
 pub fn acpi_checksum(bytes: &[u8]) -> u8 {
     let sum = bytes.iter().fold(0u8, |acc, byte| acc.wrapping_add(*byte));
     0u8.wrapping_sub(sum)
+}
+
+#[cfg(feature = "uefi")]
+#[inline]
+unsafe fn read_u32_unaligned(p: *const u8) -> u32 {
+    let mut b = [0u8; 4];
+    core::ptr::copy_nonoverlapping(p, b.as_mut_ptr(), 4);
+    u32::from_le_bytes(b)
+}
+
+#[cfg(feature = "uefi")]
+#[inline]
+unsafe fn read_u64_unaligned(p: *const u8) -> u64 {
+    let mut b = [0u8; 8];
+    core::ptr::copy_nonoverlapping(p, b.as_mut_ptr(), 8);
+    u64::from_le_bytes(b)
+}
+
+#[cfg(feature = "uefi")]
+#[inline]
+unsafe fn write_u32_unaligned(p: *mut u8, v: u32) {
+    core::ptr::copy_nonoverlapping(v.to_le_bytes().as_ptr(), p, 4);
+}
+
+#[cfg(feature = "uefi")]
+#[inline]
+unsafe fn write_u64_unaligned(p: *mut u8, v: u64) {
+    core::ptr::copy_nonoverlapping(v.to_le_bytes().as_ptr(), p, 8);
 }
 
 #[cfg(test)]

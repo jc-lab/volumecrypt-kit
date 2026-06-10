@@ -294,15 +294,23 @@ func effectiveOSVolumePathFrom(value string) string {
 	return value
 }
 
+// driveLetterFromVolumePath extracts a best-effort drive letter for display
+// only (the result is informational and not used for any volume operation).
+//
+// The global --volume flag is normalized to a canonical volume GUID path
+// (`\\?\Volume{GUID}\`) by root.go's PersistentPreRunE, so by the time the
+// os-volume command runs the path is usually NOT a drive-letter form. Unknown
+// formats (including GUID paths) return "" without error.
 func driveLetterFromVolumePath(volumePath string) (string, error) {
 	trimmed := strings.TrimSpace(volumePath)
 	switch {
 	case len(trimmed) >= 2 && trimmed[1] == ':':
 		return strings.ToUpper(trimmed[:1]), nil
-	case len(trimmed) >= 5 && strings.HasPrefix(trimmed, `\\.\`) && trimmed[5] == ':':
+	case len(trimmed) >= 6 && strings.HasPrefix(trimmed, `\\.\`) && trimmed[5] == ':':
 		return strings.ToUpper(trimmed[4:5]), nil
 	default:
-		return "", fmt.Errorf("unsupported OS volume path format: %s", volumePath)
+		// Canonical volume GUID path or other form — no drive letter to show.
+		return "", nil
 	}
 }
 
@@ -385,7 +393,13 @@ func openVolumeHandle(volumePath string, access uint32) (windows.Handle, error) 
 		access = windows.GENERIC_READ
 	}
 
-	pathPtr, err := windows.UTF16PtrFromString(volumePath)
+	// The --volume flag is canonicalized to "\\?\Volume{GUID}\" (filesystem
+	// form); convert to the raw device-open form for CreateFile.
+	devicePath, err := vck.VolumeDeviceOpenPath(volumePath)
+	if err != nil {
+		return 0, err
+	}
+	pathPtr, err := windows.UTF16PtrFromString(devicePath)
 	if err != nil {
 		return 0, fmt.Errorf("failed to encode volume path: %w", err)
 	}

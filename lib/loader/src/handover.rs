@@ -4,32 +4,37 @@
 //! custom ACPI configuration table (e.g. `VCKD`) carrying the driver handover
 //! payload. See ARCH.md "UEFI→Driver 핸드오버" and the boot flow step 4.
 
-use vck_common::handover::payload::HandoverPayload;
-use vck_common::handover::writer::AcpiHandoverWriter;
-use vck_common::VckResult;
+use alloc::format;
+
+use uefi::runtime::{set_variable, VariableAttributes, VariableVendor};
+use uefi::{CString16, Guid};
+use vck_common::handover::payload::{encode_payload, HandoverPayload};
+use vck_common::handover::{HANDOVER_VAR_GUID, HANDOVER_VAR_NAME};
+use vck_common::{VckError, VckResult};
 
 // Re-export so sample loaders can reference the writer through this module.
 pub use vck_common::handover::writer::AcpiHandoverWriter as HandoverWriter;
 
-/// Builds the ACPI handover table for `payload` and installs it as a UEFI
-/// configuration table at `table_guid`.
+/// Publish the loader→driver handover as a UEFI runtime variable.
 ///
-/// The table signature/OEM id come from `P::ACPI_SIGNATURE` / `P::ACPI_OEM_ID`.
-/// The payload is msgpack-encoded into an `EfiRuntimeServicesData` buffer whose
-/// physical address is recorded in the table; the driver later reads it back
-/// via `AcpiHandoverReader`.
+/// The variable value is the raw msgpack `payload`. It is set with
+/// `BOOTSERVICE_ACCESS | RUNTIME_ACCESS` (volatile — it only needs to live for
+/// this boot) so the driver can read it at OS runtime via
+/// `ExGetFirmwareEnvironmentVariable`.
 ///
-/// SECURITY: the buffer holds the plaintext VMK. The driver must copy it into
-/// protected memory and zeroize the ACPI buffer immediately after boot (see
-/// ARCH.md "키 수명·zeroize").
-pub fn install_handover<P: HandoverPayload>(
-    payload: &P,
-    table_guid: &'static uefi::Guid,
-) -> VckResult<()> {
-    // TODO(loader): in the high-level path the physical address of the runtime
-    // buffer is recorded by `install_uefi` itself. Confirm the table layout
-    // (physical_address pointing at the msgpack buffer) matches what
-    // AcpiHandoverReader expects on the driver side.
-    let writer = AcpiHandoverWriter::new::<P>();
-    writer.install_uefi(payload, table_guid)
+/// (The earlier ACPI-XSDT-injection approach — `AcpiHandoverWriter::install_uefi`
+/// — is unusable because kernel-mode `ZwQuerySystemInformation` returns
+/// `STATUS_NOT_IMPLEMENTED` for the firmware-table provider.)
+///
+/// SECURITY: the value holds the plaintext VMK. The driver copies it into
+/// protected memory after reading; the variable is volatile and disappears on
+/// reset.
+pub fn install_handover<P: HandoverPayload>(payload: &P) -> VckResult<()> {
+    let data = encode_payload(payload)?;
+    let name = CString16::try_from(HANDOVER_VAR_NAME)
+        .map_err(|_| VckError::InvalidData("handover variable name not valid UCS-2"))?;
+    let vendor = VariableVendor(Guid::from_bytes(HANDOVER_VAR_GUID));
+    let attrs = VariableAttributes::BOOTSERVICE_ACCESS | VariableAttributes::RUNTIME_ACCESS;
+    set_variable(&name, &vendor, attrs, &data)
+        .map_err(|e| VckError::Io(format!("SetVariable(handover) failed: {e:?}")))
 }

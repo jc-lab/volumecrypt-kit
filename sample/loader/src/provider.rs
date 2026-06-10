@@ -8,7 +8,6 @@
 
 use vck_common::types::EncryptedOffset;
 use vck_common::VckResult;
-use vck_loader::provider::BootServices;
 use vck_loader::{LoaderConfig, LoaderCrypto, LoaderProvider};
 use vck_sample_common::VckHandoverPayload;
 
@@ -17,7 +16,7 @@ use vck_sample_common::VckHandoverPayload;
 // exact module path may need adjustment once the parent lands them.
 // TODO(loader): confirm `vck_common::jvck::JvckMetadataStore` module path and
 // `vck_sample_common::VckConfig` import path.
-use vck_common::jvck::JvckMetadataStore;
+use vck_common::jvck::store::open_volume_footer_uefi;
 use vck_sample_common::VckConfig;
 
 /// Sample loader provider. Selects the JVCK default metadata format and the
@@ -27,43 +26,56 @@ pub struct VckLoaderProvider;
 impl LoaderProvider for VckLoaderProvider {
     type Payload = VckHandoverPayload;
 
-    fn on_init(&self, boot_services: &BootServices) -> VckResult<LoaderConfig<Self::Payload>> {
+    fn on_init(&self) -> VckResult<LoaderConfig<Self::Payload>> {
         // 1. Read VMK and the next OS loader path from (EFI)/vck.json.
-        let config = VckConfig::load_from_esp(boot_services)?;
+        let config = VckConfig::load_from_esp()?;
 
-        // 2. Open the target OS volume over Block IO, read a footer metadata
-        //    replica, and decrypt it with the VMK.
-        let store = JvckMetadataStore::open_volume_footer_uefi(
-            boot_services,
-            config.partition_guid,
-            &config.vmk,
-        )?;
-        let encrypted_offset = EncryptedOffset {
-            sector: store.load_offset()?,
-            total_sectors: store.data_sector_count(),
-        };
-        let (key1, key2) = store.fvek_keys();
-        let (key1, key2) = (*key1, *key2);
-
-        // 3. The handover carries only the VMK and partition_guid. The driver
-        //    re-decrypts the same footer metadata with the VMK to recover the
-        //    FVEK / encrypted_offset / geometry.
+        // 2. The handover carries only the VMK and partition_guid. The driver
+        //    re-decrypts the footer metadata with the VMK to recover the FVEK /
+        //    encrypted_offset / geometry.
         let payload = VckHandoverPayload {
             partition_guid: config.partition_guid,
             vmk: config.vmk.clone(),
         };
+        let next_loader = config.osloader_device_path()?;
 
-        // 4. Build the loader's own LoaderCrypto for transparent decryption from
-        //    the metadata just read.
+        // 3. Try to open the target OS volume footer metadata with the VMK.
+        //
+        //    Before first-time encryption the footer metadata does not exist yet
+        //    (the volume is still plaintext). In that state there is nothing to
+        //    decrypt, so we still publish the handover and chainload — we just
+        //    skip the transparent Block IO read hook (`crypto = None`). This also
+        //    isolates the ACPI handover path for validation independently of the
+        //    crypto machinery.
+        let crypto = match open_volume_footer_uefi(config.partition_guid, &config.vmk) {
+            Ok(store) => {
+                let encrypted_offset = EncryptedOffset {
+                    sector: store.load_offset()?,
+                    total_sectors: store.data_sector_count(),
+                };
+                let (key1, key2) = store.fvek_keys();
+                let (key1, key2) = (*key1, *key2);
+                Some(LoaderCrypto {
+                    partition_guid: config.partition_guid,
+                    key1,
+                    key2,
+                    offset_sector: store.offset_sector(),
+                    encrypted_offset,
+                })
+            }
+            Err(_) => {
+                log::warn!(
+                    "vck-loader: no footer metadata yet (volume not encrypted); \
+                     publishing handover only"
+                );
+                None
+            }
+        };
+
         Ok(LoaderConfig {
             handover_payload: payload,
-            next_loader: config.osloader_device_path(boot_services)?,
-            crypto: Some(LoaderCrypto {
-                key1,
-                key2,
-                offset_sector: store.offset_sector(),
-                encrypted_offset,
-            }),
+            next_loader,
+            crypto,
         })
     }
 }

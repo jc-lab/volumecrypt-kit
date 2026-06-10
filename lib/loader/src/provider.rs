@@ -5,26 +5,13 @@
 //! to chainload the next EFI image. See ARCH.md "lib/loader" for the contract.
 
 use vck_common::handover::payload::HandoverPayload;
-use vck_common::types::EncryptedOffset;
+use vck_common::types::{EncryptedOffset, Guid};
 use vck_common::VckResult;
 
-// NOTE: ARCH.md spells the field type as `DevicePath`. In the `uefi` 0.37 crate
-// the borrowed device path is the unsized `uefi::proto::device_path::DevicePath`
-// and an owned one is `DevicePathBuffer`. `LoaderConfig` must own its value, so
-// we alias to the owned buffer type here.
-// TODO(loader): confirm `DevicePathBuffer` is the right owned type for the
-// installed `uefi` version, or switch to a custom owned wrapper if needed.
-pub type DevicePath = uefi::proto::device_path::DevicePathBuffer;
-
-/// Boot-time services handle as seen by the provider.
-///
-/// ARCH.md writes `on_init(&self, boot_services: &BootServices)`. The `uefi`
-/// 0.37 crate moved boot services to free functions in `uefi::boot::*` and no
-/// longer exposes a borrowable `BootServices` table, so this alias keeps the
-/// ARCH.md signature shape while pointing at the system table.
-// TODO(loader): the sample driver routine should prefer `uefi::boot::*` free
-// functions directly; this alias only preserves the documented signature.
-pub type BootServices = uefi::table::system_table_boot;
+// The borrowed device path is the unsized `uefi::proto::device_path::DevicePath`;
+// the owned form in uefi 0.37 is `Box<DevicePath>` (via `DevicePath::to_boxed`).
+// `LoaderConfig` must own its value, so we alias to the boxed form here.
+pub type DevicePath = alloc::boxed::Box<uefi::proto::device_path::DevicePath>;
 
 /// Interface a sample loader implements to drive `vck-loader`.
 ///
@@ -39,8 +26,9 @@ pub trait LoaderProvider: 'static {
     ///
     /// Returns the loader configuration: the handover payload to publish, the
     /// next EFI image to chainload, and optionally AES-XTS key material for the
-    /// high-level transparent decryption path.
-    fn on_init(&self, boot_services: &BootServices) -> VckResult<LoaderConfig<Self::Payload>>;
+    /// high-level transparent decryption path. Boot services are reached through
+    /// the `uefi::boot::*` free functions (uefi 0.37), so no table is passed in.
+    fn on_init(&self) -> VckResult<LoaderConfig<Self::Payload>>;
 
     /// Low-level Block IO read hook.
     ///
@@ -67,6 +55,8 @@ pub struct LoaderConfig<P: HandoverPayload> {
 
 /// AES-XTS key material for the high-level transparent decryption path.
 pub struct LoaderCrypto {
+    /// GPT unique partition GUID of the volume whose Block IO is hooked.
+    pub partition_guid: Guid,
     /// AES-XTS data (encryption) key.
     pub key1: [u8; 32],
     /// AES-XTS tweak key.

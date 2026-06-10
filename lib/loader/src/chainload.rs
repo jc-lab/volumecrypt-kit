@@ -4,7 +4,11 @@
 //! `msbootmgfw.os.efi`) using `LoadImage` / `StartImage`. See ARCH.md boot flow
 //! step 5.
 
-use vck_common::VckResult;
+use alloc::format;
+
+use uefi::boot::{image_handle, load_image, start_image, LoadImageSource};
+use uefi::proto::BootPolicy;
+use vck_common::{VckError, VckResult};
 
 use crate::provider::DevicePath;
 
@@ -17,10 +21,17 @@ use crate::provider::DevicePath;
 /// reads the OS volume transparently decrypted, but the loader's own resources
 /// should otherwise be cleaned up before handing off.
 pub fn chainload_next(next_loader: &DevicePath) -> VckResult<()> {
-    // TODO(loader): in uefi 0.37 this maps to
-    //   let image = uefi::boot::load_image(image_handle, LoadImageSource::FromDevicePath { device_path, .. })?;
-    //   uefi::boot::start_image(image)?;
-    // Convert VckError <- uefi::Error as the common crate does elsewhere.
-    let _ = next_loader;
-    todo!("LoadImage(next_loader) then StartImage to chainload the OS loader")
+    let image = load_image(
+        image_handle(),
+        LoadImageSource::FromDevicePath {
+            // `next_loader` is our owned `Box<DevicePath>`; deref to the borrowed
+            // `&uefi::proto::device_path::DevicePath` the FFI source expects.
+            device_path: &**next_loader,
+            boot_policy: BootPolicy::ExactMatch,
+        },
+    )
+    .map_err(|e| VckError::Io(format!("LoadImage(next loader) failed: {e:?}")))?;
+
+    start_image(image).map_err(|e| VckError::Io(format!("StartImage(next loader) failed: {e:?}")))?;
+    Ok(())
 }

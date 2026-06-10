@@ -342,39 +342,94 @@ pub use uefi_io::{open_volume_footer_uefi, UefiBlockIoVolume};
 #[cfg(feature = "uefi")]
 mod uefi_io {
     use super::*;
-    use crate::types::Guid;
+    use crate::types::{guid_from_windows_bytes, Guid};
+    use alloc::format;
+    use uefi::boot::{self, open_protocol_exclusive, SearchType};
+    use uefi::proto::media::block::BlockIO;
+    use uefi::proto::media::partition::PartitionInfo;
 
     /// `SectorIo` backed by `EFI_BLOCK_IO_PROTOCOL` for a located volume.
+    ///
+    /// Read-only: the loader only needs to read footer metadata replicas to
+    /// recover the FVEK / encrypted_offset (the transparent decryption hook
+    /// lives in `lib/loader`).
     pub struct UefiBlockIoVolume {
-        // TODO(loader): hold the located block-io handle / protocol pointer.
-        _private: (),
+        block_io: uefi::boot::ScopedProtocol<BlockIO>,
+        media_id: u32,
+        sector_size: u32,
+        total_sectors: u64,
     }
+
+    // The loader is single-threaded; `ScopedProtocol` holds raw firmware
+    // pointers that are only ever touched from the boot thread. `SectorIo`
+    // requires `Send + Sync`, so assert it here.
+    unsafe impl Send for UefiBlockIoVolume {}
+    unsafe impl Sync for UefiBlockIoVolume {}
 
     impl SectorIo for UefiBlockIoVolume {
         fn sector_size(&self) -> u32 {
-            todo!("uefi block media block size")
+            self.sector_size
         }
         fn total_sectors(&self) -> u64 {
-            todo!("uefi block media last block + 1")
+            self.total_sectors
         }
-        fn read_sectors(&self, _lba: u64, _buf: &mut [u8]) -> VckResult<()> {
-            todo!("EFI_BLOCK_IO_PROTOCOL.ReadBlocks")
+        fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> VckResult<()> {
+            self.block_io
+                .read_blocks(self.media_id, lba, buf)
+                .map_err(|e| VckError::Io(format!("BlockIO.ReadBlocks(lba={lba}) failed: {e:?}")))
         }
         fn write_sectors(&self, _lba: u64, _buf: &[u8]) -> VckResult<()> {
-            todo!("EFI_BLOCK_IO_PROTOCOL.WriteBlocks")
+            Err(VckError::Unsupported("loader Block IO volume is read-only"))
         }
     }
 
-    /// Locate the volume by `partition_guid`, open its Block IO, and build a
-    /// store from the footer metadata using `vmk`.
+    /// Locate the volume by GPT unique `partition_guid`, open its Block IO, and
+    /// build a store from the footer metadata using `vmk`.
     pub fn open_volume_footer_uefi(
         partition_guid: Guid,
         vmk: &[u8],
     ) -> VckResult<JvckMetadataStore<UefiBlockIoVolume>> {
-        // TODO(loader): LocateHandleBuffer(BlockIo) -> match GPT partition GUID
-        // -> construct UefiBlockIoVolume -> JvckMetadataStore::open.
-        let _ = (partition_guid, vmk);
-        todo!("open UEFI volume footer metadata store")
+        let handles = boot::locate_handle_buffer(SearchType::from_proto::<BlockIO>())
+            .map_err(|e| VckError::Io(format!("locate BlockIO handles failed: {e:?}")))?;
+
+        for &handle in handles.iter() {
+            // Match by GPT unique partition GUID via the PartitionInfo protocol.
+            // PartitionInfo is produced on the partition (logical) handles only.
+            let matched = match open_protocol_exclusive::<PartitionInfo>(handle) {
+                Ok(pinfo) => match pinfo.gpt_partition_entry() {
+                    Some(gpt) => {
+                        guid_from_windows_bytes(gpt.unique_partition_guid.to_bytes())
+                            == partition_guid
+                    }
+                    None => false,
+                },
+                Err(_) => false,
+            };
+            if !matched {
+                continue;
+            }
+
+            let block_io = open_protocol_exclusive::<BlockIO>(handle)
+                .map_err(|e| VckError::Io(format!("open BlockIO failed: {e:?}")))?;
+            let media = block_io.media();
+            if !media.is_media_present() {
+                return Err(VckError::Io("matched partition has no media present".into()));
+            }
+            let sector_size = media.block_size();
+            let media_id = media.media_id();
+            let total_sectors = media.last_block().saturating_add(1);
+            let io = UefiBlockIoVolume {
+                block_io,
+                media_id,
+                sector_size,
+                total_sectors,
+            };
+            return JvckMetadataStore::open(io, vmk);
+        }
+
+        Err(VckError::NotFound(
+            "no Block IO partition matched the target GUID",
+        ))
     }
 }
 
