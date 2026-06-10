@@ -160,11 +160,33 @@ steps:
       args: ["/c", "type C:\\vck-ostest.txt"]
       expect_exit_code: 0
 
+  # Verify the encryption sweep RESUMED after reboot (handover re-bind sets the
+  # engine back to Encrypting). Sample the boundary twice and require it to
+  # advance (or already be fully encrypted).
   - action: exec
-    timeout: 30s
+    timeout: 120s
     params:
-      cmd: "cmd.exe"
-      args: ["/c", "C:\\Temp\\vck-app.exe --volume \\\\.\\C: status"]
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - |
+          $first = -1
+          $resumed = $false
+          for ($i = 0; $i -lt 8; $i++) {
+            $out = & C:\Temp\vck-app.exe --volume \\.\C: status 2>&1 | Out-String
+            Write-Host $out.Trim()
+            $m = [regex]::Match($out, '\((\d+) / (\d+) sectors\)')
+            if ($m.Success) {
+              $cur = [int64]$m.Groups[1].Value
+              $tot = [int64]$m.Groups[2].Value
+              if ($first -lt 0) { $first = $cur }
+              if ($tot -gt 0 -and $cur -ge $tot) { $resumed = $true; break }
+              if ($cur -gt $first) { $resumed = $true; break }
+            }
+            Start-Sleep -Seconds 10
+          }
+          if ($resumed) { Write-Host "SWEEP_RESUMED"; exit 0 } else { Write-Host "SWEEP_NOT_RESUMING"; exit 1 }
+      expect_exit_code: 0
 
   - action: exec
     timeout: 30s

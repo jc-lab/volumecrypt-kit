@@ -200,6 +200,20 @@ impl VolumeAttachRegistry {
         self.entries.lock().get(volume_path).cloned()
     }
 
+    /// Find an attached volume by its bound filter device object. Used to resolve
+    /// the OS (handover) volume, which is keyed by its NT device name rather than
+    /// the Win32/canonical path the app queries with.
+    pub fn get_by_filter(&self, filter_do: *mut DEVICE_OBJECT) -> Option<Arc<AttachedVolume>> {
+        if filter_do.is_null() {
+            return None;
+        }
+        self.entries
+            .lock()
+            .values()
+            .find(|v| v.filter_device.load(Ordering::Acquire) == filter_do)
+            .cloned()
+    }
+
     pub fn remove(&self, volume_path: &str) -> Option<Arc<AttachedVolume>> {
         self.entries.lock().remove(volume_path)
     }

@@ -64,6 +64,29 @@ pub fn dispatch_ioctl<A: IoctlAuthorization>(
 #[derive(Serialize)]
 struct EmptyResponse {}
 
+/// Resolve an attached volume by the app-supplied path.
+///
+/// Data volumes are keyed by the exact path the app sent (direct lookup works).
+/// The OS (handover) volume is keyed by its NT device name (chosen by the driver
+/// at handover bind), which differs from the canonical/Win32 path the app queries
+/// with — so on a miss we resolve the path to its filter device and match the
+/// volume by that.
+fn resolve_volume(
+    registry: &VolumeAttachRegistry,
+    volume_path: &str,
+) -> Option<Arc<AttachedVolume>> {
+    if let Some(v) = registry.get(volume_path) {
+        return Some(v);
+    }
+    let nt_path = win32_volume_path_to_nt(volume_path);
+    let (filter_do, _lower) = crate::filter::find_filter_for_volume(
+        &nt_path,
+        |dev| registry.find_pdo_filter(dev),
+        |name| registry.find_pdo_filter_by_name(name),
+    )?;
+    registry.get_by_filter(filter_do)
+}
+
 fn handle_get_status(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
     let req: VolumeRequest = decode_req(input)?;
     let nt_path = win32_volume_path_to_nt(&req.volume_path);
@@ -77,7 +100,7 @@ fn handle_get_status(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult
         |name| registry.find_pdo_filter_by_name(name),
     ).is_some();
 
-    if let Some(volume) = registry.get(&req.volume_path) {
+    if let Some(volume) = resolve_volume(registry, &req.volume_path) {
         let snapshot = volume.encryption.lock().snapshot();
         encode_resp(&VolumeStatus {
             volume_path: volume.volume_path.clone(),
@@ -106,8 +129,7 @@ fn handle_start_encrypt(
     input: &[u8],
 ) -> VckResult<IoctlResponse> {
     let req: VolumeRequest = decode_req(input)?;
-    let volume = registry
-        .get(&req.volume_path)
+    let volume = resolve_volume(registry, &req.volume_path)
         .ok_or(VckError::NotFound("volume is not attached"))?;
     volume.encryption.lock().start_encrypt();
     unsafe { crate::filter::volume_thread::wake_for(&volume) };
@@ -119,8 +141,7 @@ fn handle_start_decrypt(
     input: &[u8],
 ) -> VckResult<IoctlResponse> {
     let req: VolumeRequest = decode_req(input)?;
-    let volume = registry
-        .get(&req.volume_path)
+    let volume = resolve_volume(registry, &req.volume_path)
         .ok_or(VckError::NotFound("volume is not attached"))?;
     volume.encryption.lock().start_decrypt();
     unsafe { crate::filter::volume_thread::wake_for(&volume) };
@@ -132,8 +153,7 @@ fn handle_get_progress(
     input: &[u8],
 ) -> VckResult<IoctlResponse> {
     let req: VolumeRequest = decode_req(input)?;
-    let volume = registry
-        .get(&req.volume_path)
+    let volume = resolve_volume(registry, &req.volume_path)
         .ok_or(VckError::NotFound("volume is not attached"))?;
     let snapshot = volume.encryption.lock().snapshot();
     encode_resp(&ProgressEvent {
@@ -146,8 +166,7 @@ fn handle_get_progress(
 
 fn handle_pause(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
     let req: VolumeRequest = decode_req(input)?;
-    let volume = registry
-        .get(&req.volume_path)
+    let volume = resolve_volume(registry, &req.volume_path)
         .ok_or(VckError::NotFound("volume is not attached"))?;
     volume.encryption.lock().pause();
     encode_resp(&EmptyResponse {})
