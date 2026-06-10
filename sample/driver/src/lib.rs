@@ -17,8 +17,8 @@ use spin::{Lazy, Mutex};
 use wdk_alloc::WdkAllocator;
 use wdk_sys::{
     ntddk::IofCompleteRequest, CCHAR, DRIVER_OBJECT, IO_NO_INCREMENT, IRP_MJ_CLEANUP,
-    IRP_MJ_CLOSE, IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, NTSTATUS, PDEVICE_OBJECT, PDRIVER_OBJECT,
-    PIRP, PIO_STACK_LOCATION, PCUNICODE_STRING, _MODE,
+    IRP_MJ_CLOSE, IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, IRP_MJ_SHUTDOWN, NTSTATUS,
+    PDEVICE_OBJECT, PDRIVER_OBJECT, PIRP, PIO_STACK_LOCATION, PCUNICODE_STRING, _MODE,
 };
 use vck_driver::{
     device::{ControlDevice, DeviceExtension, DEVICE_KIND_FILTER},
@@ -126,11 +126,13 @@ pub unsafe extern "system" fn DriverEntry(
     (*driver.DriverExtension).AddDevice = Some(add_device);
 
     driver.DriverUnload = Some(driver_unload);
-    // Every device this driver owns (control + filters) shares one dispatcher
-    // that routes by the device-extension kind.
+    // Every device this driver owns (control + filters) shares one dispatcher.
     for slot in driver.MajorFunction.iter_mut() {
         *slot = Some(dispatch_any);
     }
+
+    // IRP_MJ_SHUTDOWN is routed via dispatch_any (all major functions are set).
+    // DriverUnload also handles clean shutdown.
 
     STATUS_SUCCESS
 }
@@ -193,17 +195,9 @@ unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
         worker.stop();
     }
 
-    // Detach any volume filters still attached, so no filter device object
-    // outlives this driver's code.
-    for volume in REGISTRY.all() {
-        let filter_do = volume
-            .filter_device
-            .swap(core::ptr::null_mut(), core::sync::atomic::Ordering::AcqRel);
-        if !filter_do.is_null() {
-            detach_filter(filter_do);
-        }
-        REGISTRY.remove(&volume.volume_path);
-    }
+    // Cleanly detach all encrypted volumes: lock + dismount + filter removal.
+    // ignore_open_files=true because we can't refuse to unload.
+    vck_driver::ioctl::dispatch::detach_all_volumes(&REGISTRY);
 
     if let Some(control_device) = CONTROL_DEVICE.lock().take() {
         if let Err(err) = control_device.destroy() {
@@ -240,6 +234,17 @@ unsafe extern "C" fn dispatch_any(device_object: PDEVICE_OBJECT, irp: PIRP) -> N
     match major {
         IRP_MJ_DEVICE_CONTROL => dispatch_device_control(device_object, irp),
         IRP_MJ_CREATE | IRP_MJ_CLOSE | IRP_MJ_CLEANUP => {
+            complete_irp(irp, STATUS_SUCCESS, 0);
+            STATUS_SUCCESS
+        }
+        IRP_MJ_SHUTDOWN => {
+            // System is shutting down. Cleanly dismount all encrypted volumes so
+            // NTFS can flush and close without accessing stale encrypted data.
+            vck_driver::driver_println!("sample-driver: IRP_MJ_SHUTDOWN — detaching volumes");
+            if let Some(worker) = SWEEP.lock().take() {
+                worker.stop();
+            }
+            vck_driver::ioctl::dispatch::detach_all_volumes(&REGISTRY);
             complete_irp(irp, STATUS_SUCCESS, 0);
             STATUS_SUCCESS
         }

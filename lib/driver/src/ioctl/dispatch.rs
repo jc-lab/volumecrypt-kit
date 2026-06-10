@@ -218,24 +218,8 @@ fn handle_jvck_prepare_adddevice_path(
         }
     }
 
-    // Encrypt sector 0 via LowerDeviceIo — bypasses PartMgr protection!
-    if !req.metadata_block.is_empty() && !req.vmk.is_empty() {
-        match metadata::decrypt_payload(&req.metadata_block[..METADATA_BLOCK_SIZE.min(req.metadata_block.len())], &req.vmk) {
-            Ok((_off, secrets)) => {
-                if let Ok(cipher) = AesXtsCipher::new(secrets.fvek_key1, secrets.fvek_key2) {
-                    let mut s0 = alloc::vec![0u8; sector_size as usize];
-                    if lo.read_sectors(0, &mut s0).is_ok() {
-                        cipher.encrypt_sector(0, &mut s0);
-                        match lo.write_sectors(0, &s0) {
-                            Ok(()) => crate::driver_println!("jvck_prepare(add): sector 0 encrypted"),
-                            Err(e) => crate::driver_println!("jvck_prepare(add): sector 0 write err: {}", e),
-                        }
-                    }
-                }
-            }
-            Err(e) => crate::driver_println!("jvck_prepare(add): decrypt_payload err: {}", e),
-        }
-    }
+    // Sector 0 (VBR) will be encrypted by the sweep via LowerDeviceIo (which
+    // bypasses PartMgr protection). No pre-encryption needed here.
 
     // Bind provisional volume (size hiding active).
     let volume = Arc::new(AttachedVolume {
@@ -630,46 +614,9 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         }
     }
 
-    // Encrypt sector 0 (VBR) in the kernel while the volume is locked+dismounted.
-    // PartMgr blocks writes to partition sector 0 of MOUNTED partitions; writing
-    // while dismounted bypasses that check entirely.
-    //
-    // The FVEK is recovered from metadata_block + vmk. The metadata_block encodes
-    // encrypted_offset=1, so after PREPARE the sweep starts from sector 1.
-    if !req.metadata_block.is_empty() && !req.vmk.is_empty() {
-        use vck_common::jvck::metadata;
-        use crate::crypto::aes_xts::AesXtsCipher;
-        match metadata::decrypt_payload(&req.metadata_block[..metadata::METADATA_BLOCK_SIZE.min(req.metadata_block.len())], &req.vmk) {
-            Ok((_initial_offset, secrets)) => {
-                match AesXtsCipher::new(secrets.fvek_key1, secrets.fvek_key2) {
-                    Ok(cipher) => {
-                        let write_vol_id = VolumeId {
-                            partition_guid: Guid::nil(),
-                            device_path: nt_path.clone(),
-                        };
-                        match KernelVolumeIo::open(&write_vol_id, sector_size, total_sectors) {
-                            Ok(write_io) => {
-                                let mut s0 = alloc::vec![0u8; sector_size as usize];
-                                match write_io.read_sectors(0, &mut s0) {
-                                    Ok(()) => {
-                                        cipher.encrypt_sector(0, &mut s0);
-                                        match write_io.write_sectors(0, &s0) {
-                                            Ok(()) => crate::driver_println!("jvck_prepare: sector 0 encrypted and written"),
-                                            Err(e) => crate::driver_println!("jvck_prepare: sector 0 write err: {}", e),
-                                        }
-                                    }
-                                    Err(e) => crate::driver_println!("jvck_prepare: sector 0 read err: {}", e),
-                                }
-                            }
-                            Err(e) => crate::driver_println!("jvck_prepare: sector 0 io open err: {}", e),
-                        }
-                    }
-                    Err(e) => crate::driver_println!("jvck_prepare: cipher init err: {}", e),
-                }
-            }
-            Err(e) => crate::driver_println!("jvck_prepare: metadata decrypt err: {}", e),
-        }
-    }
+    // Sector 0 (VBR) is handled by the sweep (via LowerDeviceIo in AddDevice path
+    // or KernelVolumeIo while dismounted in fallback path).
+    // The metadata_block uses encrypted_offset=0 so the sweep starts from sector 0.
 
     // Query STORAGE_DEVICE_NUMBER from vol_handle_raw to find the raw partition
     // path (e.g. `\Device\Harddisk0\Partition1`) for sweep_io in ATTACH.
@@ -1006,17 +953,115 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
     })
 }
 
-fn handle_detach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
-    let req: VolumeRequest = decode_req(input)?;
+/// Cleanly detach an encrypted volume:
+///   1. FSCTL_LOCK_VOLUME (if `ignore_open_files`, failure is non-fatal)
+///   2. FSCTL_DISMOUNT_VOLUME (retry up to `max_dismount_retries`, 100 ms between attempts)
+///   3. Existing filter removal
+///
+/// Must be called on an EXPANDED kernel stack (uses KeDelayExecutionThread).
+pub fn detach_volume_with_dismount(
+    registry: &VolumeAttachRegistry,
+    volume_path: &str,
+    ignore_open_files: bool,
+) -> VckResult<()> {
+    use crate::io::{open_volume_handle_raw, send_fsctl};
+    use wdk_sys::ntddk::{KeDelayExecutionThread, ZwClose};
+    use wdk_sys::LARGE_INTEGER;
+    const FSCTL_LOCK_VOLUME: u32 = 0x0009_0018;
+    const FSCTL_DISMOUNT_VOLUME: u32 = 0x0009_0020;
+    const FSCTL_UNLOCK_VOLUME: u32 = 0x0009_001c;
+    const MAX_RETRIES: u32 = 100;
+    // -100_0000 * 100 ns = 100 ms (relative, negative = relative time)
+    const DELAY_100MS: i64 = -1_000_000;
+
     let volume = registry
-        .remove(&req.volume_path)
+        .remove(volume_path)
         .ok_or(VckError::NotFound("volume is not attached"))?;
 
     let filter_do = volume.filter_device.swap(null_mut(), Ordering::AcqRel);
+    let nt_path = win32_volume_path_to_nt(volume_path);
+
+    let vol_handle = open_volume_handle_raw(&nt_path);
+    let mut held_lock = false;
+
+    if let Some(h) = vol_handle {
+        // Step 1: lock (non-fatal if ignore_open_files).
+        let lock_st = send_fsctl(h, FSCTL_LOCK_VOLUME);
+        crate::driver_println!("detach: LOCK_VOLUME=0x{:08x} ignore={}", lock_st, ignore_open_files);
+        if crate::nt::nt_success(lock_st) {
+            held_lock = true;
+        } else if !ignore_open_files {
+            unsafe { let _ = ZwClose(h); }
+            return Err(VckError::Io("FSCTL_LOCK_VOLUME failed (files open)".into()));
+        }
+
+        // Step 2: dismount with retries.
+        let mut dismounted = false;
+        for attempt in 0..MAX_RETRIES {
+            let dis_st = send_fsctl(h, FSCTL_DISMOUNT_VOLUME);
+            crate::driver_println!(
+                "detach: DISMOUNT_VOLUME attempt={} status=0x{:08x}", attempt, dis_st
+            );
+            if crate::nt::nt_success(dis_st) {
+                dismounted = true;
+                break;
+            }
+            if attempt < MAX_RETRIES - 1 {
+                let mut interval = LARGE_INTEGER { QuadPart: DELAY_100MS };
+                unsafe { KeDelayExecutionThread(0 /*KernelMode*/, 0 /*FALSE*/, &mut interval); }
+            }
+        }
+        if !dismounted {
+            crate::driver_println!("detach: DISMOUNT_VOLUME failed after {} retries", MAX_RETRIES);
+        }
+
+        // Unlock so the FSD (if any) can re-mount (or stays unmounted — we'll detach).
+        if held_lock {
+            let unlock_st = send_fsctl(h, FSCTL_UNLOCK_VOLUME);
+            crate::driver_println!("detach: UNLOCK_VOLUME=0x{:08x}", unlock_st);
+        }
+        unsafe { let _ = ZwClose(h); }
+    }
+
+    // Brief delay to allow any in-flight IRPs on the filter to complete before
+    // IoDetachDevice/IoDeleteDevice. Without this, pending completion routines
+    // or I/O in progress can cause a BSOD when the filter is removed.
+    {
+        use wdk_sys::ntddk::KeDelayExecutionThread;
+        use wdk_sys::LARGE_INTEGER;
+        let mut interval = LARGE_INTEGER { QuadPart: -5_000_000 }; // 500 ms
+        unsafe { KeDelayExecutionThread(0, 0, &mut interval); }
+    }
+
+    // Step 3: remove filter.
     if !filter_do.is_null() {
         crate::filter::detach_filter(filter_do);
     }
+    crate::driver_println!("detach: done for {}", volume_path);
+    Ok(())
+}
+
+fn handle_detach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
+    let req: VolumeRequest = decode_req(input)?;
+    detach_volume_with_dismount(registry, &req.volume_path, false).map_err(|e| {
+        crate::driver_println!("detach: failed: {}", e);
+        e
+    })?;
     encode_resp(&EmptyResponse {})
+}
+
+/// Detach all attached volumes, used on shutdown/unload.
+pub fn detach_all_volumes(registry: &VolumeAttachRegistry) {
+    let paths: alloc::vec::Vec<String> = registry.all()
+        .into_iter()
+        .map(|v| v.volume_path.clone())
+        .collect();
+    for path in paths {
+        crate::driver_println!("detach_all: detaching {}", path);
+        if let Err(e) = detach_volume_with_dismount(registry, &path, true) {
+            crate::driver_println!("detach_all: {} failed: {}", path, e);
+        }
+    }
 }
 
 fn decode_req<T>(input: &[u8]) -> VckResult<T>

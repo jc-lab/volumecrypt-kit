@@ -82,9 +82,9 @@ var attachCmd = &cobra.Command{
 					FooterReplicaCount: uint8(useFooterFlag),
 					VolumeID:           volumeID,
 				}
-				// encrypted_offset=1 so the driver knows sector 0 will be
-				// pre-encrypted during PREPARE and the sweep starts from sector 1.
-				block, encErr := header.EncodeMetadataBlock(fvek1, fvek2, 1, vmk)
+				// encrypted_offset=0: sweep starts from sector 0 (LowerDeviceIo
+				// bypasses PartMgr so sector 0 write is allowed from the sweep).
+				block, encErr := header.EncodeMetadataBlock(fvek1, fvek2, 0, vmk)
 				if encErr != nil {
 					return fmt.Errorf("failed to encode JVCK metadata: %w", encErr)
 				}
