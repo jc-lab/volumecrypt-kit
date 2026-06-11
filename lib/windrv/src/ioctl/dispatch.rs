@@ -1145,21 +1145,6 @@ fn handle_detach_all_volumes(registry: &VolumeAttachRegistry) -> VckResult<Ioctl
     Ok(Vec::new())
 }
 
-/// Detach all attached volumes, used on unload cleanup (after data volumes are
-/// gone and any encrypted-OS-volume unload has been refused).
-pub fn detach_all_volumes(registry: &VolumeAttachRegistry) {
-    let paths: alloc::vec::Vec<String> = registry.all()
-        .into_iter()
-        .map(|v| v.volume_path.clone())
-        .collect();
-    for path in paths {
-        crate::driver_println!("detach_all: detaching {}", path);
-        if let Err(e) = detach_volume_with_dismount(registry, &path, true) {
-            crate::driver_println!("detach_all: {} failed: {}", path, e);
-        }
-    }
-}
-
 fn decode_req<T>(input: &[u8]) -> VckResult<T>
 where
     T: serde::de::DeserializeOwned,

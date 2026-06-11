@@ -282,9 +282,7 @@ unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
         wdk_sys::ntddk::KeBugCheckEx(VCK_BUGCHECK, STATUS_INVALID_DEVICE_STATE, 0, 0, 0);
     }
 
-    // Cleanup: detach any volume still attached (e.g. a non-encrypted OS volume)
-    // and tear down the control device.
-    vck_driver::ioctl::dispatch::detach_all_volumes(&REGISTRY);
+    // Cleanup: tear down the control device.
     if let Some(control_device) = CONTROL_DEVICE.lock().take() {
         if let Err(err) = control_device.destroy() {
             vck_driver::driver_println!("sample-driver: control device destroy failed: {}", err);
