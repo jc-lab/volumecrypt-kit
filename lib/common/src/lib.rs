@@ -10,6 +10,7 @@ extern crate alloc;
 
 pub mod error;
 pub mod handover;
+pub mod ioctl;
 pub mod jvck;
 pub mod store;
 pub mod types;
