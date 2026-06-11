@@ -2,8 +2,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-SHELL := /bin/bash
 .ONESHELL:
+SHELL := /bin/bash
 # .SHELLFLAGS := -lc
 
 .PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-crypto-test test-vm-os-handover test-vm-os-encrypt clean
@@ -24,11 +24,14 @@ testing/signing/MyTestDriverCert.cer: ./testing/signing/generate.sh
 # explicit save/restore wrapper.
 DRIVER_RUSTFLAGS = -C target-feature=+crt-static
 
+UEFI_RUSTFLAGS = -C target-feature=+mmx,+sse,+sse2,+sse4.1,+aes,-soft-float
+
 # Built in release: unoptimized debug frames overflow the small (~12 KiB)
 # kernel stack on the metadata/crypto path.
+
 build-driver: testing/signing/MyTestDriverCert.cer
 	$(LOAD_ENV)
-	RUSTFLAGS="$(DRIVER_RUSTFLAGS)" cargo build --release -p vck-sample-driver --target x86_64-pc-windows-msvc
+	RUSTFLAGS="$(DRIVER_RUSTFLAGS)" cargo build -p vck-sample-driver --target x86_64-pc-windows-msvc --release
 	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver.ps1 -InputPath ./target/x86_64-pc-windows-msvc/release/vck_sample_driver.dll -OutputPath ./testing/artifacts/vck-sample-driver.sys
 	cp ./sample/windrv/vck-sample-driver.inf ./testing/artifacts/vck-sample-driver.inf
 	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver-package.ps1 \
@@ -38,11 +41,11 @@ build-driver: testing/signing/MyTestDriverCert.cer
 
 build-crypto-test-driver: testing/signing/MyTestDriverCert.cer
 	$(LOAD_ENV)
-	RUSTFLAGS="$(DRIVER_RUSTFLAGS)" cargo build --release -p vck-crypto-test-driver --target x86_64-pc-windows-msvc
-	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver.ps1 -InputPath ./target/x86_64-pc-windows-msvc/release/vck_crypto_test_driver.dll -OutputPath ./testing/artifacts/vck-crypto-test-driver.sys
+	RUSTFLAGS="$(DRIVER_RUSTFLAGS)" cargo build -p vck-crypto-test-driver --target x86_64-pc-windows-msvc
+	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver.ps1 -InputPath ./target/x86_64-pc-windows-msvc/debug/vck_crypto_test_driver.dll -OutputPath ./testing/artifacts/vck-crypto-test-driver.sys
 
 build-loader:
-	cargo build -p vck-sample-loader --target x86_64-unknown-uefi
+	RUSTFLAGS="$(UEFI_RUSTFLAGS)" cargo build -p vck-sample-loader --target x86_64-unknown-uefi
 	mkdir -p testing/artifacts
 	cp ./target/x86_64-unknown-uefi/debug/vck-sample-loader.efi ./testing/artifacts/vck-sample-loader.efi
 

@@ -7,6 +7,7 @@ SETUP_CMD='G:\\BuildEnv\\SetupBuildEnv.cmd'
 if [ -f "${SETUP_CMD}" ]; then
   while IFS='=' read -r name value; do
     upper_name="${name^^}"
+    value="${value%$'\r'}"
 
     case "$upper_name" in
       PATH)
@@ -24,5 +25,3 @@ if [ -f "${SETUP_CMD}" ]; then
     esac
   done < <(MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c "call $SETUP_CMD && set")
 fi
-
-/usr/bin/env
