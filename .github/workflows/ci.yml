@@ -28,7 +28,7 @@ jobs:
   # can restore it without re-downloading from Vagrant Cloud.
   prepare-image:
     name: Prepare VM image
-    if: env.TEST_USE_VM == '1'
+    if: ${{ (vars.TEST_USE_VM || '0') == '1' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -94,7 +94,7 @@ jobs:
   # ── VM tests (parallel matrix) ─────────────────────────────────────────────
   vm-test:
     name: VM / ${{ matrix.suite }}
-    if: env.TEST_USE_VM == '1'
+    if: ${{ (vars.TEST_USE_VM || '0') == '1' }}
     needs: [build-and-test, prepare-image]
     runs-on: windows-2025-vs2026
     strategy:
