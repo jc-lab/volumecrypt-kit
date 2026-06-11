@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Windows device I/O control (IOCTL) code construction.
 //!
 //! Single source of truth for the `CTL_CODE` arithmetic shared across the kernel

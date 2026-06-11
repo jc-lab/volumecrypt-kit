@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! `EFI_BLOCK_IO_PROTOCOL` hooking (`ReadBlocks`).
 //!
 //! Saves the original `ReadBlocks` function pointer, patches the protocol

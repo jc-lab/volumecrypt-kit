@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! `EFI_BLOCK_IO2_PROTOCOL` hooking (`ReadBlocksEx`).
 //!
 //! Mirrors [`block_io`](crate::hook::block_io) but for the asynchronous

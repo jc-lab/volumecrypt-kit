@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Kernel `SectorIo` implementation backed by a volume file handle.
 //!
 //! Used by the JVCK store to read/write footer (and header) metadata replicas

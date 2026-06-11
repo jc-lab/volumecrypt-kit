@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Per-volume IO + sweep thread.
 //!
 //! Each cipher-bound filter device owns one `VolumeThread`. A single PASSIVE_LEVEL

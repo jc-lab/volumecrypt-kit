@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Common types, errors, JVCK metadata format, and ACPI handover helpers
 //! shared across the kernel driver, the UEFI loader, and host tooling.
 //!

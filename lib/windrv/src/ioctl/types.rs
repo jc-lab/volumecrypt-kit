@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! msgpack request/response structs. Field names + tags MUST match `sdk/types.go`.
 //!
 //! `state` is wired as an integer (see Go `EncryptionState`): 0=Idle,

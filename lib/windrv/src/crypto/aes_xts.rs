@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! AES-XTS kernel cipher: a thin wrapper over the shared
 //! [`vck_common::XtsVolumeCipher`] so the driver and the UEFI loader use an
 //! identical tweak convention (data-region-relative sector; see that module).

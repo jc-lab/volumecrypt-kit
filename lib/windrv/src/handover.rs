@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Driver-side loader handover reader (UEFI runtime variable).
 //!
 //! The UEFI loader publishes the handover payload as a UEFI runtime variable

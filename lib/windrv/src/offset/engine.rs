@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! `EncryptionEngine`: decides per-sector crypto behaviour and drives the
 //! background encrypt/decrypt sweep, persisting progress via the store.
 

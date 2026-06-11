@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Supplemental kernel routines not exported by wdk-sys.
 //!
 //! These are inline/macro functions from ntddk.h that bindgen does not emit.

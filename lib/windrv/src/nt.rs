@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Small shared helpers around the raw WDK/NT bindings: `UNICODE_STRING`
 //! construction, `NTSTATUS` checking, and common status constants.
 

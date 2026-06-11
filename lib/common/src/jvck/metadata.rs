@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! JVCK Metadata block (fixed 512 bytes) parsing/encoding and key derivation.
 //!
 //! All integers are little-endian. The `Header CRC32` covers offsets 0..=507.

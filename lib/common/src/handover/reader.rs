@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{
     handover::{payload::HandoverPayload, writer::ACPI_HANDOVER_FIXED_SIZE},
     VckError, VckResult,

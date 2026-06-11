@@ -1,3 +1,8 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+// SPDX-FileCopyrightText: 2026, 2026 Copyright (c) JC-Lab All rights reserved
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Sample `VolumeProvider` + IOCTL authorization policy.
 
 use alloc::sync::Arc;

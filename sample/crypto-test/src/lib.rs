@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! `vck-crypto-test-driver`: an in-kernel self-test driver (builds to a `.sys`).
 //!
 //! Loaded by test-foundry in the VM to validate that the JVCK crypto primitives

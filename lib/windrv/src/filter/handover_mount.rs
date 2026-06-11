@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Boot-time OS-volume auto-attach (ACPI handover path).
 //!
 //! boot flow: the filter is attached unbound at `AddDevice`, and the actual

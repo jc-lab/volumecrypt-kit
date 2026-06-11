@@ -1,28 +1,4 @@
 #!/usr/bin/env bash
-# Copyright 2026 JC-Lab
-# SPDX-License-Identifier: GPL-2.0-only
-
-#
-# vagrant-extract-qcow2.sh
-#
-# Vagrant box에서 qcow2 이미지를 추출하는 헬퍼 스크립트.
-# libvirt provider가 있으면 직접 qcow2를 복사하고,
-# 없으면 virtualbox provider에서 VMDK를 다운로드 후 qemu-img로 변환한다.
-# Go 코드에 포함되지 않는 독립 스크립트.
-#
-# Usage:
-#   ./scripts/vagrant-extract-qcow2.sh <box-name> [version] [output-dir]
-#
-# Example:
-#   ./scripts/vagrant-extract-qcow2.sh peru/windows-11-enterprise-x64-eval                       # latest, libvirt
-#   ./scripts/vagrant-extract-qcow2.sh gusztavvargadr/windows-11 2601.0.0 ./images/              # specific version
-#   ./scripts/vagrant-extract-qcow2.sh peru/windows-11-enterprise-x64-eval 20241210.1.0 ./images/
-#
-# Prerequisites:
-#   - vagrant (>= 2.0)
-#   - python3 (for metadata.json parsing)
-#   - qemu-img (for non-qcow2 disk conversion)
-#
 
 set -euo pipefail
 

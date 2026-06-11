@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::{VckError, VckResult};
 
 /// Minimum size of a single replica region (Metadata block + vendor data).

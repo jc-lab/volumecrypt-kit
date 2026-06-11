@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Volume filter device attach/detach.
 //!
 //! Creates an unnamed filter device object and attaches it to a volume's

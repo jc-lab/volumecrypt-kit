@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! `vck-sample-driver`: the JVCK sample kernel driver (builds to a `.sys`).
 //!
 //! Wires the sample `VckVolumeProvider` into the `vck-driver` framework.

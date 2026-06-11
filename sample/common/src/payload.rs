@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! UEFI loader -> driver handover payload for the JVCK sample.
 //!
 //! Because JVCK metadata lives in the volume footer, the handover carries only

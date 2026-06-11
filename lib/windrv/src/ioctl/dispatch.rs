@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! IRP_MJ_DEVICE_CONTROL handler. Authorizes, then routes by IOCTL code.
 //!
 //! GET_PROGRESS is non-blocking: it returns the current snapshot immediately.

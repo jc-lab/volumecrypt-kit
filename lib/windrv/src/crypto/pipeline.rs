@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Sector-wise AES-XTS read/write pipeline.
 //!
 //! Operates in **data-region-relative** sector space: the caller (filter/engine)

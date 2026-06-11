@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! `vck-sample-loader` — sample UEFI loader built on `vck-loader`.
 //!
 //! Implements [`VckLoaderProvider`] and runs the lib/loader driver routine:

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! `vck-loader` — UEFI loader framework for volumecrypt-kit.
 //!
 //! This crate provides the loader-side mechanisms described in `ARCH.md`

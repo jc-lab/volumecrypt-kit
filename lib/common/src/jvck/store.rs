@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Volume-backed JVCK metadata store implementing `EncryptedOffsetStore`.
 //!
 //! Works for both OS and data volumes by reading/writing the header/footer

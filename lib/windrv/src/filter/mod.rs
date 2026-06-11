@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Volume filter: attach/detach above a target volume stack, per-volume
 //! context, and IRP interception (size-query rewrite + read/write offset shift).
 

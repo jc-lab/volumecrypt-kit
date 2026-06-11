@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Filter IRP helpers.
 //!
 //! For now read/write are forwarded unchanged (transparent pass-through). The

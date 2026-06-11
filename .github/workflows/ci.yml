@@ -1,21 +1,7 @@
 # Copyright 2026 JC-Lab
+# SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+#
 # SPDX-License-Identifier: Apache-2.0
-#
-# Self-hosted runner requirements  windows-2025-vs2026:
-#   - WEDK at G:\BuildEnv\SetupBuildEnv.cmd
-#   - msys2 at C:\msys64  (setup-msys2 action reuses the existing install)
-#   - QEMU + test-foundry.exe reachable via /d/programs on PATH
-#
-# For the three VM test jobs to run CONCURRENTLY, register ≥3 runner
-# instances on the same machine with the same label:
-#   ./config.cmd --url <repo> --token <token> --name vck-runner-N --labels "self-hosted,windows,vck"
-#
-# VM image cache:
-#   The Windows 11 qcow2 (~5-7 GB) is downloaded once on ubuntu-latest via
-#   vagrant and stored in GitHub Actions cache.  Subsequent runs restore from
-#   cache instantly.  GitHub cache limit is 10 GB per entry; if the image is
-#   larger the prepare-image job will fail — in that case switch to an
-#   external store (S3 / GitHub Releases) and adjust the restore step.
 
 name: CI
 

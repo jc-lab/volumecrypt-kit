@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Minimal kernel-only async executor.
 //!
 //! The Windows kernel cannot host a std async runtime. Futures are polled from

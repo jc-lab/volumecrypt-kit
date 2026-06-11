@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Minimal loader debug output to the QEMU ISA debug console (port 0xE9).
 //!
 //! The driver writes its diagnostics to port 0xE9 (`lib/windrv/src/debug.rs`),

@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Block IO hooking engine.
 //!
 //! See ARCH.md "Block IO 후킹 메커니즘". The engine:

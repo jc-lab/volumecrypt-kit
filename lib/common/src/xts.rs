@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
 //! Shared AES-256-XTS volume sector cipher used by both the kernel driver and
 //! the UEFI loader, so their on-disk crypto agrees by construction.
 //!
