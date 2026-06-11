@@ -32,8 +32,8 @@ use alloc::vec::Vec;
 use serde::Serialize;
 
 use super::types::{
-    JvckVolumeAttachReq, JvckVolumeAttachResp, JvckVolumePrepareReq, JvckVolumePrepareResp,
-    ProgressEvent, VolumeRequest, VolumeStatus,
+    BenchAesReq, BenchAesResp, JvckVolumeAttachReq, JvckVolumeAttachResp,
+    JvckVolumePrepareReq, JvckVolumePrepareResp, ProgressEvent, VolumeRequest, VolumeStatus,
 };
 pub type IoctlResponse = Vec<u8>;
 
@@ -63,6 +63,7 @@ pub fn dispatch_ioctl<A: IoctlAuthorization>(
         IOCTL_VCK_DETACH => handle_detach(registry, input),
         IOCTL_VCK_PAUSE_OS_VOLUME => handle_pause_os_volume(registry),
         IOCTL_VCK_DETACH_ALL_VOLUMES => handle_detach_all_volumes(registry),
+        IOCTL_VCK_BENCH_AES => handle_bench_aes(input),
         _ => Err(VckError::Unsupported("unknown IOCTL code")),
     }
 }
@@ -1147,6 +1148,92 @@ fn handle_detach_all_volumes(registry: &VolumeAttachRegistry) -> VckResult<Ioctl
         }
     }
     Ok(Vec::new())
+}
+
+/// `IOCTL_VCK_BENCH_AES` — measure AES-256-XTS encrypt and decrypt throughput
+/// inside the kernel. Allocates a 1 MiB NonPagedPool scratch buffer, processes
+/// the requested number of bytes (default 1 GiB) in sector-sized chunks, and
+/// returns MiB/s for each direction. No volume is required.
+///
+/// The benchmark uses an all-zero key pair (not security-sensitive; purely for
+/// measuring raw cipher throughput).
+fn handle_bench_aes(input: &[u8]) -> VckResult<IoctlResponse> {
+    use wdk_sys::{
+        ntddk::{ExAllocatePool2, ExFreePool},
+        LARGE_INTEGER,
+    };
+    use crate::ntddk_ex::KeQueryPerformanceCounter;
+
+    const DEFAULT_BYTES: u64 = 1u64 << 30; // 1 GiB
+    const CHUNK_BYTES: usize = 1 << 20;     // 1 MiB scratch buffer
+    const SECTOR_SIZE: usize = 512;
+    const SECTORS_PER_CHUNK: usize = CHUNK_BYTES / SECTOR_SIZE;
+    const POOL_FLAG_NON_PAGED: u64 = 0x0000_0000_0000_0040;
+    const POOL_TAG: u32 = u32::from_le_bytes(*b"VCKI");
+
+    let req: BenchAesReq = decode_req(input)?;
+    let size_bytes = if req.size_bytes == 0 { DEFAULT_BYTES } else { req.size_bytes };
+
+    let cipher = AesXtsCipher::new([0u8; 32], [0u8; 32])
+        .map_err(|_| VckError::CryptoFailed("bench cipher init"))?;
+
+    let buf =
+        unsafe { ExAllocatePool2(POOL_FLAG_NON_PAGED, CHUNK_BYTES as u64, POOL_TAG) as *mut u8 };
+    if buf.is_null() {
+        return Err(VckError::Io("bench: NonPagedPool alloc failed".into()));
+    }
+    unsafe { core::ptr::write_bytes(buf, 0u8, CHUNK_BYTES) };
+
+    let chunks = ((size_bytes as usize + CHUNK_BYTES - 1) / CHUNK_BYTES) as u64;
+    let actual_bytes = chunks * CHUNK_BYTES as u64;
+    let actual_mib = actual_bytes / (1024 * 1024);
+
+    let mut freq = LARGE_INTEGER { QuadPart: 1i64 };
+
+    // --- Encrypt pass ---
+    let enc_start = unsafe { KeQueryPerformanceCounter(&mut freq) };
+    for ci in 0u64..chunks {
+        let base_sector = ci * SECTORS_PER_CHUNK as u64;
+        let slice = unsafe { core::slice::from_raw_parts_mut(buf, CHUNK_BYTES) };
+        for s in 0..SECTORS_PER_CHUNK {
+            cipher.encrypt_sector(base_sector + s as u64, &mut slice[s * SECTOR_SIZE..(s + 1) * SECTOR_SIZE]);
+        }
+    }
+    let enc_end = unsafe { KeQueryPerformanceCounter(core::ptr::null_mut()) };
+
+    // --- Decrypt pass ---
+    let dec_start = unsafe { KeQueryPerformanceCounter(core::ptr::null_mut()) };
+    for ci in 0u64..chunks {
+        let base_sector = ci * SECTORS_PER_CHUNK as u64;
+        let slice = unsafe { core::slice::from_raw_parts_mut(buf, CHUNK_BYTES) };
+        for s in 0..SECTORS_PER_CHUNK {
+            cipher.decrypt_sector(base_sector + s as u64, &mut slice[s * SECTOR_SIZE..(s + 1) * SECTOR_SIZE]);
+        }
+    }
+    let dec_end = unsafe { KeQueryPerformanceCounter(core::ptr::null_mut()) };
+
+    unsafe { ExFreePool(buf as *mut _) };
+
+    // All values are positive: freq > 0, end >= start.
+    let freq_val = unsafe { freq.QuadPart } as u64;
+    let enc_ticks = unsafe { enc_end.QuadPart - enc_start.QuadPart } as u64;
+    let dec_ticks = unsafe { dec_end.QuadPart - dec_start.QuadPart } as u64;
+
+    let encrypt_mib_s = if enc_ticks == 0 { 0 } else { actual_mib * freq_val / enc_ticks };
+    let decrypt_mib_s = if dec_ticks == 0 { 0 } else { actual_mib * freq_val / dec_ticks };
+
+    crate::driver_println!(
+        "bench_aes: size={}MiB enc={}MiB/s dec={}MiB/s",
+        actual_mib,
+        encrypt_mib_s,
+        decrypt_mib_s,
+    );
+
+    encode_resp(&BenchAesResp {
+        size_bytes: actual_bytes,
+        encrypt_mib_s,
+        decrypt_mib_s,
+    })
 }
 
 fn decode_req<T>(input: &[u8]) -> VckResult<T>

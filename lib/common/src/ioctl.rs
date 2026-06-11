@@ -107,6 +107,9 @@ mod tests {
         assert_eq!(ctl_code(dt, 0x807, m, w), 0x0022_a01c); // JVCK_PREPARE
         assert_eq!(ctl_code(dt, 0x808, m, w), 0x0022_a020); // PAUSE_OS_VOLUME
         assert_eq!(ctl_code(dt, 0x809, m, w), 0x0022_a024); // DETACH_ALL_VOLUMES
+
+        // Benchmark (FILE_READ_ACCESS — no state mutation).
+        assert_eq!(ctl_code(dt, 0x80a, m, r), 0x0022_6028); // BENCH_AES
     }
 
     #[test]

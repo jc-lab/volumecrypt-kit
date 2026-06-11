@@ -11,8 +11,41 @@ use core::sync::atomic::{AtomicPtr, Ordering};
 
 use wdk_sys::{
     ntddk::MmMapLockedPagesSpecifyCache,
-    DRIVER_CANCEL, PIO_STACK_LOCATION, PIRP, PMDL,
+    DRIVER_CANCEL, LARGE_INTEGER, PIO_STACK_LOCATION, PIRP, PMDL,
 };
+
+extern "C" {
+    /// Query the performance counter. When `performance_frequency` is non-null
+    /// the counter frequency (ticks/second) is written there. Callable at any IRQL.
+    pub fn KeQueryPerformanceCounter(
+        performance_frequency: *mut LARGE_INTEGER,
+    ) -> LARGE_INTEGER;
+}
+
+/// Read the system clock as a Windows FILETIME (100-ns ticks since 1601-01-01).
+///
+/// On AMD64, `KeQuerySystemTime` is a FORCEINLINE in wdm.h that reads
+/// `KUSER_SHARED_DATA.SystemTime` via a seqlock — it is NOT exported from
+/// ntoskrnl.lib. We replicate the same logic here.
+///
+/// `KUSER_SHARED_DATA` is mapped at a fixed virtual address (`0xFFFFF78000000000`)
+/// in every 64-bit Windows process and kernel context. `SystemTime` (a
+/// `KSYSTEM_TIME { LowPart: u32, High1Time: i32, High2Time: i32 }`) lives at
+/// offset `0x14` from that base.
+#[allow(non_snake_case)]
+pub fn KeQuerySystemTime() -> u64 {
+    // KUSER_SHARED_DATA base + offsetof(SystemTime) = 0xFFFFF78000000000 + 0x14
+    const SYSTEM_TIME_PTR: *const u32 = 0xFFFF_F780_0000_0014usize as *const u32;
+    // KSYSTEM_TIME layout: [0] LowPart, [1] High1Time, [2] High2Time (each 4 bytes)
+    loop {
+        let h1 = unsafe { SYSTEM_TIME_PTR.add(1).read_volatile() } as u64;
+        let lo = unsafe { SYSTEM_TIME_PTR.add(0).read_volatile() } as u64;
+        let h2 = unsafe { SYSTEM_TIME_PTR.add(2).read_volatile() } as u64;
+        if h1 == h2 {
+            return (h1 << 32) | lo;
+        }
+    }
+}
 
 // MDL flag bits (from wdm.h).
 const MDL_MAPPED_TO_SYSTEM_VA: i16 = 0x0001;

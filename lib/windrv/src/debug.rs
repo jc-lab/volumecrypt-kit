@@ -13,8 +13,22 @@ use wdk_sys::ntddk::DbgPrint;
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 const DEBUGCON_PORT: u16 = 0x00e9;
 
+// 100-ns intervals between the Windows epoch (1601-01-01) and the Unix epoch (1970-01-01).
+const FILETIME_EPOCH_DIFF: u64 = 116_444_736_000_000_000;
+
+/// Returns `(unix_seconds, milliseconds)` from the system clock.
+fn get_timestamp() -> (u64, u32) {
+    use crate::ntddk_ex::KeQuerySystemTime;
+    let unix_100ns = KeQuerySystemTime().saturating_sub(FILETIME_EPOCH_DIFF);
+    let secs = unix_100ns / 10_000_000;
+    let millis = ((unix_100ns % 10_000_000) / 10_000) as u32;
+    (secs, millis)
+}
+
 pub fn debug_print(args: fmt::Arguments<'_>) {
+    let (secs, millis) = get_timestamp();
     let mut line = String::new();
+    let _ = write!(&mut line, "{secs}.{millis:03} ");
     if line.write_fmt(args).is_err() {
         return;
     }
@@ -58,7 +72,8 @@ pub fn remaining_stack() -> u64 {
 
 pub fn panic_print(info: &PanicInfo<'_>) -> ! {
     let mut writer = PanicWriter::new();
-    let _ = writer.write_str("panic: ");
+    let (secs, millis) = get_timestamp();
+    let _ = write!(&mut writer, "{secs}.{millis:03} panic: ");
     if let Some(location) = info.location() {
         let _ = write!(
             &mut writer,
@@ -165,9 +180,6 @@ macro_rules! driver_print {
 
 #[macro_export]
 macro_rules! driver_println {
-    () => {
-        $crate::debug::debug_print(core::format_args!(""))
-    };
     ($($arg:tt)*) => {
         $crate::debug::debug_print(core::format_args!($($arg)*))
     };

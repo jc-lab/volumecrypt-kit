@@ -105,3 +105,13 @@ func (c *Client) Pause(volumePath string) error {
 	)
 	return err
 }
+
+// BenchAes runs the in-kernel AES-256-XTS benchmark and returns encrypt and
+// decrypt throughput in MiB/s. sizeBytes is the number of bytes to process per
+// direction; pass 0 to use the default (1 GiB).
+func (c *Client) BenchAes(sizeBytes uint64) (*BenchAesResponse, error) {
+	return deviceControl[BenchAesRequest, BenchAesResponse](
+		c.handle, ioctlBenchAes,
+		&BenchAesRequest{SizeBytes: sizeBytes},
+	)
+}

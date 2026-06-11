@@ -15,16 +15,10 @@
 ## 3. 환경
 
 - msys64 가 `c:\msys64` 에 설치되어 있습니다. 이를 기본 쉘로 사용하세요.
-- `export PATH=/d/programs:$PATH` 가 필요합니다.
-- WEDK 는 `G:\` 에 마운트 되어 있습니다. 다음을 참고하세요:
+- WEDK 는 `G:\` 에 마운트 되어 있습니다. 다른 명령 실행 전 `call G:\\BuildEnv\\SetupBuildEnv.cmd` 가 필요합니다.
+- `export PATH=/d/programs:/c/Program Files/qemu:/c/Users/User/.cargo/bin:/c/Program Files/Go/bin:$PATH` 가 필요합니다.
+- 환경에 대한 정보를 Makefile 에 작성하지 말고, 실행 때 이를 활용하세요.
 
-```
-invoke_driver_build() {
-  pushd "$src_dir"X
-  MSYS2_ARG_CONV_EXCL="/c" cmd.exe /c 'call G:\BuildEnv\SetupBuildEnv.cmd && cargo build -p ... --target x86_64-pc-windows-msvc'
-  popd
-}
-```
 
 ## 4. 테스트
 

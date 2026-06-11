@@ -53,6 +53,11 @@ pub const IOCTL_VCK_PAUSE_OS_VOLUME: u32 =
 /// Driver-internal; sent on shutdown/unload. Function = 0x809.
 pub const IOCTL_VCK_DETACH_ALL_VOLUMES: u32 =
     ctl_code(FILE_DEVICE_VCK, 0x809, METHOD_BUFFERED, FILE_WRITE_ACCESS);
+/// In-kernel AES-XTS throughput benchmark. Allocates a NonPagedPool buffer,
+/// encrypts then decrypts the requested byte count, returns MiB/s for each
+/// direction. Function = 0x80a.
+pub const IOCTL_VCK_BENCH_AES: u32 =
+    ctl_code(FILE_DEVICE_VCK, 0x80a, METHOD_BUFFERED, FILE_READ_ACCESS);
 
 // Compile-time hex pinning. Any drift (wrong function/access) fails the build.
 // These values are mirrored verbatim in `sdk/ioctl.go`.
@@ -66,3 +71,4 @@ const _: () = assert!(IOCTL_VCK_DETACH == 0x0022_a018);
 const _: () = assert!(IOCTL_JVCK_PREPARE == 0x0022_a01c);
 const _: () = assert!(IOCTL_VCK_PAUSE_OS_VOLUME == 0x0022_a020);
 const _: () = assert!(IOCTL_VCK_DETACH_ALL_VOLUMES == 0x0022_a024);
+const _: () = assert!(IOCTL_VCK_BENCH_AES == 0x0022_6028);

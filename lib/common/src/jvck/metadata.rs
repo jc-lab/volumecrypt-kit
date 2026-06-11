@@ -10,10 +10,13 @@
 use aes::Aes256;
 use cbc::{Decryptor, Encryptor};
 use cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use crc::{Crc, CRC_32_ISO_HDLC};
 use hkdf::Hkdf;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
+
+const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
 use crate::{types::Guid, VckError, VckResult};
 
@@ -199,9 +202,8 @@ impl JvckHeader {
             out[OFF_HMAC..OFF_HMAC + HMAC_SIZE].copy_from_slice(&tag);
 
             // Header CRC32 over [0, 508).
-            let mut hasher = crc32fast::Hasher::new();
-            hasher.update(&out[0..CRC_COVERAGE_END]);
-            out[OFF_CRC32..OFF_CRC32 + 4].copy_from_slice(&hasher.finalize().to_le_bytes());
+            let crc = CRC32.checksum(&out[0..CRC_COVERAGE_END]);
+            out[OFF_CRC32..OFF_CRC32 + 4].copy_from_slice(&crc.to_le_bytes());
             Ok(())
         })();
         plain.zeroize();
@@ -226,9 +228,7 @@ pub fn verify_crc(block: &[u8]) -> VckResult<()> {
         return Err(VckError::SignatureMismatch);
     }
     let stored = le_u32(block, OFF_CRC32);
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&block[0..CRC_COVERAGE_END]);
-    if hasher.finalize() != stored {
+    if CRC32.checksum(&block[0..CRC_COVERAGE_END]) != stored {
         return Err(VckError::ChecksumMismatch);
     }
     Ok(())

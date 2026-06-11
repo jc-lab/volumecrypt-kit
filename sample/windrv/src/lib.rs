@@ -22,7 +22,7 @@ use wdk_alloc::WdkAllocator;
 use wdk_sys::{
     ntddk::{
         IoBuildDeviceIoControlRequest, IoGetRequestorProcess, IofCallDriver, IofCompleteRequest,
-        KeInitializeEvent, KeWaitForSingleObject,
+        KeInitializeEvent, KeWaitForSingleObject, KeExpandKernelStackAndCallout,
     },
     CCHAR, DRIVER_OBJECT, IO_NO_INCREMENT, IO_STATUS_BLOCK, IRP_MJ_CLEANUP, IRP_MJ_CLOSE,
     IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, IRP_MJ_SHUTDOWN, KEVENT, NTSTATUS, PDEVICE_OBJECT,
@@ -56,14 +56,6 @@ const STATUS_PENDING: NTSTATUS = 0x0000_0103;
 // The metadata/crypto path uses a large stack frame; run IOCTL dispatch on an
 // expanded kernel stack so the (deep) storage stack below us has headroom.
 const DISPATCH_STACK_SIZE: usize = 0x8000; // 32 KiB
-
-extern "system" {
-    fn KeExpandKernelStackAndCallout(
-        callout: Option<unsafe extern "C" fn(*mut c_void)>,
-        parameter: *mut c_void,
-        size: usize,
-    ) -> NTSTATUS;
-}
 
 /// Context passed to the expanded-stack dispatch callout.
 struct ExpandCtx {

@@ -34,6 +34,9 @@ const (
 	// IOCTL value space in sync with lib/windrv/src/ioctl/codes.rs.
 	ioctlPauseOsVolume    = 0x0022_a020 // pause OS volume sweep (waits for in-flight batch)
 	ioctlDetachAllVolumes = 0x0022_a024 // detach all data volumes
+
+	// Benchmark (FILE_READ_ACCESS — does not mutate driver state).
+	ioctlBenchAes = 0x0022_6028 // in-kernel AES-XTS encrypt+decrypt throughput
 )
 
 // deviceControl wraps DeviceIoControl with msgpack serialization.

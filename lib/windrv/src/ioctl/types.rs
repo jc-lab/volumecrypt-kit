@@ -148,3 +148,22 @@ pub struct ProgressEvent {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
 }
+
+/// IOCTL_VCK_BENCH_AES request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchAesReq {
+    /// Total bytes to process per direction. 0 means use the default (1 GiB).
+    #[serde(default)]
+    pub size_bytes: u64,
+}
+
+/// IOCTL_VCK_BENCH_AES response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BenchAesResp {
+    /// Actual bytes processed in each direction (rounded up to chunk boundary).
+    pub size_bytes: u64,
+    /// AES-256-XTS encryption throughput in MiB/s.
+    pub encrypt_mib_s: u64,
+    /// AES-256-XTS decryption throughput in MiB/s.
+    pub decrypt_mib_s: u64,
+}

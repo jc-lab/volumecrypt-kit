@@ -169,3 +169,21 @@ func (e *ProgressEvent) ProgressPercent() float64 {
 	}
 	return float64(e.EncryptedSector) / float64(e.TotalSectors) * 100
 }
+
+// ─── AES-XTS benchmark ───────────────────────────────────────────────────────
+
+// BenchAesRequest is the IOCTL_VCK_BENCH_AES request structure.
+// SizeBytes is the number of bytes to process per direction; 0 means 1 GiB.
+type BenchAesRequest struct {
+	SizeBytes uint64 `msgpack:"size_bytes"`
+}
+
+// BenchAesResponse is the IOCTL_VCK_BENCH_AES response structure.
+type BenchAesResponse struct {
+	// Actual bytes processed (rounded up to the internal 1 MiB chunk boundary).
+	SizeBytes uint64 `msgpack:"size_bytes"`
+	// AES-256-XTS encryption throughput in MiB/s.
+	EncryptMiBs uint64 `msgpack:"encrypt_mib_s"`
+	// AES-256-XTS decryption throughput in MiB/s.
+	DecryptMiBs uint64 `msgpack:"decrypt_mib_s"`
+}
