@@ -110,6 +110,9 @@ mod tests {
 
         // Benchmark (FILE_READ_ACCESS — no state mutation).
         assert_eq!(ctl_code(dt, 0x80a, m, r), 0x0022_6028); // BENCH_AES
+
+        // List attached volumes (read-only).
+        assert_eq!(ctl_code(dt, 0x80b, m, r), 0x0022_602c); // LIST_VOLUMES
     }
 
     #[test]

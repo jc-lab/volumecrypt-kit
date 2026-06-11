@@ -29,6 +29,34 @@ type VolumeStatus struct {
 	FilterBelowFsd bool `msgpack:"filter_below_fsd"`
 }
 
+// VolumeListEntry is one attached volume in the IOCTL_VCK_LIST_VOLUMES response.
+type VolumeListEntry struct {
+	// VolumePath is the driver registry key — the NT device path
+	// (e.g. \Device\HarddiskVolume4).
+	VolumePath      string          `msgpack:"volume_path"`
+	State           EncryptionState `msgpack:"state"`
+	EncryptedSector uint64          `msgpack:"encrypted_sector"`
+	TotalSectors    uint64          `msgpack:"total_sectors"`
+	SectorSize      uint32          `msgpack:"sector_size"`
+	// IsOsVolume is true for the OS (handover) volume, false for data volumes.
+	IsOsVolume bool `msgpack:"is_os_volume"`
+}
+
+// ProgressPercent returns the encryption progress as a percentage.
+func (e *VolumeListEntry) ProgressPercent() float64 {
+	if e.TotalSectors == 0 {
+		return 0
+	}
+	return float64(e.EncryptedSector) / float64(e.TotalSectors) * 100
+}
+
+// VolumeListResponse is the IOCTL_VCK_LIST_VOLUMES response: every volume
+// currently attached to the driver. An empty Volumes slice still confirms the
+// driver is reachable.
+type VolumeListResponse struct {
+	Volumes []VolumeListEntry `msgpack:"volumes"`
+}
+
 // ProgressPercent returns the encryption progress as a percentage.
 func (s *VolumeStatus) ProgressPercent() float64 {
 	if s.TotalSectors == 0 {

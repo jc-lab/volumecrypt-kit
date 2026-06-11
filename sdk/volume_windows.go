@@ -628,6 +628,21 @@ func VolumeNTDevicePath(volumePath string) (string, error) {
 	return windows.UTF16ToString(buf[:n]), nil
 }
 
+// toNTPath normalizes any accepted volume path to its NT kernel device path
+// (e.g. `\Device\HarddiskVolumeN`), which is the form every IOCTL sends as
+// `volume_path`. The driver keys the registry by this NT name — it is the same
+// name the handover-reattached OS volume binds under — so a query by NT path
+// resolves both freshly-prepared and post-reboot volumes, whereas a Win32 GUID
+// path misses after handover. Paths already in NT form pass through unchanged.
+func toNTPath(volumePath string) (string, error) {
+	if strings.HasPrefix(volumePath, `\Device\`) ||
+		strings.HasPrefix(volumePath, `\??\`) ||
+		strings.HasPrefix(volumePath, `\DosDevices\`) {
+		return volumePath, nil
+	}
+	return VolumeNTDevicePath(volumePath)
+}
+
 // LockDismountVolume locks the volume for exclusive access and dismounts the
 // file system (e.g. NTFS), causing it to detach from the device stack. The
 // caller MUST call UnlockVolume with the returned handle to re-allow mounting.

@@ -19,10 +19,18 @@ func (c *Client) WatchProgress(
 	evCh := make(chan ProgressEvent, 16)
 	errCh := make(chan error, 1)
 
+	ntPath, err := toNTPath(volumePath)
+	if err != nil {
+		errCh <- err
+		close(evCh)
+		close(errCh)
+		return evCh, errCh
+	}
+
 	go func() {
 		defer close(evCh)
 		defer close(errCh)
-		req := &volumeRequest{VolumePath: volumePath}
+		req := &volumeRequest{VolumePath: ntPath}
 		for {
 			select {
 			case <-ctx.Done():

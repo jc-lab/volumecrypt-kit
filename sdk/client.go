@@ -43,8 +43,14 @@ func (c *Client) Close() error {
 // is invisible to NTFS. The app must call EnsureJvckMetadata after Prepare and
 // before Attach.
 func (c *Client) Prepare(req *JvckVolumePrepareRequest) (*JvckVolumePrepareResponse, error) {
+	r := *req
+	nt, err := toNTPath(r.VolumePath)
+	if err != nil {
+		return nil, err
+	}
+	r.VolumePath = nt
 	return deviceControl[JvckVolumePrepareRequest, JvckVolumePrepareResponse](
-		c.handle, ioctlJvckPrepare, req,
+		c.handle, ioctlJvckPrepare, &r,
 	)
 }
 
@@ -55,17 +61,27 @@ func (c *Client) Prepare(req *JvckVolumePrepareRequest) (*JvckVolumePrepareRespo
 // EncryptedOffsetStore implementation, while the common IOCTLs exposed by this
 // SDK can be reused as-is.)
 func (c *Client) Attach(req *JvckVolumeAttachRequest) (*JvckVolumeAttachResponse, error) {
+	r := *req
+	nt, err := toNTPath(r.VolumePath)
+	if err != nil {
+		return nil, err
+	}
+	r.VolumePath = nt
 	return deviceControl[JvckVolumeAttachRequest, JvckVolumeAttachResponse](
-		c.handle, ioctlJvckAttach, req,
+		c.handle, ioctlJvckAttach, &r,
 	)
 }
 
 // Detach releases the encryption layer of a Data Volume.
 // Call it when the volume is unmounted or needs to be locked.
 func (c *Client) Detach(volumePath string) error {
-	_, err := deviceControl[VolumeDetachRequest, struct{}](
+	nt, err := toNTPath(volumePath)
+	if err != nil {
+		return err
+	}
+	_, err = deviceControl[VolumeDetachRequest, struct{}](
 		c.handle, ioctlDetach,
-		&VolumeDetachRequest{VolumePath: volumePath},
+		&VolumeDetachRequest{VolumePath: nt},
 	)
 	return err
 }
@@ -74,34 +90,64 @@ func (c *Client) Detach(volumePath string) error {
 
 // GetStatus queries the current encryption state of the volume.
 func (c *Client) GetStatus(volumePath string) (*VolumeStatus, error) {
+	nt, err := toNTPath(volumePath)
+	if err != nil {
+		return nil, err
+	}
 	return deviceControl[volumeRequest, VolumeStatus](
 		c.handle, ioctlGetStatus,
-		&volumeRequest{VolumePath: volumePath},
+		&volumeRequest{VolumePath: nt},
+	)
+}
+
+// ListVolumes returns every volume currently attached to the driver. It takes no
+// volume path, so it doubles as a driver-connection check: a successful call
+// (even with an empty list) confirms the device is reachable. Use this instead
+// of GetStatus when no specific --volume is given.
+func (c *Client) ListVolumes() (*VolumeListResponse, error) {
+	return deviceControl[struct{}, VolumeListResponse](
+		c.handle, ioctlListVolumes, &struct{}{},
 	)
 }
 
 // StartEncrypt starts incremental encryption of an attached volume.
 // Keys are already set at Attach time (or via ACPI handover for an OS Volume).
 func (c *Client) StartEncrypt(req *EncryptRequest) error {
-	_, err := deviceControl[EncryptRequest, struct{}](
-		c.handle, ioctlStartEncrypt, req,
+	r := *req
+	nt, err := toNTPath(r.VolumePath)
+	if err != nil {
+		return err
+	}
+	r.VolumePath = nt
+	_, err = deviceControl[EncryptRequest, struct{}](
+		c.handle, ioctlStartEncrypt, &r,
 	)
 	return err
 }
 
 // StartDecrypt starts incremental decryption of an attached volume.
 func (c *Client) StartDecrypt(req *DecryptRequest) error {
-	_, err := deviceControl[DecryptRequest, struct{}](
-		c.handle, ioctlStartDecrypt, req,
+	r := *req
+	nt, err := toNTPath(r.VolumePath)
+	if err != nil {
+		return err
+	}
+	r.VolumePath = nt
+	_, err = deviceControl[DecryptRequest, struct{}](
+		c.handle, ioctlStartDecrypt, &r,
 	)
 	return err
 }
 
 // Pause pauses an in-progress encryption/decryption.
 func (c *Client) Pause(volumePath string) error {
-	_, err := deviceControl[volumeRequest, struct{}](
+	nt, err := toNTPath(volumePath)
+	if err != nil {
+		return err
+	}
+	_, err = deviceControl[volumeRequest, struct{}](
 		c.handle, ioctlPause,
-		&volumeRequest{VolumePath: volumePath},
+		&volumeRequest{VolumePath: nt},
 	)
 	return err
 }

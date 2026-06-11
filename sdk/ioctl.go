@@ -23,6 +23,7 @@ const (
 	// Read-only queries (FILE_READ_ACCESS).
 	ioctlGetStatus   = 0x0022_6000
 	ioctlGetProgress = 0x0022_600c
+	ioctlListVolumes = 0x0022_602c // enumerate attached volumes (no input)
 	// State-mutating commands (FILE_WRITE_ACCESS).
 	ioctlStartEncrypt = 0x0022_a004
 	ioctlStartDecrypt = 0x0022_a008

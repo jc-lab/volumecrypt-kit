@@ -139,6 +139,26 @@ pub struct VolumeStatus {
     pub filter_below_fsd: bool,
 }
 
+/// One attached volume in the IOCTL_VCK_LIST_VOLUMES response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeListEntry {
+    /// Registry key — the NT device path (e.g. `\Device\HarddiskVolume4`).
+    pub volume_path: String,
+    pub state: i32,
+    pub encrypted_sector: u64,
+    pub total_sectors: u64,
+    pub sector_size: u32,
+    /// true for the OS (handover) volume, false for IOCTL-attached data volumes.
+    pub is_os_volume: bool,
+}
+
+/// IOCTL_VCK_LIST_VOLUMES response: every volume currently in the registry.
+/// Takes no input. An empty list still confirms the driver is reachable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeListResponse {
+    pub volumes: Vec<VolumeListEntry>,
+}
+
 /// IOCTL_VCK_GET_PROGRESS response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgressEvent {

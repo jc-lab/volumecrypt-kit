@@ -33,7 +33,8 @@ use serde::Serialize;
 
 use super::types::{
     BenchAesReq, BenchAesResp, JvckVolumeAttachReq, JvckVolumeAttachResp,
-    JvckVolumePrepareReq, JvckVolumePrepareResp, ProgressEvent, VolumeRequest, VolumeStatus,
+    JvckVolumePrepareReq, JvckVolumePrepareResp, ProgressEvent, VolumeListEntry,
+    VolumeListResponse, VolumeRequest, VolumeStatus,
 };
 pub type IoctlResponse = Vec<u8>;
 
@@ -64,6 +65,7 @@ pub fn dispatch_ioctl<A: IoctlAuthorization>(
         IOCTL_VCK_PAUSE_OS_VOLUME => handle_pause_os_volume(registry),
         IOCTL_VCK_DETACH_ALL_VOLUMES => handle_detach_all_volumes(registry),
         IOCTL_VCK_BENCH_AES => handle_bench_aes(input),
+        IOCTL_VCK_LIST_VOLUMES => handle_list_volumes(registry),
         _ => Err(VckError::Unsupported("unknown IOCTL code")),
     }
 }
@@ -129,6 +131,28 @@ fn handle_get_status(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult
             filter_below_fsd,
         })
     }
+}
+
+/// List every attached volume. Takes no input; an empty list still confirms the
+/// driver is reachable (the app uses this to verify the connection without
+/// knowing a specific volume path).
+fn handle_list_volumes(registry: &VolumeAttachRegistry) -> VckResult<IoctlResponse> {
+    let volumes = registry
+        .all()
+        .iter()
+        .map(|v| {
+            let snapshot = v.encryption.lock().snapshot();
+            VolumeListEntry {
+                volume_path: v.volume_path.clone(),
+                state: snapshot.state.as_wire(),
+                encrypted_sector: snapshot.encrypted_sector,
+                total_sectors: snapshot.total_sectors,
+                sector_size: v.sector_size,
+                is_os_volume: v.is_os_volume(),
+            }
+        })
+        .collect();
+    encode_resp(&VolumeListResponse { volumes })
 }
 
 fn handle_start_encrypt(

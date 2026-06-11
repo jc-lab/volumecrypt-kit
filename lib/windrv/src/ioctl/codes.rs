@@ -58,6 +58,12 @@ pub const IOCTL_VCK_DETACH_ALL_VOLUMES: u32 =
 /// direction. Function = 0x80a.
 pub const IOCTL_VCK_BENCH_AES: u32 =
     ctl_code(FILE_DEVICE_VCK, 0x80a, METHOD_BUFFERED, FILE_READ_ACCESS);
+/// List every attached volume (read-only). Takes no input; returns the set of
+/// volumes currently in the registry so the app can verify the driver connection
+/// and enumerate attachments without knowing a specific volume path.
+/// Function = 0x80b.
+pub const IOCTL_VCK_LIST_VOLUMES: u32 =
+    ctl_code(FILE_DEVICE_VCK, 0x80b, METHOD_BUFFERED, FILE_READ_ACCESS);
 
 // Compile-time hex pinning. Any drift (wrong function/access) fails the build.
 // These values are mirrored verbatim in `sdk/ioctl.go`.
@@ -72,3 +78,4 @@ const _: () = assert!(IOCTL_JVCK_PREPARE == 0x0022_a01c);
 const _: () = assert!(IOCTL_VCK_PAUSE_OS_VOLUME == 0x0022_a020);
 const _: () = assert!(IOCTL_VCK_DETACH_ALL_VOLUMES == 0x0022_a024);
 const _: () = assert!(IOCTL_VCK_BENCH_AES == 0x0022_6028);
+const _: () = assert!(IOCTL_VCK_LIST_VOLUMES == 0x0022_602c);
