@@ -57,6 +57,8 @@ pub fn dispatch_ioctl<A: IoctlAuthorization>(
         IOCTL_JVCK_PREPARE => handle_jvck_prepare(registry, input),
         IOCTL_JVCK_ATTACH => handle_jvck_attach(registry, input),
         IOCTL_VCK_DETACH => handle_detach(registry, input),
+        IOCTL_VCK_PAUSE_OS_VOLUME => handle_pause_os_volume(registry),
+        IOCTL_VCK_DETACH_ALL_VOLUMES => handle_detach_all_volumes(registry),
         _ => Err(VckError::Unsupported("unknown IOCTL code")),
     }
 }
@@ -193,6 +195,14 @@ fn handle_jvck_prepare_adddevice_path(
     use crate::crypto::aes_xts::AesXtsCipher;
     use wdk_sys::ntddk::ZwDeviceIoControlFile;
 
+    // OS (system) volumes register as Handover so DETACH_ALL / detach / unload
+    // protections apply — the same volume the boot loader re-attaches.
+    let attach_source = if req.is_os_volume {
+        AttachSource::Handover
+    } else {
+        AttachSource::Ioctl
+    };
+
     // Query geometry (NTFS is mounted, ZwCreateFile works via existing filter pass-through).
     let io_volume_id = VolumeId { partition_guid: Guid::nil(), device_path: nt_path.clone() };
     let geom_io = KernelVolumeIo::open_query(&io_volume_id).map_err(|e| {
@@ -257,7 +267,7 @@ fn handle_jvck_prepare_adddevice_path(
             vck_common::types::EncryptedOffset { sector: 0, total_sectors: data_sectors },
         )),
         offset_store: Arc::new(DummyOffsetStore { total_sectors: data_sectors }),
-        attach_source: AttachSource::Ioctl,
+        attach_source,
         filter_device: AtomicPtr::new(filter_do),
         cipher: None,
         sweep_io: Mutex::new(Arc::new(DummySectorIo { sector_size, total_sectors: data_sectors })),
@@ -336,7 +346,7 @@ fn handle_jvck_prepare_adddevice_path(
             io_config,
             encryption: Mutex::new(EncryptionEngine::new(store_offset, encrypted_offset)),
             offset_store,
-            attach_source: AttachSource::Ioctl,
+            attach_source,
             filter_device: AtomicPtr::new(filter_do),
             cipher: Some(cipher),
             sweep_io: Mutex::new(sweep_io),
@@ -407,10 +417,18 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
     );
     let req: JvckVolumePrepareReq = decode_req(input)?;
     crate::driver_println!(
-        "jvck_prepare: path={} use_h={} use_f={} md_size={} block_len={}",
+        "jvck_prepare: path={} use_h={} use_f={} md_size={} block_len={} is_os={}",
         req.volume_path, req.use_header, req.use_footer, req.metadata_size,
-        req.metadata_block.len()
+        req.metadata_block.len(), req.is_os_volume
     );
+
+    // OS (system) volumes register as Handover so DETACH_ALL / detach / unload
+    // protections apply — the same volume the boot loader re-attaches.
+    let attach_source = if req.is_os_volume {
+        AttachSource::Handover
+    } else {
+        AttachSource::Ioctl
+    };
 
     if registry.get(&req.volume_path).is_some() {
         return Err(VckError::Unsupported("volume already prepared/attached"));
@@ -569,7 +587,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
             vck_common::types::EncryptedOffset { sector: 0, total_sectors: data_sectors },
         )),
         offset_store: Arc::new(DummyOffsetStore { total_sectors: data_sectors }),
-        attach_source: AttachSource::Ioctl,
+        attach_source,
         filter_device: AtomicPtr::new(filter_do),
         cipher: None,
         sweep_io: Mutex::new(Arc::new(DummySectorIo { sector_size, total_sectors: data_sectors })),
@@ -794,7 +812,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
             io_config,
             encryption: Mutex::new(EncryptionEngine::new(store_offset, encrypted_offset)),
             offset_store,
-            attach_source: AttachSource::Ioctl,
+            attach_source,
             filter_device: AtomicPtr::new(filter_do),
             cipher: Some(cipher),
             sweep_io: Mutex::new(sweep_io),
@@ -836,6 +854,10 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         "jvck_attach: path={} vmk_len={}",
         req.volume_path, req.vmk.len()
     );
+
+    // ATTACH (phase 2) is the data-volume re-attach path; OS volumes complete via
+    // PREPARE (fully_attached) instead, so this is always a data volume.
+    let attach_source = AttachSource::Ioctl;
 
     // Find the provisional volume created by PREPARE (has cipher=None).
     let provisional = registry
@@ -957,7 +979,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         io_config,
         encryption: Mutex::new(EncryptionEngine::new(offset_sector, encrypted_offset)),
         offset_store,
-        attach_source: AttachSource::Ioctl,
+        attach_source,
         filter_device: AtomicPtr::new(filter_do),
         cipher: Some(cipher),
         sweep_io: Mutex::new(sweep_io),
@@ -1081,27 +1103,50 @@ fn handle_detach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<Ioc
     encode_resp(&EmptyResponse {})
 }
 
-/// Pause the background sweep on every attached volume. Used at system
-/// shutdown: the encryption boundary stops advancing (so the on-disk ciphertext
-/// region stays consistent with the persisted boundary across the reboot) while
-/// the filters remain BOUND, so live writes during the shutdown sequence are
-/// still encrypted correctly.
+/// `IOCTL_VCK_PAUSE_OS_VOLUME` — pause the OS (handover) volume's background
+/// sweep. The encryption boundary stops advancing (so the on-disk ciphertext
+/// region stays consistent with the persisted boundary across a reboot) while
+/// the filter stays BOUND, so live writes during shutdown remain encrypted.
 ///
-/// We deliberately do NOT detach here: detaching the OS volume filter would let
-/// subsequent shutdown writes reach the lower device as plaintext within the
-/// already-encrypted region, corrupting it on the next boot.
+/// Acquiring the engine lock blocks until any in-flight sweep batch (which holds
+/// that lock for the whole read-encrypt-write-persist batch) finishes, so on
+/// return no batch is running and none will start.
 ///
-/// NOTE: this does not eliminate the hard-crash (power-loss) window where a
-/// sweep batch's ciphertext is written but its boundary not yet persisted — that
-/// requires hotzone journaling (out of scope). It only makes graceful shutdown
-/// stop advancing the boundary deterministically.
-pub fn pause_all_volumes(registry: &VolumeAttachRegistry) {
+/// NOTE: does not eliminate the hard-crash (power-loss) window where a batch's
+/// ciphertext is written but its boundary not yet persisted (needs hotzone
+/// journaling, out of scope). It only makes graceful shutdown deterministic.
+fn handle_pause_os_volume(registry: &VolumeAttachRegistry) -> VckResult<IoctlResponse> {
     for volume in registry.all() {
-        volume.encryption.lock().pause();
+        if volume.is_os_volume() {
+            volume.encryption.lock().pause();
+            crate::driver_println!("pause_os_volume: paused {}", volume.volume_path);
+        }
     }
+    Ok(Vec::new())
 }
 
-/// Detach all attached volumes, used on shutdown/unload.
+/// `IOCTL_VCK_DETACH_ALL_VOLUMES` — detach every DATA (IOCTL-attached) volume.
+/// OS (handover) volumes are intentionally left bound: an encrypted OS volume
+/// must not be detached (detaching its filter would expose ciphertext / let
+/// shutdown writes land as plaintext in the encrypted region).
+fn handle_detach_all_volumes(registry: &VolumeAttachRegistry) -> VckResult<IoctlResponse> {
+    let data_paths: Vec<String> = registry
+        .all()
+        .into_iter()
+        .filter(|v| !v.is_os_volume())
+        .map(|v| v.volume_path.clone())
+        .collect();
+    for path in data_paths {
+        crate::driver_println!("detach_all_data: detaching {}", path);
+        if let Err(e) = detach_volume_with_dismount(registry, &path, true) {
+            crate::driver_println!("detach_all_data: {} failed: {}", path, e);
+        }
+    }
+    Ok(Vec::new())
+}
+
+/// Detach all attached volumes, used on unload cleanup (after data volumes are
+/// gone and any encrypted-OS-volume unload has been refused).
 pub fn detach_all_volumes(registry: &VolumeAttachRegistry) {
     let paths: alloc::vec::Vec<String> = registry.all()
         .into_iter()

@@ -17,6 +17,10 @@ const (
 	ioctlJvckPrepare  = 0x0022_201c // JVCK phase-1: attach filter + hide metadata region
 	ioctlJvckAttach   = 0x0022_2014 // JVCK phase-2: read metadata + complete encryption setup
 	ioctlDetach       = 0x0022_2018 // Data Volume: release encryption layer
+	// Driver-internal (self-sent on shutdown/unload); listed here to keep the
+	// IOCTL value space in sync with lib/driver/src/ioctl/codes.rs.
+	ioctlPauseOsVolume    = 0x0022_2020 // pause OS volume sweep (waits for in-flight batch)
+	ioctlDetachAllVolumes = 0x0022_2024 // detach all data volumes
 )
 
 // deviceControl wraps DeviceIoControl with msgpack serialization.

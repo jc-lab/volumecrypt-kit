@@ -39,6 +39,12 @@ pub struct JvckVolumePrepareReq {
     /// Empty means skip writing (re-attach to an already-prepared volume).
     #[serde(default, with = "serde_bytes")]
     pub metadata_block: Vec<u8>,
+    /// True when this is the OS (system) volume. Such a volume is registered as
+    /// `AttachSource::Handover` so it is protected from `DETACH_ALL_VOLUMES`,
+    /// detach, and unload-while-encrypted — the same volume the boot loader later
+    /// re-attaches via the ACPI/UEFI handover.
+    #[serde(default)]
+    pub is_os_volume: bool,
 }
 
 /// IOCTL_JVCK_PREPARE response.

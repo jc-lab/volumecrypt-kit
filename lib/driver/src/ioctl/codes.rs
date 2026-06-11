@@ -14,3 +14,9 @@ pub const IOCTL_VCK_PAUSE: u32 = 0x0022_2010; // Function = 0x804 (common)
 pub const IOCTL_JVCK_PREPARE: u32 = 0x0022_201c; // Function = 0x807
 pub const IOCTL_JVCK_ATTACH: u32 = 0x0022_2014; // Function = 0x805 (phase 2: read metadata)
 pub const IOCTL_VCK_DETACH: u32 = 0x0022_2018; // Function = 0x806 (common, format-agnostic)
+/// Pause the OS (handover) volume's background sweep. Returns only after any
+/// in-flight sweep batch has finished (driver-internal; sent on shutdown).
+pub const IOCTL_VCK_PAUSE_OS_VOLUME: u32 = 0x0022_2020; // Function = 0x808
+/// Detach every data (IOCTL-attached) volume; OS volumes are left bound.
+/// Driver-internal; sent on shutdown/unload.
+pub const IOCTL_VCK_DETACH_ALL_VOLUMES: u32 = 0x0022_2024; // Function = 0x809

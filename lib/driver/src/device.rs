@@ -111,6 +111,12 @@ impl ControlDevice {
         Ok(Self { device_object })
     }
 
+    /// The control device object (target for self-sent IOCTLs from
+    /// shutdown/unload).
+    pub fn device_object(&self) -> PDEVICE_OBJECT {
+        self.device_object
+    }
+
     /// Delete the symbolic link and device object.
     pub fn destroy(self) -> VckResult<()> {
         let symlink_name = UnicodeString::from_str(SYMLINK_NAME);

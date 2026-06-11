@@ -63,6 +63,10 @@ type JvckVolumePrepareRequest struct {
 	// writes this to every replica LBA while the volume lock is held.
 	// Empty means re-attach (skip write).
 	MetadataBlock []byte `msgpack:"metadata_block"`
+	// IsOsVolume marks this as the OS (system) volume so the driver registers it
+	// as an OS volume (protected from DETACH_ALL_VOLUMES / detach / unload while
+	// encrypted) — the same volume the boot loader re-attaches via handover.
+	IsOsVolume bool `msgpack:"is_os_volume,omitempty"`
 }
 
 // JvckVolumePrepareResponse is the IOCTL_JVCK_PREPARE response.

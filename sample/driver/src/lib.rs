@@ -16,13 +16,19 @@ use core::panic::PanicInfo;
 use spin::{Lazy, Mutex};
 use wdk_alloc::WdkAllocator;
 use wdk_sys::{
-    ntddk::IofCompleteRequest, CCHAR, DRIVER_OBJECT, IO_NO_INCREMENT, IRP_MJ_CLEANUP,
-    IRP_MJ_CLOSE, IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, IRP_MJ_SHUTDOWN, NTSTATUS,
-    PDEVICE_OBJECT, PDRIVER_OBJECT, PIRP, PIO_STACK_LOCATION, PCUNICODE_STRING, _MODE,
+    ntddk::{
+        IoBuildDeviceIoControlRequest, IofCallDriver, IofCompleteRequest, KeInitializeEvent,
+        KeWaitForSingleObject,
+    },
+    CCHAR, DRIVER_OBJECT, IO_NO_INCREMENT, IO_STATUS_BLOCK, IRP_MJ_CLEANUP, IRP_MJ_CLOSE,
+    IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, IRP_MJ_SHUTDOWN, KEVENT, NTSTATUS, PDEVICE_OBJECT,
+    PDRIVER_OBJECT, PIRP, PIO_STACK_LOCATION, PCUNICODE_STRING,
+    _EVENT_TYPE::NotificationEvent, _KWAIT_REASON::Executive, _MODE,
 };
 use vck_driver::{
     device::{ControlDevice, DeviceExtension, DEVICE_KIND_FILTER},
     filter::handle_filter_irp,
+    ioctl::codes::{IOCTL_VCK_DETACH_ALL_VOLUMES, IOCTL_VCK_PAUSE_OS_VOLUME},
     ioctl::dispatch_ioctl,
     provider::{IoctlAuthContext, RequestorMode},
     VolumeAttachRegistry,
@@ -41,6 +47,7 @@ const STATUS_UNSUCCESSFUL: NTSTATUS = 0xC000_0001u32 as i32;
 const STATUS_INVALID_PARAMETER: NTSTATUS = 0xC000_000Du32 as i32;
 const STATUS_INVALID_DEVICE_REQUEST: NTSTATUS = 0xC000_0010u32 as i32;
 const STATUS_BUFFER_TOO_SMALL: NTSTATUS = 0xC000_0023u32 as i32;
+const STATUS_PENDING: NTSTATUS = 0x0000_0103;
 
 // The metadata/crypto path uses a large stack frame; run IOCTL dispatch on an
 // expanded kernel stack so the (deep) storage stack below us has headroom.
@@ -204,7 +211,63 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     vck_driver::debug::panic_print(info)
 }
 
+/// Send a no-input/no-output IOCTL to our own control device synchronously
+/// Routing through the IRP path runs the handler on the expanded kernel stack
+/// (the detach/crypto path is stack-hungry) and in a consistent context.
+///
+/// # Safety
+/// `device` must be our live control device object. Must be called at
+/// PASSIVE_LEVEL (the wait below requires it).
+unsafe fn send_self_ioctl(device: PDEVICE_OBJECT, code: u32) -> NTSTATUS {
+    let mut event: KEVENT = core::mem::zeroed();
+    let mut iosb: IO_STATUS_BLOCK = core::mem::zeroed();
+    KeInitializeEvent(&mut event, NotificationEvent, 0);
+    let irp = IoBuildDeviceIoControlRequest(
+        code,
+        device,
+        core::ptr::null_mut(),
+        0,
+        core::ptr::null_mut(),
+        0,
+        0, // InternalDeviceIoControl = FALSE → IRP_MJ_DEVICE_CONTROL
+        &mut event,
+        &mut iosb,
+    );
+    if irp.is_null() {
+        return STATUS_UNSUCCESSFUL;
+    }
+    let mut status = IofCallDriver(device, irp);
+    if status == STATUS_PENDING {
+        let _ = KeWaitForSingleObject(
+            (&mut event as *mut KEVENT).cast::<c_void>(),
+            Executive,
+            _MODE::KernelMode as i8,
+            0,
+            core::ptr::null_mut(),
+        );
+        status = iosb.__bindgen_anon_1.Status;
+    }
+    status
+}
+
+/// Detach all data volumes by self-sending `IOCTL_VCK_DETACH_ALL_VOLUMES`.
+/// Shared by `driver_unload` and the `IRP_MJ_SHUTDOWN` path. OS (handover)
+/// volumes are left bound (the IOCTL handler skips them).
+///
+/// # Safety
+/// Must be called at PASSIVE_LEVEL with the control device still present.
+unsafe fn driver_shutdown() {
+    let device = CONTROL_DEVICE.lock().as_ref().map(|cd| cd.device_object());
+    if let Some(device) = device {
+        let st = send_self_ioctl(device, IOCTL_VCK_DETACH_ALL_VOLUMES);
+        vck_driver::driver_println!("driver_shutdown: detach-all status=0x{:08x}", st);
+    }
+}
+
 unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
+    // Detach all data volumes first (via self-IOCTL → expanded stack).
+    driver_shutdown();
+
     // An encrypted OS (system) volume is being decrypted live by this driver.
     // Unloading would leave C: reading raw ciphertext → guaranteed corruption.
     // Refuse by bugchecking with STATUS_INVALID_DEVICE_STATE as a parameter.
@@ -219,7 +282,8 @@ unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
         wdk_sys::ntddk::KeBugCheckEx(VCK_BUGCHECK, STATUS_INVALID_DEVICE_STATE, 0, 0, 0);
     }
 
-    // detach_all_volumes detaches each filter, which stops its per-volume thread.
+    // Cleanup: detach any volume still attached (e.g. a non-encrypted OS volume)
+    // and tear down the control device.
     vck_driver::ioctl::dispatch::detach_all_volumes(&REGISTRY);
     if let Some(control_device) = CONTROL_DEVICE.lock().take() {
         if let Err(err) = control_device.destroy() {
@@ -260,14 +324,16 @@ unsafe extern "C" fn dispatch_any(device_object: PDEVICE_OBJECT, irp: PIRP) -> N
             STATUS_SUCCESS
         }
         IRP_MJ_SHUTDOWN => {
-            // Pause the sweep so the encryption boundary stops advancing before
-            // I/O is cut off, keeping the on-disk ciphertext region consistent
-            // with the persisted boundary across the reboot. Do NOT detach: the
-            // OS volume filter must stay bound so live shutdown writes remain
-            // encrypted (detaching would write plaintext into the encrypted
-            // region and corrupt it).
-            vck_driver::driver_println!("sample-driver: IRP_MJ_SHUTDOWN — pausing sweeps");
-            vck_driver::ioctl::dispatch::pause_all_volumes(&REGISTRY);
+            vck_driver::driver_println!("sample-driver: IRP_MJ_SHUTDOWN");
+            // 1. Pause the OS volume sweep (stops the boundary advancing; waits
+            //    for any in-flight batch). The OS volume filter stays bound so
+            //    live shutdown writes remain encrypted.
+            let dev = CONTROL_DEVICE.lock().as_ref().map(|cd| cd.device_object());
+            if let Some(dev) = dev {
+                let _ = send_self_ioctl(dev, IOCTL_VCK_PAUSE_OS_VOLUME);
+            }
+            // 2. Detach all data volumes.
+            driver_shutdown();
             complete_irp(irp, STATUS_SUCCESS, 0);
             STATUS_SUCCESS
         }

@@ -122,6 +122,7 @@ func newOSVolumeEncryptCmd() *cobra.Command {
 				MetadataSize:  osVolumeMetadataSize,
 				VMK:           vmk,
 				MetadataBlock: metadataBlock,
+				IsOsVolume:    true,
 			})
 			if err != nil {
 				return fmt.Errorf("OS volume metadata prepare failed: %w", err)
