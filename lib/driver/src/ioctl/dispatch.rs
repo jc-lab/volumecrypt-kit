@@ -1081,6 +1081,26 @@ fn handle_detach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<Ioc
     encode_resp(&EmptyResponse {})
 }
 
+/// Pause the background sweep on every attached volume. Used at system
+/// shutdown: the encryption boundary stops advancing (so the on-disk ciphertext
+/// region stays consistent with the persisted boundary across the reboot) while
+/// the filters remain BOUND, so live writes during the shutdown sequence are
+/// still encrypted correctly.
+///
+/// We deliberately do NOT detach here: detaching the OS volume filter would let
+/// subsequent shutdown writes reach the lower device as plaintext within the
+/// already-encrypted region, corrupting it on the next boot.
+///
+/// NOTE: this does not eliminate the hard-crash (power-loss) window where a
+/// sweep batch's ciphertext is written but its boundary not yet persisted — that
+/// requires hotzone journaling (out of scope). It only makes graceful shutdown
+/// stop advancing the boundary deterministically.
+pub fn pause_all_volumes(registry: &VolumeAttachRegistry) {
+    for volume in registry.all() {
+        volume.encryption.lock().pause();
+    }
+}
+
 /// Detach all attached volumes, used on shutdown/unload.
 pub fn detach_all_volumes(registry: &VolumeAttachRegistry) {
     let paths: alloc::vec::Vec<String> = registry.all()

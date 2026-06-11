@@ -8,7 +8,10 @@ use core::ptr::null_mut;
 
 use vck_common::VckResult;
 use wdk_sys::{
-    ntddk::{IoCreateDevice, IoCreateSymbolicLink, IoDeleteDevice, IoDeleteSymbolicLink},
+    ntddk::{
+        IoCreateDevice, IoCreateSymbolicLink, IoDeleteDevice, IoDeleteSymbolicLink,
+        IoRegisterShutdownNotification, IoUnregisterShutdownNotification,
+    },
     BOOLEAN, DO_BUFFERED_IO, DO_DEVICE_INITIALIZING, DRIVER_OBJECT, FILE_DEVICE_SECURE_OPEN,
     FILE_DEVICE_UNKNOWN, PDEVICE_OBJECT,
 };
@@ -100,6 +103,9 @@ impl ControlDevice {
 
         unsafe {
             (*device_object).Flags &= !DO_DEVICE_INITIALIZING;
+            // Request IRP_MJ_SHUTDOWN at system shutdown so the driver can pause
+            // the encryption sweep cleanly before I/O is cut off (best-effort).
+            let _ = IoRegisterShutdownNotification(device_object);
         }
 
         Ok(Self { device_object })
@@ -108,6 +114,9 @@ impl ControlDevice {
     /// Delete the symbolic link and device object.
     pub fn destroy(self) -> VckResult<()> {
         let symlink_name = UnicodeString::from_str(SYMLINK_NAME);
+        unsafe {
+            IoUnregisterShutdownNotification(self.device_object);
+        }
         ntstatus_to_result(
             unsafe { IoDeleteSymbolicLink(symlink_name.as_ptr()) },
             "IoDeleteSymbolicLink failed",

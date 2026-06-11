@@ -257,22 +257,17 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     });
     registry.insert(volume.clone());
 
-    // Resume an in-progress encryption sweep across reboot. The engine is
-    // created Idle and the footer metadata only persists the boundary (not the
-    // run state), so a partially-encrypted OS volume (0 < boundary < total)
-    // would otherwise sit idle forever — no app IOCTL runs on the boot path.
-    // Set Encrypting BEFORE binding so the per-volume thread sweeps on start.
-    let resume = initial_boundary > 0 && initial_boundary < data_sectors;
-    if resume {
-        volume.encryption.lock().start_encrypt();
-    }
+    // Resume the encryption sweep across reboot: the engine is created Idle and
+    // the footer metadata only persists the boundary (not the run state), so a
+    // partially-encrypted OS volume would otherwise sit idle. `start_encrypt` is
+    // a no-op once fully encrypted, so calling it unconditionally is safe. Set
+    // the state BEFORE binding so the per-volume thread sweeps on start.
+    volume.encryption.lock().start_encrypt();
 
     crate::filter::filter_bind_volume(filter_do, volume.clone());
     crate::driver_println!(
-        "handover_mount: OS volume bound path={} offset_sector={} data_sectors={} boundary={} resume={}",
-        volume_path, offset_sector, data_sectors, initial_boundary, resume
+        "handover_mount: OS volume bound path={} offset_sector={} data_sectors={} boundary={}",
+        volume_path, offset_sector, data_sectors, initial_boundary
     );
-    if resume {
-        unsafe { crate::filter::volume_thread::wake_for(&volume) };
-    }
+    unsafe { crate::filter::volume_thread::wake_for(&volume) };
 }

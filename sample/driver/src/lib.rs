@@ -260,9 +260,14 @@ unsafe extern "C" fn dispatch_any(device_object: PDEVICE_OBJECT, irp: PIRP) -> N
             STATUS_SUCCESS
         }
         IRP_MJ_SHUTDOWN => {
-            vck_driver::driver_println!("sample-driver: IRP_MJ_SHUTDOWN — detaching volumes");
-            // Each filter's per-volume thread is stopped during its detach.
-            vck_driver::ioctl::dispatch::detach_all_volumes(&REGISTRY);
+            // Pause the sweep so the encryption boundary stops advancing before
+            // I/O is cut off, keeping the on-disk ciphertext region consistent
+            // with the persisted boundary across the reboot. Do NOT detach: the
+            // OS volume filter must stay bound so live shutdown writes remain
+            // encrypted (detaching would write plaintext into the encrypted
+            // region and corrupt it).
+            vck_driver::driver_println!("sample-driver: IRP_MJ_SHUTDOWN — pausing sweeps");
+            vck_driver::ioctl::dispatch::pause_all_volumes(&REGISTRY);
             complete_irp(irp, STATUS_SUCCESS, 0);
             STATUS_SUCCESS
         }

@@ -116,6 +116,17 @@ impl EncryptionEngine {
     ///
     /// `io` MUST be the raw lower volume device (below this filter), so the
     /// sweep reads plaintext / writes ciphertext without re-entering the filter.
+    ///
+    /// CRASH-CONSISTENCY (known limitation): a batch writes the ciphertext for
+    /// `[boundary, boundary+count)` and only THEN persists the new boundary. A
+    /// hard crash (power loss) between those two steps leaves that batch as
+    /// ciphertext on disk while the persisted boundary still marks it plaintext;
+    /// on resume the sweep would re-encrypt it (double-encryption → corruption of
+    /// that one batch). Eliminating this requires hotzone journaling (backing up
+    /// the in-flight region so resume can redo it idempotently), which is out of
+    /// scope for this sample. Graceful shutdown is handled separately by pausing
+    /// the sweep (see `dispatch::pause_all_volumes`) so the boundary stops
+    /// advancing before I/O is cut off.
     pub fn progress_step(
         &mut self,
         io: &dyn SectorIo,
