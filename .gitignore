@@ -6,3 +6,4 @@
 /testing/results
 /testing/artifacts
 /testing/signing/MyTestDriverCert.*
+/testing/images/*.qcow2

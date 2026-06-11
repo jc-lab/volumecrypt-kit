@@ -1,0 +1,179 @@
+# Copyright 2026 JC-Lab
+# SPDX-License-Identifier: Apache-2.0
+#
+# Self-hosted runner requirements  windows-2025-vs2026:
+#   - WEDK at G:\BuildEnv\SetupBuildEnv.cmd
+#   - msys2 at C:\msys64  (setup-msys2 action reuses the existing install)
+#   - QEMU + test-foundry.exe reachable via /d/programs on PATH
+#
+# For the three VM test jobs to run CONCURRENTLY, register ≥3 runner
+# instances on the same machine with the same label:
+#   ./config.cmd --url <repo> --token <token> --name vck-runner-N --labels "self-hosted,windows,vck"
+#
+# VM image cache:
+#   The Windows 11 qcow2 (~5-7 GB) is downloaded once on ubuntu-latest via
+#   vagrant and stored in GitHub Actions cache.  Subsequent runs restore from
+#   cache instantly.  GitHub cache limit is 10 GB per entry; if the image is
+#   larger the prepare-image job will fail — in that case switch to an
+#   external store (S3 / GitHub Releases) and adjust the restore step.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE_NAME: gusztavvargadr-windows-11-2601.0.0.qcow2
+  IMAGE_CACHE_KEY: vagrant-gusztavvargadr-windows-11-2601.0.0
+  TEST_USE_VM: ${{ vars.TEST_USE_VM || '0' }}
+
+jobs:
+  # ── Download and cache the Windows 11 VM base image ────────────────────────
+  # ubuntu-latest: vagrant + libvirt box extraction is straightforward on Linux.
+  # The extracted qcow2 is saved to GitHub Actions cache so Windows runner jobs
+  # can restore it without re-downloading from Vagrant Cloud.
+  prepare-image:
+    name: Prepare VM image
+    if: env.TEST_USE_VM == '1'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore cached qcow2
+        id: image-cache
+        uses: actions/cache@v5
+        with:
+          path: testing/images/${{ env.IMAGE_NAME }}
+          key: ${{ env.IMAGE_CACHE_KEY }}
+
+      - name: Install vagrant + qemu-utils
+        if: steps.image-cache.outputs.cache-hit != 'true'
+        run: |
+          wget -qO- https://apt.releases.hashicorp.com/gpg \
+            | sudo gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] \
+            https://apt.releases.hashicorp.com $(lsb_release -cs) main" \
+            | sudo tee /etc/apt/sources.list.d/hashicorp.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y vagrant qemu-utils
+
+      - name: Download and extract qcow2
+        if: steps.image-cache.outputs.cache-hit != 'true'
+        run: |
+          chmod +x .ci/scripts/vagrant-extract-qcow2.sh
+          .ci/scripts/vagrant-extract-qcow2.sh \
+            gusztavvargadr/windows-11 \
+            2601.0.0 \
+            ./testing/images/
+
+  # ── Unit tests + build artifacts (sequential within one job) ─────────────────
+  build-and-test:
+    name: Build & Test
+    runs-on: windows-2025-vs2026
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Preserve testing/images/ (qcow2) and .testfoundry/ between runs.
+          clean: false
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          location: 'C:\msys64'
+          update: false
+          path-type: inherit   # makes Windows PATH (cargo, go, etc.) visible inside msys2
+
+      - name: cargo test (host)
+        shell: msys2 {0}
+        run: cargo test -p vck-common
+
+      - name: Build driver, loader, and app
+        shell: msys2 {0}
+        run: make build-driver build-loader build-app
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: vck-artifacts-${{ github.run_id }}
+          # vck-sample-driver.sys, vck-driver-pkg/, vck-sample-loader.efi, vck-app.exe
+          path: testing/artifacts/
+
+  # ── VM tests (parallel matrix) ─────────────────────────────────────────────
+  vm-test:
+    name: VM / ${{ matrix.suite }}
+    if: env.TEST_USE_VM == '1'
+    needs: [build-and-test, prepare-image]
+    runs-on: windows-2025-vs2026
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [driver-load, os-volume-prepare, data-volume]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          location: 'C:\msys64'
+          update: false
+          path-type: inherit
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: vck-artifacts-${{ github.run_id }}
+          path: testing/artifacts/
+
+      # Restore the qcow2 image that prepare-image downloaded and cached.
+      # fail-on-cache-miss: true ensures the job fails clearly if prepare-image
+      # did not produce the cache (rather than silently running without an image).
+      - name: Restore VM image cache
+        uses: actions/cache/restore@v4
+        with:
+          path: testing/images/${{ env.IMAGE_NAME }}
+          key: ${{ env.IMAGE_CACHE_KEY }}
+          fail-on-cache-miss: true
+
+      - name: Download test-foundry
+        shell: pwsh
+        run: |
+          $dest = "$env:RUNNER_TEMP\test-foundry.exe"
+          Invoke-WebRequest `
+            -Uri "https://github.com/jc-lab/test-foundry/releases/download/v0.0.14/test-foundry_windows_amd64.exe" `
+            -OutFile $dest
+          # Add RUNNER_TEMP to PATH so test-foundry.exe is available in all subsequent steps.
+          "$env:RUNNER_TEMP" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # vm-setup only runs on first use of a fresh runner workspace.
+      # With clean: false the .testfoundry/win11 directory persists across runs
+      # on the same runner instance, so this is effectively a one-time cost.
+      - name: Ensure VM is set up
+        shell: msys2 {0}
+        run: |
+          echo "Running vm-setup (first use on this runner)..."
+          test-foundry.exe --vm-name=win11 vm-setup \
+            --image ./testing/images/windows-11.yaml
+
+      - name: Run VM test — ${{ matrix.suite }}
+        shell: msys2 {0}
+        run: |
+          rm -rf ./testing/results/${{ matrix.suite }}
+          test-foundry.exe --vm-name=win11 test --headless \
+            --output ./testing/results/${{ matrix.suite }} \
+            --test ./testing/recipes/${{ matrix.suite }}/${{ matrix.suite }}.yaml
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-results-${{ matrix.suite }}-${{ github.run_id }}
+          path: testing/results/${{ matrix.suite }}/
+          if-no-files-found: warn
