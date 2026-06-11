@@ -77,6 +77,9 @@ jobs:
           update: false
           path-type: inherit   # makes Windows PATH (cargo, go, etc.) visible inside msys2
 
+      - name: install WDK
+        run: winget install --id Microsoft.WindowsWDK.10.0.26100 --exact  --accept-package-agreements  --accept-source-agreements --disable-interactivity
+
       - name: cargo test (host)
         shell: msys2 {0}
         run: cargo test -p vck-common
