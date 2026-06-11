@@ -160,6 +160,28 @@ steps:
       args: ["/c", "type C:\\vck-ostest.txt"]
       expect_exit_code: 0
 
+  # Status by bare drive letter `C:` (CanonicalVolumePath -> \\?\Volume{GUID}\).
+  # The OS volume is registered under its PDO name (\Device\HarddiskVolumeN), so
+  # this exercises the device-stack-walk fallback in find_filter_for_volume:
+  # resolving the volume GUID path back to our filter. Require non-zero totals
+  # (i.e. the volume was found, not the is_attached=false zero fallback).
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - |
+          $ok = $false
+          for ($i = 0; $i -lt 1; $i++) {
+            $out = & C:\Temp\vck-app.exe --volume C: status 2>&1 | Out-String
+            Write-Host $out.Trim()
+            $m = [regex]::Match($out, '\((\d+) / (\d+) sectors\)')
+            if ($m.Success -and [int64]$m.Groups[2].Value -gt 0) { $ok = $true }
+          }
+          if ($ok) { Write-Host "STATUS_BY_DRIVE_LETTER_OK"; exit 0 } else { Write-Host "STATUS_BY_DRIVE_LETTER_FAILED"; exit 1 }
+      expect_exit_code: 0
+
   # Verify the encryption sweep RESUMED after reboot (handover re-bind sets the
   # engine back to Encrypting). Sample the boundary twice and require it to
   # advance (or already be fully encrypted).

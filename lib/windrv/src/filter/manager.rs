@@ -430,6 +430,17 @@ where
         }
     }
 
+    // Final fallback: walk the attachment stack and match our filter device by
+    // its extension kind. Handles path forms (e.g. `\??\Volume{GUID}`) whose
+    // `IoGetDeviceObjectPointer` returns an unnamed upper device that no
+    // name/pointer lookup matches, but which still sits in the same stack as our
+    // AddDevice-attached filter — e.g. the OS volume queried by its volume GUID
+    // instead of by its PDO name (`\Device\HarddiskVolumeN`).
+    if let Some(result) = find_our_filter_in_stack(nt_path) {
+        crate::driver_println!("find_filter: found via stack walk for {}", nt_path);
+        return Some(result);
+    }
+
     crate::driver_println!("find_filter: not found for {}", nt_path);
     None
 }
