@@ -1,6 +1,6 @@
 //! Minimal loader debug output to the QEMU ISA debug console (port 0xE9).
 //!
-//! The driver writes its diagnostics to port 0xE9 (`lib/driver/src/debug.rs`),
+//! The driver writes its diagnostics to port 0xE9 (`lib/windrv/src/debug.rs`),
 //! and the test recipes capture that port to `debug.log`. UEFI applications run
 //! at ring 0, so the loader can write to the same port directly — this gives the
 //! loader a diagnostic channel that survives into the captured `debug.log`

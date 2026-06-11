@@ -2,11 +2,11 @@
 resolver = "2"
 members = [
     "lib/common",
-    "lib/driver",
+    "lib/windrv",
     "lib/loader",
     "sample/common",
     "sample/crypto-test",
-    "sample/driver",
+    "sample/windrv",
     "sample/loader",
 ]
 

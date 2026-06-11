@@ -44,7 +44,7 @@ qemu:
     - "-device"
     - "isa-debugcon,iobase=0xe9,chardev=debugout"
 ```
-- 그러면 lib/driver/src/debug.rs 을 통해 출력한 디버그 메세지를 읽을 수 있습니다.
+- 그러면 lib/windrv/src/debug.rs 을 통해 출력한 디버그 메세지를 읽을 수 있습니다.
 
 make 실행 방법:
 - 다음과 같이 msys64 에서 실행해야 합니다.

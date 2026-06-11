@@ -16,6 +16,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 vck-common = { path = "../../lib/common", default-features = false }
-vck-driver = { path = "../../lib/driver" }
+vck-driver = { path = "../../lib/windrv" }
 wdk-alloc.workspace = true
 wdk-sys = "0.5.1"

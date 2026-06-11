@@ -37,14 +37,14 @@
 
 ## 0. 선행 작업 (cross-cutting, 다른 작업의 전제)
 
-- [x] **커널 global allocator**: `sample/driver/src/lib.rs`, `sample/crypto-test/src/lib.rs`에
+- [x] **커널 global allocator**: `sample/windrv/src/lib.rs`, `sample/crypto-test/src/lib.rs`에
   `#[global_allocator]` 설정 완료(`wdk-alloc::WdkAllocator`). 각 드라이버 crate에
   `wdk-build`/`wdk-alloc` 의존성과 `package.metadata.wdk.driver-model = "WDM"` 추가,
   `.cargo/config.toml`/`Makefile` WEDK 빌드 경로 정리. `make build-driver`,
   `make build-crypto-test-driver` 서명까지 통과.
 - [x] ~~**AES-XTS tweak 규약 확정**~~ — 해결: `lib/common/src/xts.rs::XtsVolumeCipher`로 단일화.
   tweak = **데이터영역 상대 섹터(`rel = lba - offset_sector`)**. loader/driver 모두 이 cipher 사용.
-  (`lib/driver/src/crypto/aes_xts.rs`가 위임, 호스트 라운드트립 테스트 통과)
+  (`lib/windrv/src/crypto/aes_xts.rs`가 위임, 호스트 라운드트립 테스트 통과)
 - [x] ~~**`IoHooks` 객체 안전성**~~ — 해결: `IoHooks`를 동기 시그니처로 변경하여 `Arc<dyn IoHooks>` object-safe.
 - [x] **GUID 엔디안 변환**: `lib/common/src/types.rs::guid_from_windows_bytes(b: [u8;16])` 추가
   (Windows/GPT `PartitionId`·`EFI_GUID`의 메모리 바이트 → `Uuid::from_bytes_le`로 canonical `Guid`).
@@ -77,38 +77,38 @@
 
 ---
 
-## 2. 커널 드라이버 프레임워크 — `lib/driver`
+## 2. 커널 드라이버 프레임워크 — `lib/windrv`
 
 > 아래 [x] 항목은 호스트 타입체크 통과(로직 구현). 나머지는 ntddk/IRP API가 필요해 WEDK에서 구현.
 
-- [x] `lib/driver/src/crypto/aes_xts.rs::AesXtsCipher` — `vck_common::XtsVolumeCipher`에 위임.
-- [x] `lib/driver/src/crypto/pipeline.rs::CryptoPipeline` — `decrypt_read`/`encrypt_write`
+- [x] `lib/windrv/src/crypto/aes_xts.rs::AesXtsCipher` — `vck_common::XtsVolumeCipher`에 위임.
+- [x] `lib/windrv/src/crypto/pipeline.rs::CryptoPipeline` — `decrypt_read`/`encrypt_write`
   (상대 섹터 공간, `encrypted_offset` 경계 기준 섹터별 분기).
-- [x] `lib/driver/src/offset/engine.rs::EncryptionEngine` — `relative`(헤더/푸터 모두 제외 확인),
+- [x] `lib/windrv/src/offset/engine.rs::EncryptionEngine` — `relative`(헤더/푸터 모두 제외 확인),
   `start_encrypt`/`start_decrypt`/`pause`, `progress_step`(암/복호 배치 + store 영속화), `snapshot`.
-- [x] `lib/driver/src/io.rs::KernelVolumeIo` — `read_sectors`/`write_sectors` 구현 완료
+- [x] `lib/windrv/src/io.rs::KernelVolumeIo` — `read_sectors`/`write_sectors` 구현 완료
   (`IoBuildSynchronousFsdRequest` + `IofCallDriver` + `KeWaitForSingleObject` 동기 IRP).
   `open`(NT 경로→`IoGetDeviceObjectPointer`) 및 `from_lower_device`(필터 하위 디바이스) 제공.
-  공용 NT 헬퍼는 `lib/driver/src/nt.rs`로 추출. `make build-driver`로 컴파일·링크·서명 검증.
+  공용 NT 헬퍼는 `lib/windrv/src/nt.rs`로 추출. `make build-driver`로 컴파일·링크·서명 검증.
   남은 것: 볼륨 geometry(sector_size/total_sectors) 질의 헬퍼(`IOCTL_DISK_GET_LENGTH_INFO` 등).
-- [x] `lib/driver/src/filter/manager.rs` — `attach_filter`(filter DO 생성 +
+- [x] `lib/windrv/src/filter/manager.rs` — `attach_filter`(filter DO 생성 +
   `IoAttachDeviceToDeviceStackSafe`, 확장 태깅, flag 상속) / `detach_filter`(IoDetachDevice +
   IoDeleteDevice + Arc 해제) 구현 완료.
-- [x] `lib/driver/src/device.rs` — `DeviceExtension`(Control/Filter 태깅) 추가, 컨트롤 디바이스에 부착.
+- [x] `lib/windrv/src/device.rs` — `DeviceExtension`(Control/Filter 태깅) 추가, 컨트롤 디바이스에 부착.
   sample 드라이버의 `dispatch_any`가 확장 kind로 IRP 라우팅(필터=pass-through, 컨트롤=IOCTL).
   ATTACH가 `attach_filter`까지, DETACH가 `detach_filter`까지 배선. **현재는 transparent pass-through**
   (볼륨 정상 동작 확인용). sweep_io는 필터 attach 전에 볼륨 디바이스를 해석해 재진입 없음.
-- [ ] `lib/driver/src/filter/irp.rs` — READ/WRITE **crypto 가로채기** 미구현(현재 pass-through).
+- [ ] `lib/windrv/src/filter/irp.rs` — READ/WRITE **crypto 가로채기** 미구현(현재 pass-through).
   read 완료 콜백에서 복호화, write는 shadow 버퍼 암호화 후 하위 전달. (다음 단계)
   PnP remove 처리(IRP_MN_REMOVE_DEVICE 시 자동 detach)도 보강 필요.
-- [ ] `lib/driver/src/executor.rs::KernelExecutor` — `spawn`/`block_on`
+- [ ] `lib/windrv/src/executor.rs::KernelExecutor` — `spawn`/`block_on`
   (IRP completion waker + `ExWorkItem` 워커).
-- [x] `lib/driver/src/ioctl/dispatch.rs` — `handle_jvck_attach`/`handle_detach` 구현 완료.
+- [x] `lib/windrv/src/ioctl/dispatch.rs` — `handle_jvck_attach`/`handle_detach` 구현 완료.
   attach: NT 경로 변환 → `KernelVolumeIo::open_query`(geometry) → `JvckMetadataStore::open`(기존)
   또는 `create`(최초, 앱이 보낸 FVEK/volume_id 사용) → `AttachedVolume` 등록 → 응답.
   detach: registry 제거. (프로토콜: `JvckVolumeAttachReq`에 `fvek_key1/fvek_key2/volume_id` 추가,
   Go `JvckVolumeAttachRequest` + `attach.go`가 `crypto/rand`로 생성·전달.)
-- [x] **암호화 sweep worker** ([sweep.rs](lib/driver/src/sweep.rs)) 구현 완료 —
+- [x] **암호화 sweep worker** ([sweep.rs](lib/windrv/src/sweep.rs)) 구현 완료 —
   `PsCreateSystemThread` 기반 단일 시스템 스레드가 registry를 폴링하며 Encrypting/Decrypting 볼륨의
   `AttachedVolume::sweep_step`(→`EncryptionEngine::progress_step`)을 배치(1MiB)로 구동, offset 영속화.
   `START_ENCRYPT`/`DECRYPT`는 상태만 바꾸고 폴러가 자동으로 처리. DriverEntry에서 start, DriverUnload에서 stop(join).
@@ -116,12 +116,12 @@
   주의: 아직 transparent 필터가 없어 sweep는 raw 볼륨을 직접 암호화하므로, 마운트된 FS와 충돌하지 않도록
   암호화 전 볼륨 lock/dismount가 필요(앱 책임). 실제 활용은 (2) 필터 attach 후 가능.
   **남은 것**: (2) transparent 볼륨 필터(아래).
-- [x] `lib/driver/src/device.rs::ControlDevice` — `create`(`IoCreateDevice` + `IoCreateSymbolicLink`,
+- [x] `lib/windrv/src/device.rs::ControlDevice` — `create`(`IoCreateDevice` + `IoCreateSymbolicLink`,
   `DEVICE_NAME`/`SYMLINK_NAME`) / `destroy` 구현 완료. `DO_BUFFERED_IO` 설정 및 unload 시 삭제 경로 포함.
-- [x] `lib/driver/src/handover.rs::read_handover::<P>()` — `ZwQuerySystemInformation`
+- [x] `lib/windrv/src/handover.rs::read_handover::<P>()` — `ZwQuerySystemInformation`
   (SystemFirmwareTableInformation, provider `ACPI`, tableID `VCKD`)로 테이블 조회 후
   `AcpiHandoverReader::decode`. plaintext VMK를 담은 커널 풀 버퍼는 owned `Vec`로 복사 후 zeroize+free.
-- [x] **OS 볼륨 부팅 auto-attach (Stage 2b)** — `lib/driver/src/filter/handover_mount.rs`:
+- [x] **OS 볼륨 부팅 auto-attach (Stage 2b)** — `lib/windrv/src/filter/handover_mount.rs`:
   `add_device`는 unbound 필터만 부착(기존), 실제 mount는 `IRP_MN_START_DEVICE` **완료 후**로
   지연(필터가 START를 가로채 completion routine 설치 → PASSIVE면 직접, 아니면 `IoWorkItem`으로 위임 후 대기).
   mount = 하위 디바이스 GPT `PartitionId`를 handover와 매칭 → `LowerDeviceIo`로 footer를 VMK
@@ -129,7 +129,7 @@
   `filter_bind_volume`. handover 부재(로더 없음)면 no-op. `VolumeAttachRegistry`에 `HandoverInfo` 저장 +
   `set_global_registry`(work item C 콜백용) 추가. `make build-driver` 통과. 실제 handover 경로 end-to-end는
   Stage 3(로더) 통합 시 검증.
-- [ ] `lib/driver/src/provider.rs` — `AccessToken` 실제 토큰 래핑.
+- [ ] `lib/windrv/src/provider.rs` — `AccessToken` 실제 토큰 래핑.
 
 > 검증 불변식: `ioctl/codes.rs`의 IOCTL 값과 `ioctl/types.rs`의 필드/태그는
 > `sdk/ioctl.go`·`sdk/types.go`와 **반드시 동일**해야 함.
@@ -180,14 +180,14 @@
 
 ---
 
-## 4. 샘플 드라이버 — `sample/driver`
+## 4. 샘플 드라이버 — `sample/windrv`
 
-- [x] `sample/driver/src/lib.rs::DriverEntry` — 제어 경로 + OS 볼륨 부팅 경로 배선 완료:
+- [x] `sample/windrv/src/lib.rs::DriverEntry` — 제어 경로 + OS 볼륨 부팅 경로 배선 완료:
   컨트롤 디바이스 생성/언로드, `IRP_MJ_CREATE`/`CLOSE`/`CLEANUP`, `IRP_MJ_DEVICE_CONTROL`
   → `ioctl::dispatch`, `AddDevice`(unbound 필터 부착), `set_global_registry`,
   `read_handover::<VckHandoverPayload>()` best-effort → `REGISTRY.set_handover`. OS 볼륨 자동
   attach는 필터의 START_DEVICE 완료 경로(`handover_mount`)가 처리. `make test-vm-driver-load` 통과.
-- [ ] `sample/driver/src/provider.rs::require_administrator` — 요청자 토큰의
+- [ ] `sample/windrv/src/provider.rs::require_administrator` — 요청자 토큰의
   BUILTIN\Administrators 멤버십 검사. (`on_attach`/`authorize` 골격은 완료, 내부 store 호출은 §1·§2 의존)
 
 ---

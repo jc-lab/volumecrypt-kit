@@ -7,7 +7,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// IOCTL codes, identical to the values in lib/driver/src/ioctl/codes.rs.
+// IOCTL codes, identical to the values in lib/windrv/src/ioctl/codes.rs.
 const (
 	ioctlGetStatus    = 0x0022_2000
 	ioctlStartEncrypt = 0x0022_2004
@@ -18,7 +18,7 @@ const (
 	ioctlJvckAttach   = 0x0022_2014 // JVCK phase-2: read metadata + complete encryption setup
 	ioctlDetach       = 0x0022_2018 // Data Volume: release encryption layer
 	// Driver-internal (self-sent on shutdown/unload); listed here to keep the
-	// IOCTL value space in sync with lib/driver/src/ioctl/codes.rs.
+	// IOCTL value space in sync with lib/windrv/src/ioctl/codes.rs.
 	ioctlPauseOsVolume    = 0x0022_2020 // pause OS volume sweep (waits for in-flight batch)
 	ioctlDetachAllVolumes = 0x0022_2024 // detach all data volumes
 )

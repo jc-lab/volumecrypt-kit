@@ -5,7 +5,7 @@ use crate::{types::EncryptedOffset, VckResult};
 /// Implemented differently per environment:
 /// - UEFI loader: backed by `EFI_BLOCK_IO_PROTOCOL` (see `lib/common` uefi
 ///   feature, or `lib/loader`).
-/// - Kernel driver: backed by the lower volume device (`lib/driver`).
+/// - Kernel driver: backed by the lower volume device (`lib/windrv`).
 ///
 /// All offsets are absolute LBAs on the volume.
 ///
