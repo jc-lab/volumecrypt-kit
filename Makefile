@@ -55,20 +55,20 @@ build-driver-package: testing/signing/MyTestDriverCert.cer testing/artifacts/vck
 	  -OutputDir ./testing/artifacts/vck-driver-pkg
 
 test-vm-smoke: $(TEST_VM_DIR)
-	test-foundry.exe --vm-name=win11 test --output ./testing/results/smoke-guest-exec --test ./testing/recipes/smoke-guest-exec/smoke.yaml
+	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/smoke-guest-exec --test ./testing/recipes/smoke-guest-exec/smoke.yaml
 
 test-vm-driver-load: $(TEST_VM_DIR) build-driver-package build-app
-	test-foundry.exe --vm-name=win11 test --output ./testing/results/driver-load --test ./testing/recipes/driver-load/driver-load.yaml
+	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/driver-load --test ./testing/recipes/driver-load/driver-load.yaml
 
 test-vm-os-volume-prepare: $(TEST_VM_DIR) build-driver-package build-app
-	test-foundry.exe --vm-name=win11 test --output ./testing/results/os-volume-prepare --test ./testing/recipes/os-volume-prepare/os-volume-prepare.yaml
+	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/os-volume-prepare --test ./testing/recipes/os-volume-prepare/os-volume-prepare.yaml
 
 test-vm-data-volume: $(TEST_VM_DIR) build-driver-package build-app
 	rm -rf ./testing/results/data-volume
-	test-foundry.exe --vm-name=win11 test --output ./testing/results/data-volume --test ./testing/recipes/data-volume/data-volume.yaml
+	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/data-volume --test ./testing/recipes/data-volume/data-volume.yaml
 
 test-vm-crypto-test: $(TEST_VM_DIR) build-crypto-test-driver
-	test-foundry.exe  --vm-name=win11 test --output ./testing/results/crypto-test --test ./testing/recipes/crypto-test/crypto-test.yaml
+	test-foundry.exe  --vm-name=win11 test --headless --output ./testing/results/crypto-test --test ./testing/recipes/crypto-test/crypto-test.yaml
 
 # Stage 3h: validate the UEFI loader -> driver ACPI handover end-to-end.
 # Prepares the OS volume (shrink/efi/vck.json), installs the loader as

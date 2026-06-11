@@ -4,4 +4,5 @@
 /temp
 /output
 /testing/results
-/testing/MyTestDriverCert.*
+/testing/artifacts
+/testing/signing/MyTestDriverCert.*
