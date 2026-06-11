@@ -169,8 +169,14 @@
   Boot3에서 로더 `crypto=Some` BlockIo 후킹이 부팅 윈도우 복호화 + 드라이버가 handover로 C:
   재바인딩해 런타임 복호화 → Windows 정상 부팅 + 마커 파일 무결성. (app 배선 step29, handover_mount
   geometry IOCTL 버그 수정 step32 — `LowerDeviceIo`에 IRP `IoBuildDeviceIoControlRequest` 추가.)
-- [ ] (정밀화) 재부팅 전 in-flight sweep batch 경계 race(마지막 배치 암호화 ↔ boundary 영속화 순서)
-  검증/보강; 전체 암호화 시 소프트AES 속도 개선(현재 부분 암호화로만 검증).
+- [x] **재부팅 sweep race 정밀 검증 + 완화(step33/34)**: (a) 재부팅 후 sweep 재개 —
+  handover_mount가 start_encrypt 호출(엔진 Idle로 생성되던 문제). (b) graceful shutdown —
+  `IoRegisterShutdownNotification` 등록(기존엔 IRP_MJ_SHUTDOWN이 안 왔음) + 핸들러를
+  detach→`pause_all_volumes`로 변경(detach 시 OS 볼륨 평문 쓰기 손상 버그 수정; 필터 유지).
+  `make test-vm-os-encrypt` 21/21, debug.log "IRP_MJ_SHUTDOWN — pausing sweeps" 확인.
+- [ ] (잔여 한계) hard-crash(전원 차단) 시 배치 ciphertext 기록↔boundary 영속화 사이 1배치 손상 창:
+  완전 crash-consistency는 hotzone 저널링 필요(샘플 범위 밖, engine.rs에 문서화). 전체 암호화
+  소프트AES 속도(현재 부분 암호화로만 검증).
 
 ---
 
