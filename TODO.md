@@ -129,7 +129,10 @@
   `filter_bind_volume`. handover 부재(로더 없음)면 no-op. `VolumeAttachRegistry`에 `HandoverInfo` 저장 +
   `set_global_registry`(work item C 콜백용) 추가. `make build-driver` 통과. 실제 handover 경로 end-to-end는
   Stage 3(로더) 통합 시 검증.
-- [ ] `lib/windrv/src/provider.rs` — `AccessToken` 실제 토큰 래핑.
+- [x] `lib/windrv/src/provider.rs` — `AccessToken` 실제 토큰 래핑 완료. 요청자 프로세스의
+  primary token을 `PsReferencePrimaryToken`으로 참조(Drop에서 `PsDereferencePrimaryToken` 해제),
+  `is_admin()`은 `SeTokenIsAdmin` 래핑. 샘플 IRP_MJ_DEVICE_CONTROL 핸들러가 `IoGetRequestorProcess`로
+  토큰을 캡처해 `IoctlAuthContext.requestor_token`에 plumbing(확장 스택 callout 경유 포함).
 
 > 검증 불변식: `ioctl/codes.rs`의 IOCTL 값과 `ioctl/types.rs`의 필드/태그는
 > `sdk/ioctl.go`·`sdk/types.go`와 **반드시 동일**해야 함.
@@ -187,8 +190,17 @@
   → `ioctl::dispatch`, `AddDevice`(unbound 필터 부착), `set_global_registry`,
   `read_handover::<VckHandoverPayload>()` best-effort → `REGISTRY.set_handover`. OS 볼륨 자동
   attach는 필터의 START_DEVICE 완료 경로(`handover_mount`)가 처리. `make test-vm-driver-load` 통과.
-- [ ] `sample/windrv/src/provider.rs::require_administrator` — 요청자 토큰의
-  BUILTIN\Administrators 멤버십 검사. (`on_attach`/`authorize` 골격은 완료, 내부 store 호출은 §1·§2 의존)
+- [x] **컨트롤 디바이스 SDDL 보안 (write=관리자 전용)** — `device.rs::ControlDevice::create`가
+  `IoCreateDeviceSecure`(wdmsec.lib 실제 export `WdmlibIoCreateDeviceSecure`, FFI 선언 +
+  `lib/windrv/build.rs`에서 `dylib=wdmsec` 링크)로 변경. SDDL/클래스 GUID 등 보안 설정은
+  **sample**에 위치(`sample/windrv/src/provider.rs::control_device_security`,
+  `D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGX;;;AU)`). 상태변경 IOCTL은 모두 `FILE_WRITE_ACCESS`라
+  비관리자는 write 핸들을 열 수 없어 OS가 거부, 조회(STATUS/PROGRESS=`FILE_READ_ACCESS`)는 허용.
+  `make test-vm-driver-load` 13/13 통과(드라이버 로드 + admin `vck-app status` 성공).
+- [x] (방어심화) `sample/windrv/src/provider.rs::require_administrator` — 요청자 토큰의
+  BUILTIN\Administrators 멤버십 in-driver 검사 완료(`AccessToken::is_admin`=`SeTokenIsAdmin`).
+  커널모드 요청자(드라이버 종료 self-IOCTL 등)는 신뢰하여 면제, user-mode write IOCTL은 elevated
+  관리자 토큰만 통과. 디바이스 SDDL(OS 레벨)과 2중 방어.
 
 ---
 

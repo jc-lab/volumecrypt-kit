@@ -4,10 +4,38 @@ use alloc::sync::Arc;
 
 use vck_common::{jvck::JvckMetadataStore, EncryptedOffset, VckError, VckResult};
 use vck_driver::{
-    io::KernelVolumeIo, ioctl::codes::IOCTL_VCK_GET_PROGRESS, AttachContext, DetachContext,
-    IoConfig, IoctlAuthContext, IoctlAuthorization, VolumeProvider,
+    device::ControlDeviceSecurity, io::KernelVolumeIo,
+    ioctl::codes::IOCTL_VCK_GET_PROGRESS, AttachContext, DetachContext, IoConfig, IoctlAuthContext,
+    IoctlAuthorization, RequestorMode, VolumeProvider,
 };
 use vck_sample_common::VckHandoverPayload;
+use wdk_sys::GUID;
+
+/// Control-device SDDL. Local System (`SY`) and Built-in Administrators (`BA`)
+/// get full access (`GA`); Authenticated Users (`AU`) get read+execute only
+/// (`GRGX`). A non-admin therefore cannot open the device with write access, so
+/// the OS rejects every state-mutating IOCTL (all carry `FILE_WRITE_ACCESS`)
+/// before it reaches the driver. Read-only queries (status/progress, which carry
+/// `FILE_READ_ACCESS` and are exempt in `authorize`) remain available to
+/// non-admins that open the device read-only.
+const CONTROL_DEVICE_SDDL: &str = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGX;;;AU)";
+
+/// Private device class GUID for the control device, required by
+/// `IoCreateDeviceSecure`. `{8F3C1A2B-5D74-4E96-A1B0-2C9E7F46D3A8}`.
+const CONTROL_DEVICE_CLASS_GUID: GUID = GUID {
+    Data1: 0x8F3C_1A2B,
+    Data2: 0x5D74,
+    Data3: 0x4E96,
+    Data4: [0xA1, 0xB0, 0x2C, 0x9E, 0x7F, 0x46, 0xD3, 0xA8],
+};
+
+/// Security configuration applied to the control device at creation time.
+pub fn control_device_security() -> ControlDeviceSecurity<'static> {
+    ControlDeviceSecurity {
+        sddl: CONTROL_DEVICE_SDDL,
+        class_guid: CONTROL_DEVICE_CLASS_GUID,
+    }
+}
 
 pub struct VckVolumeProvider;
 
@@ -60,19 +88,24 @@ impl IoctlAuthorization for VckVolumeProvider {
     }
 }
 
-/// Sample policy: allow the request.
+/// Require the requestor to be an administrator.
 ///
-/// Access is currently gated at the OS level by the control device's security
-/// descriptor (only administrators can open `\\.\VolumeCryptKitSample`). The
-/// framework does not yet plumb the requestor token into `IoctlAuthContext`
-/// (`requestor_token` is always `None`), so an in-driver membership check is not
-/// possible here.
+/// Two layers enforce this. First, the control device's SDDL (see
+/// [`CONTROL_DEVICE_SDDL`], installed via `IoCreateDeviceSecure`) only lets
+/// administrators/System open `\\.\VolumeCryptKitSample` with write access, and
+/// every state-mutating IOCTL carries `FILE_WRITE_ACCESS`, so the I/O manager
+/// rejects non-admins before they reach here. Second, this in-driver check
+/// (defence-in-depth) inspects the requestor's primary token with
+/// `SeTokenIsAdmin`.
 ///
-/// TODO(sample): for defence-in-depth, create the control device with an
-/// admin-only SDDL via `IoCreateDeviceSecure`
-/// (`D:P(A;;GA;;;SY)(A;;GA;;;BA)`), and/or plumb the requestor token and use
-/// `SeTokenIsAdmin` / `RtlCheckTokenMembership` to enforce per-IOCTL.
+/// Kernel-mode requestors (e.g. the driver's own shutdown self-IOCTLs) are
+/// trusted and exempt. A user-mode request with no recoverable token is denied.
 fn require_administrator(ctx: &IoctlAuthContext<'_>) -> VckResult<()> {
-    let _ = ctx;
-    Ok(())
+    if ctx.requestor_mode == RequestorMode::Kernel {
+        return Ok(());
+    }
+    match ctx.requestor_token {
+        Some(token) if token.is_admin() => Ok(()),
+        _ => Err(VckError::PermissionDenied("administrator privilege required")),
+    }
 }

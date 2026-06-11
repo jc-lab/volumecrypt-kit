@@ -17,8 +17,8 @@ use spin::{Lazy, Mutex};
 use wdk_alloc::WdkAllocator;
 use wdk_sys::{
     ntddk::{
-        IoBuildDeviceIoControlRequest, IofCallDriver, IofCompleteRequest, KeInitializeEvent,
-        KeWaitForSingleObject,
+        IoBuildDeviceIoControlRequest, IoGetRequestorProcess, IofCallDriver, IofCompleteRequest,
+        KeInitializeEvent, KeWaitForSingleObject,
     },
     CCHAR, DRIVER_OBJECT, IO_NO_INCREMENT, IO_STATUS_BLOCK, IRP_MJ_CLEANUP, IRP_MJ_CLOSE,
     IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, IRP_MJ_SHUTDOWN, KEVENT, NTSTATUS, PDEVICE_OBJECT,
@@ -30,7 +30,7 @@ use vck_driver::{
     filter::handle_filter_irp,
     ioctl::codes::{IOCTL_VCK_DETACH_ALL_VOLUMES, IOCTL_VCK_PAUSE_OS_VOLUME},
     ioctl::dispatch_ioctl,
-    provider::{IoctlAuthContext, RequestorMode},
+    provider::{AccessToken, IoctlAuthContext, RequestorMode},
     VolumeAttachRegistry,
 };
 use vck_sample_common::VckHandoverPayload;
@@ -65,6 +65,9 @@ extern "system" {
 struct ExpandCtx {
     ioctl_code: u32,
     requestor_mode: RequestorMode,
+    /// Borrowed requestor token (null when none); owned by the outer handler
+    /// frame, which outlives this synchronous callout.
+    requestor_token: *const AccessToken,
     input_ptr: *const u8,
     input_len: usize,
     result: Option<vck_driver::VckResult<alloc::vec::Vec<u8>>>,
@@ -81,7 +84,7 @@ unsafe extern "C" fn dispatch_callout(parameter: *mut c_void) {
     let auth_ctx = IoctlAuthContext {
         ioctl_code: cx.ioctl_code,
         requestor_mode: cx.requestor_mode,
-        requestor_token: None,
+        requestor_token: cx.requestor_token.as_ref(),
     };
     cx.result = Some(dispatch_ioctl(&PROVIDER, &REGISTRY, &auth_ctx, input));
 }
@@ -102,7 +105,10 @@ pub unsafe extern "system" fn DriverEntry(
         None => return STATUS_INVALID_PARAMETER,
     };
 
-    match ControlDevice::create(driver as *mut DRIVER_OBJECT) {
+    match ControlDevice::create(
+        driver as *mut DRIVER_OBJECT,
+        &provider::control_device_security(),
+    ) {
         Ok(control_device) => {
             *CONTROL_DEVICE.lock() = Some(control_device);
         }
@@ -376,12 +382,21 @@ unsafe extern "C" fn dispatch_device_control(
         _ => RequestorMode::User,
     };
 
+    // Reference the requestor's primary token so the authorization policy can
+    // check admin membership. Held in this frame (released on drop) and borrowed
+    // by the auth context; the dispatch runs synchronously below.
+    let requestor_token = unsafe { AccessToken::from_process(IoGetRequestorProcess(irp)) };
+    let requestor_token_ptr = requestor_token
+        .as_ref()
+        .map_or(core::ptr::null(), |t| t as *const AccessToken);
+
     // Run the dispatch on an expanded kernel stack (the metadata/crypto path is
     // stack-hungry and calls down the storage stack). Fall back to the current
     // stack if expansion fails.
     let mut ex = ExpandCtx {
         ioctl_code,
         requestor_mode,
+        requestor_token: requestor_token_ptr,
         input_ptr: input.as_ptr(),
         input_len: input.len(),
         result: None,
@@ -401,7 +416,7 @@ unsafe extern "C" fn dispatch_device_control(
         let auth_ctx = IoctlAuthContext {
             ioctl_code,
             requestor_mode,
-            requestor_token: None,
+            requestor_token: requestor_token.as_ref(),
         };
         dispatch_ioctl(&PROVIDER, &REGISTRY, &auth_ctx, input)
     };

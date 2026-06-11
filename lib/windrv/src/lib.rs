@@ -24,8 +24,8 @@ pub mod registry;
 
 pub use offset::engine::EncryptionEngine;
 pub use provider::{
-    AttachContext, DetachContext, IoConfig, IoHooks, IoctlAuthContext, IoctlAuthorization,
-    RequestorMode, VolumeProvider,
+    AccessToken, AttachContext, DetachContext, IoConfig, IoHooks, IoctlAuthContext,
+    IoctlAuthorization, RequestorMode, VolumeProvider,
 };
 pub use registry::{
     global_registry, set_global_registry, AttachSource, AttachedVolume, HandoverInfo,

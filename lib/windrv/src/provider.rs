@@ -5,6 +5,10 @@ use alloc::sync::Arc;
 use vck_common::{
     handover::payload::HandoverPayload, EncryptedOffset, EncryptedOffsetStore, VckResult, VolumeId,
 };
+use wdk_sys::{
+    ntddk::{PsDereferencePrimaryToken, PsReferencePrimaryToken, SeTokenIsAdmin},
+    PACCESS_TOKEN, PEPROCESS,
+};
 
 /// OS Volume boot-time attach callback. Data volumes do not use this (they
 /// attach via `IOCTL_JVCK_ATTACH` handled in `ioctl::dispatch`).
@@ -79,10 +83,70 @@ pub enum RequestorMode {
     User,
 }
 
-/// Opaque access token reference passed to authorization checks.
-/// TODO(driver): wrap the real `PACCESS_TOKEN` / requestor SID lookup.
+/// The IOCTL requestor's access token, passed to authorization checks.
+///
+/// Constructed by the driver binary from the requestor process (e.g. via
+/// `IoGetRequestorProcess` in the `IRP_MJ_DEVICE_CONTROL` handler). When created
+/// with [`AccessToken::from_process`] it holds a primary-token reference that is
+/// released on `Drop`, so it stays valid for the lifetime of the borrowing
+/// [`IoctlAuthContext`]. All methods require `PASSIVE_LEVEL`.
 pub struct AccessToken {
-    _private: (),
+    token: PACCESS_TOKEN,
+    /// `true` when we hold a `PsReferencePrimaryToken` reference to release.
+    owned: bool,
+}
+
+impl AccessToken {
+    /// Reference the primary token of `process` (the IOCTL requestor). The
+    /// reference is released on `Drop`. Returns `None` if `process` is null or
+    /// has no primary token.
+    ///
+    /// # Safety
+    /// `process` must be a valid `PEPROCESS` (or null) and the call must run at
+    /// `PASSIVE_LEVEL`.
+    pub unsafe fn from_process(process: PEPROCESS) -> Option<Self> {
+        if process.is_null() {
+            return None;
+        }
+        let token = PsReferencePrimaryToken(process);
+        if token.is_null() {
+            return None;
+        }
+        Some(Self { token, owned: true })
+    }
+
+    /// Wrap an already-valid token without taking ownership of its reference
+    /// count.
+    ///
+    /// # Safety
+    /// `token` must remain valid for the lifetime of the returned wrapper.
+    pub unsafe fn from_raw(token: PACCESS_TOKEN) -> Self {
+        Self {
+            token,
+            owned: false,
+        }
+    }
+
+    /// The raw `PACCESS_TOKEN`.
+    pub fn as_raw(&self) -> PACCESS_TOKEN {
+        self.token
+    }
+
+    /// Whether the token has the local Administrators group enabled (i.e. the
+    /// caller is elevated). Wraps `SeTokenIsAdmin`; must run at `PASSIVE_LEVEL`.
+    pub fn is_admin(&self) -> bool {
+        // SAFETY: `token` is a valid referenced PACCESS_TOKEN.
+        unsafe { SeTokenIsAdmin(self.token) != 0 }
+    }
+}
+
+impl Drop for AccessToken {
+    fn drop(&mut self) {
+        if self.owned && !self.token.is_null() {
+            // SAFETY: balances the PsReferencePrimaryToken from `from_process`.
+            unsafe { PsDereferencePrimaryToken(self.token) };
+        }
+    }
 }
 
 pub struct IoctlAuthContext<'a> {
