@@ -5,7 +5,7 @@
 //! `EncryptionEngine`: decides per-sector crypto behaviour and drives the
 //! background encrypt/decrypt sweep, persisting progress via the store.
 
-use vck_common::{EncryptedOffset, EncryptedOffsetStore, SectorIo, VckResult};
+use vck_common::{types::VolumeState, EncryptedOffset, EncryptedOffsetStore, SectorIo, VckResult};
 
 use crate::crypto::aes_xts::AesXtsCipher;
 
@@ -86,8 +86,10 @@ impl EncryptionEngine {
         }
     }
 
-    /// Begin (or resume) progressive encryption. No-op if already fully encrypted.
-    pub fn start_encrypt(&mut self) {
+    /// Begin progressive encryption and persist the direction (so a reboot
+    /// resumes encrypting). No sweep work if already fully encrypted.
+    pub fn start_encrypt(&mut self, store: &dyn EncryptedOffsetStore) {
+        let _ = store.store_state(VolumeState::Encrypt);
         if !self.encrypted_offset.is_fully_encrypted() {
             self.state = EngineState::Encrypting;
         } else {
@@ -95,12 +97,36 @@ impl EncryptionEngine {
         }
     }
 
-    /// Begin (or resume) progressive decryption. No-op if nothing is encrypted.
-    pub fn start_decrypt(&mut self) {
+    /// Begin progressive decryption and persist the direction (so a reboot
+    /// resumes decrypting). No sweep work if nothing is encrypted.
+    pub fn start_decrypt(&mut self, store: &dyn EncryptedOffsetStore) {
+        let _ = store.store_state(VolumeState::Decrypt);
         if self.encrypted_offset.sector > 0 {
             self.state = EngineState::Decrypting;
         } else {
             self.state = EngineState::Idle;
+        }
+    }
+
+    /// Resume the sweep in the **persisted** direction after attach (e.g. the OS
+    /// volume re-binding on reboot). Reads the direction the store recorded; does
+    /// not re-persist it. Idle if there is nothing left to do in that direction.
+    pub fn resume(&mut self, store: &dyn EncryptedOffsetStore) {
+        match store.load_state().unwrap_or(VolumeState::Encrypt) {
+            VolumeState::Encrypt => {
+                self.state = if self.encrypted_offset.is_fully_encrypted() {
+                    EngineState::Idle
+                } else {
+                    EngineState::Encrypting
+                };
+            }
+            VolumeState::Decrypt => {
+                self.state = if self.encrypted_offset.sector > 0 {
+                    EngineState::Decrypting
+                } else {
+                    EngineState::Idle
+                };
+            }
         }
     }
 

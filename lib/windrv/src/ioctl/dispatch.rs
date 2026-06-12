@@ -162,7 +162,7 @@ fn handle_start_encrypt(
     let req: VolumeRequest = decode_req(input)?;
     let volume = resolve_volume(registry, &req.volume_path)
         .ok_or(VckError::NotFound("volume is not attached"))?;
-    volume.encryption.lock().start_encrypt();
+    volume.encryption.lock().start_encrypt(&*volume.offset_store);
     unsafe { crate::filter::volume_thread::wake_for(&volume) };
     encode_resp(&EmptyResponse {})
 }
@@ -174,7 +174,7 @@ fn handle_start_decrypt(
     let req: VolumeRequest = decode_req(input)?;
     let volume = resolve_volume(registry, &req.volume_path)
         .ok_or(VckError::NotFound("volume is not attached"))?;
-    volume.encryption.lock().start_decrypt();
+    volume.encryption.lock().start_decrypt(&*volume.offset_store);
     unsafe { crate::filter::volume_thread::wake_for(&volume) };
     encode_resp(&EmptyResponse {})
 }

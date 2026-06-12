@@ -261,12 +261,13 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     });
     registry.insert(volume.clone());
 
-    // Resume the encryption sweep across reboot: the engine is created Idle and
-    // the footer metadata only persists the boundary (not the run state), so a
-    // partially-encrypted OS volume would otherwise sit idle. `start_encrypt` is
-    // a no-op once fully encrypted, so calling it unconditionally is safe. Set
-    // the state BEFORE binding so the per-volume thread sweeps on start.
-    volume.encryption.lock().start_encrypt();
+    // Resume the sweep across reboot in the PERSISTED direction: the footer
+    // metadata records both the boundary and the sweep state (encrypt/decrypt),
+    // so `resume` reads `store.load_state()` and continues encrypting OR
+    // decrypting (a decrypt that was in progress must not flip back to encrypt).
+    // No-op once there is nothing left to do in that direction. Set the state
+    // BEFORE binding so the per-volume thread sweeps on start.
+    volume.encryption.lock().resume(&*volume.offset_store);
 
     crate::filter::filter_bind_volume(filter_do, volume.clone());
     crate::vck_log!(
