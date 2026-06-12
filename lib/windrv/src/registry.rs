@@ -5,15 +5,15 @@
 //! Tracks every volume currently attached to the driver (OS via handover, data
 //! via IOCTL).
 
-use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use spin::Mutex;
-use vck_common::{types::Guid, EncryptedOffsetStore, SectorIo, VckResult};
+use vck_common::{types::Guid, EncryptedOffsetStore, SectorIo, VckResult, VolumeCipher};
 use wdk_sys::{DEVICE_OBJECT, DRIVER_OBJECT};
 
-use crate::{crypto::aes_xts::AesXtsCipher, offset::engine::EncryptionEngine, provider::IoConfig};
+use crate::{offset::engine::EncryptionEngine, provider::IoConfig};
 
 /// Boot-time ACPI handover essentials, decoded once at `DriverEntry`.
 ///
@@ -88,8 +88,9 @@ pub struct AttachedVolume {
     pub attach_source: AttachSource,
     /// Filter device object attached above this volume (null if none yet).
     pub filter_device: AtomicPtr<DEVICE_OBJECT>,
-    /// AES-XTS cipher for the background sweep (present on the high-level path).
-    pub cipher: Option<AesXtsCipher>,
+    /// Volume cipher for the background sweep (present on the high-level path).
+    /// A trait object so a vendor suite can supply a non-XTS algorithm.
+    pub cipher: Option<Box<dyn VolumeCipher>>,
     /// Raw sector I/O for the background sweep. After `attach_filter` this is
     /// replaced (via `Mutex`) with a handle opened directly against the lower
     /// device object, so sweep I/O bypasses our filter entirely.
@@ -290,7 +291,7 @@ impl AttachedVolume {
         let io = self.sweep_io.lock().clone();
         let result = {
             let mut engine = self.encryption.lock();
-            engine.progress_step(io.as_ref(), cipher, self.offset_store.as_ref(), batch_sectors)
+            engine.progress_step(io.as_ref(), &**cipher, self.offset_store.as_ref(), batch_sectors)
         }; // lock released here before sync_boundary
         if result.is_ok() {
             self.sync_boundary();

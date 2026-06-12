@@ -5,9 +5,9 @@
 //! `EncryptionEngine`: decides per-sector crypto behaviour and drives the
 //! background encrypt/decrypt sweep, persisting progress via the store.
 
-use vck_common::{types::VolumeState, EncryptedOffset, EncryptedOffsetStore, SectorIo, VckResult};
-
-use crate::crypto::aes_xts::AesXtsCipher;
+use vck_common::{
+    types::VolumeState, EncryptedOffset, EncryptedOffsetStore, SectorIo, VckResult, VolumeCipher,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EngineState {
@@ -160,7 +160,7 @@ impl EncryptionEngine {
     pub fn progress_step(
         &mut self,
         io: &dyn SectorIo,
-        cipher: &AesXtsCipher,
+        cipher: &dyn VolumeCipher,
         store: &dyn EncryptedOffsetStore,
         batch_sectors: u64,
     ) -> VckResult<bool> {
@@ -174,7 +174,7 @@ impl EncryptionEngine {
     fn encrypt_step(
         &mut self,
         io: &dyn SectorIo,
-        cipher: &AesXtsCipher,
+        cipher: &dyn VolumeCipher,
         store: &dyn EncryptedOffsetStore,
         batch_sectors: u64,
     ) -> VckResult<bool> {
@@ -220,7 +220,7 @@ impl EncryptionEngine {
     fn decrypt_step(
         &mut self,
         io: &dyn SectorIo,
-        cipher: &AesXtsCipher,
+        cipher: &dyn VolumeCipher,
         store: &dyn EncryptedOffsetStore,
         batch_sectors: u64,
     ) -> VckResult<bool> {

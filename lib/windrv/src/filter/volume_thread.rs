@@ -309,7 +309,7 @@ fn data_relative(volume: &AttachedVolume, abs_lba: u64) -> Option<u64> {
 }
 
 fn pipeline_for(volume: &AttachedVolume) -> Option<CryptoPipeline<'_>> {
-    volume.cipher.as_ref().map(CryptoPipeline::new)
+    volume.cipher.as_ref().map(|c| CryptoPipeline::new(&**c))
 }
 
 unsafe fn map_mdl(irp: PIRP) -> *mut u8 {

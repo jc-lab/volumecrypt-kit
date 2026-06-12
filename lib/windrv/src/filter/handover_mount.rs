@@ -46,7 +46,6 @@ use wdk_sys::{
 };
 
 use crate::{
-    crypto::aes_xts::AesXtsCipher,
     device::DeviceExtension,
     io::LowerDeviceIo,
     offset::engine::EncryptionEngine,
@@ -220,7 +219,7 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     };
     let (key1, key2) = store.fvek_keys();
     let (key1, key2) = (*key1, *key2);
-    let cipher = match AesXtsCipher::new(key1, key2) {
+    let cipher = match crate::crypto::build_volume_cipher(store.header(), key1, key2) {
         Ok(c) => c,
         Err(e) => {
             crate::vck_log!("handover_mount: cipher init failed: {}", e);

@@ -221,7 +221,6 @@ fn handle_jvck_prepare_adddevice_path(
     lower_do: wdk_sys::PDEVICE_OBJECT,
 ) -> VckResult<IoctlResponse> {
     use vck_common::jvck::metadata::{self, METADATA_BLOCK_SIZE};
-    use crate::crypto::aes_xts::AesXtsCipher;
     use wdk_sys::ntddk::ZwDeviceIoControlFile;
 
     // OS (system) volumes register as Handover so DETACH_ALL / detach / unload
@@ -356,13 +355,16 @@ fn handle_jvck_prepare_adddevice_path(
         };
         let (key1, key2) = store.fvek_keys();
         let (key1, key2) = (*key1, *key2);
+        // Clone the full header before the store is moved into the Arc, so the
+        // cipher factory can select from the whole metadata (vendor_id/reserved).
+        let vol_header = store.header().clone();
         let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
         let io_config = IoConfig::AesXts {
             key1, key2, offset_sector: store_offset,
             encrypted_offset: encrypted_offset.clone(),
             offset_store: offset_store.clone(),
         };
-        let cipher = AesXtsCipher::new(key1, key2)?;
+        let cipher = crate::crypto::build_volume_cipher(&vol_header, key1, key2)?;
         // sweep_io uses LowerDeviceIo — direct to raw disk, below PartMgr ✓
         let sweep_io: Arc<dyn SectorIo> = Arc::new(
             LowerDeviceIo::new(lower_do, store_bps, store_data)
@@ -793,6 +795,9 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         };
         let (key1, key2) = store.fvek_keys();
         let (key1, key2) = (*key1, *key2);
+        // Clone the full header before the store is moved into the Arc, so the
+        // cipher factory can select from the whole metadata (vendor_id/reserved).
+        let vol_header = store.header().clone();
         let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
         let io_config = IoConfig::AesXts {
             key1, key2,
@@ -800,7 +805,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
             encrypted_offset: encrypted_offset.clone(),
             offset_store: offset_store.clone(),
         };
-        let cipher = AesXtsCipher::new(key1, key2).map_err(|err| {
+        let cipher = crate::crypto::build_volume_cipher(&vol_header, key1, key2).map_err(|err| {
             registry.remove(&req.volume_path);
             crate::filter::detach_filter(filter_do);
             err
@@ -958,6 +963,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
     let (key1, key2) = store.fvek_keys();
     let (key1, key2) = (*key1, *key2);
 
+    let vol_header = store.header().clone();
     let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
     let io_config = IoConfig::AesXts {
         key1,
@@ -968,7 +974,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
     };
 
     crate::vck_log!("jvck_attach: build cipher + sweep_io");
-    let cipher = AesXtsCipher::new(key1, key2)?;
+    let cipher = crate::crypto::build_volume_cipher(&vol_header, key1, key2)?;
 
     // sweep_io must bypass both NTFS and the filter so that:
     //   1. NTFS write protection for its own sectors (e.g. VBR at lba=0) doesn't block us

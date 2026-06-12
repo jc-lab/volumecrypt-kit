@@ -46,11 +46,44 @@ use crate::{VckError, VckResult};
 /// Matches the AES-NI backend's `ParBlocks = 8`, filling the 7-cycle pipeline.
 const BATCH: usize = 8;
 
+/// A full-volume sector cipher.
+///
+/// The default JVCK suite uses [`XtsVolumeCipher`] (AES-256-XTS), but a vendor
+/// can supply a different full-volume-encryption algorithm by implementing this
+/// trait and selecting it from the volume metadata (see the driver's cipher
+/// factory). All sector numbers are **data-region relative** (`rel = lba -
+/// offset_sector`); see the module docs for the tweak convention.
+pub trait VolumeCipher: Send + Sync {
+    /// Encrypt one sector in place.
+    fn encrypt_sector(&self, rel_sector: u64, sector: &mut [u8]);
+    /// Decrypt one sector in place.
+    fn decrypt_sector(&self, rel_sector: u64, sector: &mut [u8]);
+    /// Encrypt a contiguous buffer of `sector_size`-byte sectors.
+    fn encrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64);
+    /// Decrypt a contiguous buffer (inverse of [`encrypt_area`](Self::encrypt_area)).
+    fn decrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64);
+}
+
 pub struct XtsVolumeCipher {
     /// Data cipher for the AES-XTS payload blocks.
     cipher_1: Aes256,
     /// Tweak cipher (initial tweak = AES_K2(sector_number)).
     cipher_2: Aes256,
+}
+
+impl VolumeCipher for XtsVolumeCipher {
+    fn encrypt_sector(&self, rel_sector: u64, sector: &mut [u8]) {
+        XtsVolumeCipher::encrypt_sector(self, rel_sector, sector)
+    }
+    fn decrypt_sector(&self, rel_sector: u64, sector: &mut [u8]) {
+        XtsVolumeCipher::decrypt_sector(self, rel_sector, sector)
+    }
+    fn encrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64) {
+        XtsVolumeCipher::encrypt_area(self, buf, sector_size, first_rel_sector)
+    }
+    fn decrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64) {
+        XtsVolumeCipher::decrypt_area(self, buf, sector_size, first_rel_sector)
+    }
 }
 
 /// GF(2^128) multiplication by the primitive element alpha in the XTS field

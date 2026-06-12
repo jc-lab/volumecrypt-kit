@@ -13,14 +13,14 @@
 //! decided independently: `rel < encrypted_offset` is ciphertext, otherwise it
 //! is still plaintext.
 
-use crate::crypto::aes_xts::AesXtsCipher;
+use vck_common::VolumeCipher;
 
 pub struct CryptoPipeline<'a> {
-    cipher: &'a AesXtsCipher,
+    cipher: &'a dyn VolumeCipher,
 }
 
 impl<'a> CryptoPipeline<'a> {
-    pub fn new(cipher: &'a AesXtsCipher) -> Self {
+    pub fn new(cipher: &'a dyn VolumeCipher) -> Self {
         Self { cipher }
     }
 

@@ -40,3 +40,20 @@ impl AesXtsCipher {
         self.inner.decrypt_area(buf, sector_size, first_rel_sector);
     }
 }
+
+/// Expose AES-XTS as the generic [`VolumeCipher`] so it can be selected as one
+/// of several vendor suites and stored as a trait object on the volume.
+impl vck_common::VolumeCipher for AesXtsCipher {
+    fn encrypt_sector(&self, rel_sector: u64, sector: &mut [u8]) {
+        self.inner.encrypt_sector(rel_sector, sector);
+    }
+    fn decrypt_sector(&self, rel_sector: u64, sector: &mut [u8]) {
+        self.inner.decrypt_sector(rel_sector, sector);
+    }
+    fn encrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64) {
+        self.inner.encrypt_area(buf, sector_size, first_rel_sector);
+    }
+    fn decrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64) {
+        self.inner.decrypt_area(buf, sector_size, first_rel_sector);
+    }
+}
