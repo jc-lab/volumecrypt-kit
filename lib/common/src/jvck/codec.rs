@@ -48,7 +48,9 @@ pub struct Unsealed {
 /// decide and run its metadata decryption.
 pub struct ReplicaCtx<'a> {
     header: &'a JvckHeader,
-    block: &'a [u8; METADATA_BLOCK_SIZE],
+    /// Owned so the ctx can be returned from `JvckMetadataReader::replica_ctx`
+    /// while only borrowing the header + io.
+    block: [u8; METADATA_BLOCK_SIZE],
     io: &'a dyn SectorIo,
     /// Base LBA of this replica's vendor-specific data region.
     vendor_base_lba: u64,
@@ -64,7 +66,7 @@ impl<'a> ReplicaCtx<'a> {
     /// (`JvckMetadataReader`); samples receive a `&ReplicaCtx`, not build one.
     pub(crate) fn new(
         header: &'a JvckHeader,
-        block: &'a [u8; METADATA_BLOCK_SIZE],
+        block: [u8; METADATA_BLOCK_SIZE],
         io: &'a dyn SectorIo,
         vendor_base_lba: u64,
         vendor_sector_count: u64,
@@ -89,7 +91,7 @@ impl<'a> ReplicaCtx<'a> {
 
     /// The full 512-byte Metadata block (CRC already verified).
     pub fn block(&self) -> &[u8] {
-        self.block
+        &self.block
     }
 
     /// The 128-byte EncryptedMetadata blob within the block.

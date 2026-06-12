@@ -280,7 +280,7 @@ impl<S: SectorIo> JvckMetadataStore<S> {
             .unwrap_or(0);
             let ctx = ReplicaCtx::new(
                 &self.header,
-                &block,
+                block,
                 &self.io as &dyn SectorIo,
                 vendor_base,
                 rs.saturating_sub(1),
@@ -439,6 +439,43 @@ impl<S: SectorIo> JvckMetadataStore<S> {
         let lba = self.vendor_data_lba_checked(replica_index, rel_sector, buf.len())?;
         self.io.write_sectors(lba, buf)
     }
+
+    /// Write `buf` into the vendor-data region of **every** replica (same
+    /// `rel_sector` in each), so the vendor data stays consistent across replicas
+    /// — mirroring how the Metadata block is mirrored to all replicas.
+    ///
+    /// Sequential and best-effort: a mid-loop failure leaves earlier replicas
+    /// updated and returns the error (the caller may retry; the layout is fixed
+    /// so a retry targets the same LBAs). Validates the buffer against the first
+    /// replica before writing any.
+    pub fn write_vendor_data_all(&self, rel_sector: u64, buf: &[u8]) -> VckResult<()> {
+        // Validate once up front (range/alignment is identical for every replica).
+        self.vendor_data_lba_checked(0, rel_sector, buf.len())?;
+        for replica_index in 0..self.replica_count() {
+            self.write_vendor_data(replica_index, rel_sector, buf)?;
+        }
+        Ok(())
+    }
+
+    /// The 192-byte Vendor Specific Reserved area from the parsed header.
+    pub fn vendor_reserved(&self) -> &[u8; metadata::VENDOR_RESERVED_SIZE] {
+        &self.header.vendor_reserved
+    }
+
+    /// Set the Vendor Specific Reserved area and re-seal **all** replicas, so
+    /// every replica's Metadata block carries the new value (the reserved area is
+    /// inside the sealed 512-byte block, mirrored to all replicas on each write).
+    ///
+    /// Takes `&mut self`: call while the store is uniquely owned (e.g. in
+    /// `on_attach` before wrapping it in `Arc<dyn EncryptedOffsetStore>`), since
+    /// the trait-object form used at runtime cannot reach this concrete method.
+    pub fn set_vendor_reserved(
+        &mut self,
+        vendor_reserved: &[u8; metadata::VENDOR_RESERVED_SIZE],
+    ) -> VckResult<()> {
+        self.header.vendor_reserved = *vendor_reserved;
+        self.write_all_replicas()
+    }
 }
 
 impl<S: SectorIo> EncryptedOffsetStore for JvckMetadataStore<S>
@@ -544,6 +581,46 @@ impl<S: SectorIo> JvckMetadataReader<S> {
         (self.options.use_header + self.options.use_footer) as usize
     }
 
+    /// Build a [`ReplicaCtx`] for `replica_index` (header replicas first, then
+    /// footer). Reads that replica's Metadata block and verifies its CRC; the
+    /// returned ctx exposes the header, the raw block / encrypted blob, and that
+    /// replica's vendor-specific data (via [`ReplicaCtx::read_vendor_data`]). A
+    /// vendor uses this to inspect / unseal a specific replica directly, instead
+    /// of relying on the `into_store` iteration order. Errors if the index is out
+    /// of range or the replica's CRC is invalid.
+    pub fn replica_ctx(&self, replica_index: usize) -> VckResult<ReplicaCtx<'_>> {
+        let sector_size = self.geometry.sector_size;
+        let rs = replica_sectors(self.options.metadata_size, sector_size);
+        let lbas = metadata_sector_lbas(
+            self.volume_sectors,
+            rs,
+            self.options.use_header,
+            self.options.use_footer,
+        );
+        let lba = *lbas
+            .get(replica_index)
+            .ok_or(VckError::NotFound("replica index out of range"))?;
+        let block = read_block(&self.io, sector_size, lba)?;
+        metadata::verify_crc(&block)?;
+        let vendor_base = vendor_data_base_lba_at(
+            self.volume_sectors,
+            rs,
+            self.options.use_header,
+            self.options.use_footer,
+            replica_index,
+        )
+        .unwrap_or(0);
+        Ok(ReplicaCtx::new(
+            &self.header,
+            block,
+            &self.io as &dyn SectorIo,
+            vendor_base,
+            rs.saturating_sub(1),
+            sector_size,
+            replica_index,
+        ))
+    }
+
     /// Read `buf` (a whole number of sectors) from replica `replica_index`'s
     /// vendor-specific data region, before decryption — to inform codec
     /// selection. `rel_sector` is vendor-region relative.
@@ -631,7 +708,7 @@ impl<S: SectorIo> JvckMetadataReader<S> {
             .unwrap_or(0);
             let ctx = ReplicaCtx::new(
                 &self.header,
-                &block,
+                block,
                 &self.io as &dyn SectorIo,
                 vendor_base,
                 rs.saturating_sub(1),
@@ -1008,6 +1085,80 @@ mod tests {
 
         // Vendor-data writes must not clobber the Metadata sector.
         assert_eq!(store.load_offset().unwrap(), 0);
+    }
+
+    #[test]
+    fn write_vendor_data_all_mirrors_every_replica() {
+        ensure_rng();
+        let io = MemVolume::new(512, 1024);
+        let store =
+            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16], default_codec())
+                .unwrap();
+        assert_eq!(store.replica_count(), 2);
+
+        let data = alloc::vec![0x5Au8; 1024]; // 2 sectors
+        store.write_vendor_data_all(7, &data).unwrap();
+
+        // Every replica's vendor region carries the same bytes.
+        for replica in 0..store.replica_count() {
+            let mut back = alloc::vec![0u8; 1024];
+            store.read_vendor_data(replica, 7, &mut back).unwrap();
+            assert_eq!(back, data, "replica {replica} vendor data mismatch");
+        }
+        // Validation still applies (out-of-range rejected before any write).
+        assert!(store.write_vendor_data_all(255, &data).is_err());
+        // Metadata is intact.
+        assert_eq!(store.load_offset().unwrap(), 0);
+    }
+
+    #[test]
+    fn set_vendor_reserved_persists_to_all_replicas() {
+        ensure_rng();
+        let io = MemVolume::new(512, 1024);
+        let mut store =
+            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16], default_codec())
+                .unwrap();
+        assert_eq!(store.vendor_reserved(), &[0u8; metadata::VENDOR_RESERVED_SIZE]);
+
+        let vr = [0xABu8; metadata::VENDOR_RESERVED_SIZE];
+        store.set_vendor_reserved(&vr).unwrap();
+        assert_eq!(store.vendor_reserved(), &vr);
+
+        // Reopen and confirm every replica's header carries the new reserved area.
+        let io = store.io;
+        let reader = JvckMetadataReader::open(io).unwrap();
+        assert_eq!(reader.header().vendor_reserved, vr);
+        for replica in 0..reader.replica_count() {
+            let ctx = reader.replica_ctx(replica).unwrap();
+            assert_eq!(ctx.header().vendor_reserved, vr, "replica {replica}");
+        }
+    }
+
+    #[test]
+    fn reader_replica_ctx_exposes_block_and_vendor_data() {
+        ensure_rng();
+        let io = MemVolume::new(512, 1024);
+        let store =
+            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16], default_codec())
+                .unwrap();
+        let marker = alloc::vec![0xE7u8; 512];
+        store.write_vendor_data_all(0, &marker).unwrap();
+
+        let io = store.io;
+        let reader = JvckMetadataReader::open(io).unwrap();
+        assert_eq!(reader.replica_count(), 2);
+
+        // A specific replica's ctx: CRC-valid block + JVCK signature + its vendor data.
+        let ctx = reader.replica_ctx(1).unwrap();
+        assert_eq!(ctx.replica_index(), 1);
+        assert_eq!(&ctx.block()[..4], b"JVCK");
+        assert_eq!(ctx.encrypted_metadata().len(), metadata::ENCRYPTED_METADATA_SIZE);
+        let mut vd = alloc::vec![0u8; 512];
+        ctx.read_vendor_data(0, &mut vd).unwrap();
+        assert_eq!(vd, marker);
+
+        // Out-of-range index is rejected.
+        assert!(reader.replica_ctx(2).is_err());
     }
 
     #[test]

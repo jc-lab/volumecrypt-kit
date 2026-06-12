@@ -140,7 +140,9 @@ ENC_IV  = HKDF_SHA256(salt = Volume ID ‖ Salt, ikm = VMK, info = "EncryptedMet
     채택**(아니면 다음 replica). `select`가 codec 선택 + unseal + 추가 검증을 모두 하고 **codec과 unsealed를
     함께 반환**합니다 — CRC가 맞아도 복호화 결과(예: replica 간 `encrypted_offset` 불일치)나 vendor specific
     data가 잘못됐을 수 있으므로, 그 replica를 `Err`로 건너뛸 수 있습니다. `ReplicaCtx`는 `header()` /
-    `encrypted_metadata()` / `block()` / `salt()` / `read_vendor_data()`를 제공.
+    `encrypted_metadata()` / `block()` / `salt()` / `read_vendor_data()`를 제공하며, 특정 replica의 ctx를
+    직접 얻으려면 `JvckMetadataReader::replica_ctx(replica_index)`를 씁니다(`into_store` 순회 순서에 의존하지
+    않고 원하는 replica를 검사/복호화).
   - 반환된 codec(`MetadataCodec`)은 `unseal`(복호화) + `seal`(재봉인) **양방향**을 담당하며 store가 보관해
     sweep 중 `store`/`store_state` 재봉인과 `load_offset` 복구에 그대로 씁니다. into_store 자체는 codec을 받지
     않습니다 — selector가 replica를 보고 골라 돌려줍니다. 기본 suite는 `JvckCbcCodec`(AES-256-CBC + HKDF +
@@ -149,6 +151,11 @@ ENC_IV  = HKDF_SHA256(salt = Volume ID ‖ Salt, ikm = VMK, info = "EncryptedMet
 - **Vendor specific data 영역**: 각 replica는 Metadata 블록(1 섹터) 외에 `metadata_size - sector_size`
   만큼의 벤더 전용 영역을 가집니다. `JvckMetadataStore`가 섹터 단위 R/W API를 제공합니다:
   `replica_count()`, `vendor_data_sector_count()`, `read_vendor_data(replica, rel_sector, buf)`,
-  `write_vendor_data(replica, rel_sector, buf)`. (버퍼는 sector_size의 배수, 범위는 replica 영역 내로 검증.)
+  `write_vendor_data(replica, rel_sector, buf)`, 그리고 **모든 replica에 함께 쓰는**
+  `write_vendor_data_all(rel_sector, buf)`. (버퍼는 sector_size의 배수, 범위는 replica 영역 내로 검증.)
+- **Vendor Specific Reserved(헤더 내 192B)**: Metadata 블록 안에 있어 매 write마다 모든 replica에 seal됩니다.
+  값을 설정·갱신하려면 `JvckMetadataStore::set_vendor_reserved(&[u8; 192])`(헤더 갱신 + 전 replica 재-seal,
+  `&mut self`이므로 store를 `Arc`로 공유하기 전 attach 시점에 호출), 읽기는 `vendor_reserved()` /
+  `header().vendor_reserved`.
 - **저수준 경로**: 고수준 `VolumeCipher` 디스패치가 맞지 않으면, `IoConfig::Custom` + `IoHooks`로 섹터 I/O
   자체를 벤더가 직접 구동할 수도 있습니다.
