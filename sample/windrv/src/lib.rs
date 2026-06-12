@@ -103,6 +103,10 @@ pub unsafe extern "system" fn DriverEntry(
     // Install the kernel RNG so the JVCK metadata store can generate a fresh
     // per-write salt when persisting encrypted_offset.
     vck_common::set_random_source(&vck_driver::rng::KERNEL_RNG);
+    // Install the sample's volume bind policy. on_attach opens + decrypts the
+    // metadata and builds the cipher; the framework owns no crypto policy. Reached
+    // from both the boot OS-volume mount (PnP callback) and IOCTL attach.
+    vck_driver::set_volume_provider(&PROVIDER);
     let driver = match driver.as_mut() {
         Some(driver) => driver,
         None => return STATUS_INVALID_PARAMETER,

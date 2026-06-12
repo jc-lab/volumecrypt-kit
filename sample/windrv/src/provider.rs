@@ -5,15 +5,18 @@
 
 //! Sample `VolumeProvider` + IOCTL authorization policy.
 
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 
-use vck_common::{jvck::JvckMetadataStore, EncryptedOffset, VckError, VckResult};
-use vck_driver::{
-    device::ControlDeviceSecurity, io::KernelVolumeIo,
-    ioctl::codes::IOCTL_VCK_GET_PROGRESS, AttachContext, DetachContext, IoConfig, IoctlAuthContext,
-    IoctlAuthorization, RequestorMode, VolumeProvider,
+use vck_common::{
+    jvck::{JvckCbcCodec, JvckMetadataReader, MetadataCodec},
+    EncryptedOffset, EncryptedOffsetStore, VckError, VckResult, VolumeCipher,
 };
-use vck_sample_common::VckHandoverPayload;
+use vck_driver::{
+    crypto::AesXtsCipher, device::ControlDeviceSecurity, ioctl::codes::IOCTL_VCK_GET_PROGRESS,
+    AttachContext, DetachContext, IoConfig, IoctlAuthContext, IoctlAuthorization, RequestorMode,
+    VolumeProvider,
+};
 use wdk_sys::GUID;
 
 /// Control-device SDDL. Local System (`SY`) and Built-in Administrators (`BA`)
@@ -45,39 +48,51 @@ pub fn control_device_security() -> ControlDeviceSecurity<'static> {
 pub struct VckVolumeProvider;
 
 impl VolumeProvider for VckVolumeProvider {
-    type Payload = VckHandoverPayload;
-
-    async fn on_attach(&self, ctx: &AttachContext<'_, VckHandoverPayload>) -> VckResult<IoConfig> {
-        // 1. Handover payload (already deserialized by the framework).
-        let payload = ctx
-            .handover_data
-            .ok_or(VckError::NotFound("no handover data"))?;
-
-        // 2. Match the target partition.
-        if ctx.volume_id.partition_guid != payload.partition_guid {
-            return Ok(IoConfig::Passthrough);
-        }
-
-        // 3. Open the volume footer metadata with the VMK and recover keys +
-        //    geometry. The same store persists encrypted_offset later.
-        let io = KernelVolumeIo::open(ctx.volume_id, ctx.sector_size, ctx.volume_sectors)?;
-        let store = JvckMetadataStore::open(io, &payload.vmk)?;
+    fn on_attach(&self, ctx: &AttachContext<'_>) -> VckResult<IoConfig> {
+        // The framework hands us an owning SectorIo over the volume's data path
+        // and the VMK; it owns no crypto policy. This sample chooses the JVCK
+        // format: open + decrypt the metadata (AES-256-CBC EncryptedMetadata) and
+        // recover the FVEK + geometry + persisted progress.
+        //
+        // Phase A: parse the plaintext header / layout without decrypting.
+        let reader = JvckMetadataReader::open(ctx.io.clone())?;
+        // A vendor would inspect `reader.header()` (vendor_id / vendor_version /
+        // vendor_reserved) and/or `reader.read_vendor_data(..)` here to choose its
+        // `MetadataCodec`. This sample fixes the JVCK suite (AES-256-CBC
+        // EncryptedMetadata) — the store/reader hardcodes none.
+        //
+        // Phase B: the selector is called per CRC-valid replica; it picks the
+        // codec, unseals, and returns BOTH (the store keeps the codec for re-seal
+        // during the sweep). Returning `Err` rejects a replica whose decrypted /
+        // vendor data is bad, so the reader tries the next. This sample picks the
+        // JVCK suite and accepts the first replica that unseals.
+        let vmk = ctx.vmk;
+        let store = reader.into_store(vmk, |replica| {
+            let codec: Box<dyn MetadataCodec> = Box::new(JvckCbcCodec);
+            let unsealed = codec.unseal(replica, vmk)?;
+            Ok((codec, unsealed))
+        })?;
         let encrypted_offset = EncryptedOffset {
             sector: store.load_offset()?,
             total_sectors: store.data_sector_count(),
         };
-        let (key1, key2) = store.fvek_keys();
+        let offset_sector = store.offset_sector();
 
-        Ok(IoConfig::AesXts {
-            key1: *key1,
-            key2: *key2,
-            offset_sector: store.offset_sector(),
+        // Sample's volume-cipher choice: AES-256-XTS keyed by the recovered FVEK.
+        // A vendor returns any other `Box<dyn VolumeCipher>` here instead.
+        let (key1, key2) = store.fvek_keys();
+        let cipher: Box<dyn VolumeCipher> = Box::new(AesXtsCipher::new(*key1, *key2)?);
+
+        let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
+        Ok(IoConfig::Encrypted {
+            cipher: Some(cipher),
+            offset_sector,
             encrypted_offset,
-            offset_store: Arc::new(store),
+            offset_store,
         })
     }
 
-    async fn on_detach(&self, _ctx: &DetachContext<'_>) -> VckResult<()> {
+    fn on_detach(&self, _ctx: &DetachContext<'_>) -> VckResult<()> {
         Ok(())
     }
 }

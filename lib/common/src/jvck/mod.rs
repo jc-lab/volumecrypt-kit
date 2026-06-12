@@ -11,10 +11,12 @@
 //! - Header replica: `[Metadata][vendor]`. Footer replica: `[vendor][Metadata]`
 //!   so the footer Metadata block lands at the very end of the volume.
 
+pub mod codec;
 pub mod metadata;
 pub mod options;
 pub mod store;
 
+pub use codec::{default_codec, JvckCbcCodec, MetadataCodec, ReplicaCtx, Unsealed};
 pub use metadata::{DerivedKeys, JvckHeader, JvckSecrets, METADATA_BLOCK_SIZE};
 pub use options::{JvckMetadataOptions, MIN_METADATA_SIZE};
-pub use store::JvckMetadataStore;
+pub use store::{JvckMetadataReader, JvckMetadataStore};

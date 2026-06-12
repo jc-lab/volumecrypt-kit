@@ -29,9 +29,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, AtomicU64};
 
 use spin::Mutex;
-use vck_common::{
-    jvck::JvckMetadataStore, EncryptedOffset, EncryptedOffsetStore, SectorIo,
-};
+use vck_common::SectorIo;
 use wdk_sys::{
     ntddk::{
         ExAllocatePool2, ExFreePool, IoAllocateWorkItem, IoFreeWorkItem, IoQueueWorkItem,
@@ -49,7 +47,6 @@ use crate::{
     device::DeviceExtension,
     io::LowerDeviceIo,
     offset::engine::EncryptionEngine,
-    provider::IoConfig,
     registry::{global_registry, AttachSource, AttachedVolume},
 };
 
@@ -194,47 +191,40 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
         }
     }
 
-    // Decrypt the footer metadata with the VMK to recover keys + geometry.
-    // Footer I/O goes straight to the lower device, bypassing our filter.
-    let store = match JvckMetadataStore::open(footer_io, &handover.vmk) {
-        Ok(s) => s,
-        Err(e) => {
-            crate::vck_log!("handover_mount: footer metadata open failed: {}", e);
+    // Geometry probed above; build an owning SectorIo over the lower device
+    // (bypasses our filter) and let the SAMPLE open + decrypt the metadata and
+    // build the cipher. The framework owns no crypto policy here.
+    let store_bps = footer_io.sector_size();
+    let partition_total = footer_io.total_sectors();
+    let provider = match crate::provider::global_volume_provider() {
+        Some(p) => p,
+        None => {
+            crate::vck_log!("handover_mount: no volume provider installed");
             return;
         }
     };
-    let offset_sector = store.offset_sector();
-    let data_sectors = store.data_sector_count();
-    let store_bps = store.sector_size();
-    let persisted_offset = match store.load_offset() {
-        Ok(o) => o,
-        Err(e) => {
-            crate::vck_log!("handover_mount: load_offset failed: {}", e);
-            return;
-        }
+    let probe_io: Arc<dyn SectorIo> =
+        Arc::new(LowerDeviceIo::new(lower_do, store_bps, partition_total));
+    let ctx = crate::provider::AttachContext {
+        io: probe_io,
+        vmk: &handover.vmk,
+        partition_guid: Some(handover.partition_guid),
     };
-    let encrypted_offset = EncryptedOffset {
-        sector: persisted_offset,
-        total_sectors: data_sectors,
-    };
-    let (key1, key2) = store.fvek_keys();
-    let (key1, key2) = (*key1, *key2);
-    let cipher = match crate::crypto::build_volume_cipher(store.header(), key1, key2) {
+    let io_config = match provider.on_attach(&ctx) {
         Ok(c) => c,
         Err(e) => {
-            crate::vck_log!("handover_mount: cipher init failed: {}", e);
+            crate::vck_log!("handover_mount: on_attach failed: {}", e);
             return;
         }
     };
-
-    let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
-    let io_config = IoConfig::AesXts {
-        key1,
-        key2,
-        offset_sector,
-        encrypted_offset: encrypted_offset.clone(),
-        offset_store: offset_store.clone(),
+    let (offset_sector, encrypted_offset, offset_store) = match io_config.geometry() {
+        Some(parts) => parts,
+        None => {
+            crate::vck_log!("handover_mount: on_attach returned passthrough");
+            return;
+        }
     };
+    let data_sectors = encrypted_offset.total_sectors;
     // sweep_io targets the lower device directly so the background sweep never
     // re-enters our own filter.
     let sweep_io: Arc<dyn SectorIo> =
@@ -254,7 +244,6 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
         offset_store,
         attach_source: AttachSource::Handover,
         filter_device: AtomicPtr::new(filter_do),
-        cipher: Some(cipher),
         sweep_io: Mutex::new(sweep_io),
         encrypted_boundary: AtomicU64::new(initial_boundary),
     });

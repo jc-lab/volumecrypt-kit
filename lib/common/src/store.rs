@@ -26,6 +26,25 @@ pub trait SectorIo: Send + Sync {
     fn write_sectors(&self, lba: u64, buf: &[u8]) -> VckResult<()>;
 }
 
+/// Blanket impl so an `Arc<dyn SectorIo>` (or any `Arc<T: SectorIo>`) is itself a
+/// `SectorIo`. This lets a caller share one owning I/O handle: e.g. hand an
+/// `Arc<dyn SectorIo>` to `JvckMetadataStore::open` (which consumes an `S:
+/// SectorIo` by value) while keeping a clone for the background sweep.
+impl<T: SectorIo + ?Sized> SectorIo for alloc::sync::Arc<T> {
+    fn sector_size(&self) -> u32 {
+        (**self).sector_size()
+    }
+    fn total_sectors(&self) -> u64 {
+        (**self).total_sectors()
+    }
+    fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> VckResult<()> {
+        (**self).read_sectors(lba, buf)
+    }
+    fn write_sectors(&self, lba: u64, buf: &[u8]) -> VckResult<()> {
+        (**self).write_sectors(lba, buf)
+    }
+}
+
 /// Persists the progressive-encryption offset durably so encryption can resume
 /// after a reboot or power loss.
 ///

@@ -13,8 +13,7 @@ use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use spin::Mutex;
 use vck_common::{
-    jvck::JvckMetadataStore, types::Guid, EncryptedOffset, EncryptedOffsetStore, SectorIo,
-    VckError, VckResult, VolumeId,
+    types::Guid, EncryptedOffsetStore, SectorIo, VckError, VckResult, VolumeId,
 };
 
 use crate::{
@@ -72,6 +71,26 @@ pub fn dispatch_ioctl<A: IoctlAuthorization>(
 
 #[derive(Serialize)]
 struct EmptyResponse {}
+
+/// Bind a volume by delegating to the sample's `VolumeProvider::on_attach`
+/// (installed at `DriverEntry` via `set_volume_provider`). `io` is an owning
+/// `SectorIo` over the volume's data path; the sample opens + decrypts the
+/// metadata over it (and may read vendor-specific data), builds the cipher, and
+/// returns the `IoConfig`. The framework owns no crypto policy of its own.
+fn on_attach_volume(
+    vmk: &[u8],
+    partition_guid: Option<Guid>,
+    io: Arc<dyn SectorIo>,
+) -> VckResult<IoConfig> {
+    let provider = crate::provider::global_volume_provider()
+        .ok_or(VckError::ValidationFailed("no volume provider installed"))?;
+    let ctx = crate::provider::AttachContext {
+        io,
+        vmk,
+        partition_guid,
+    };
+    provider.on_attach(&ctx)
+}
 
 /// Resolve an attached volume by the app-supplied path.
 ///
@@ -220,7 +239,7 @@ fn handle_jvck_prepare_adddevice_path(
     filter_do: wdk_sys::PDEVICE_OBJECT,
     lower_do: wdk_sys::PDEVICE_OBJECT,
 ) -> VckResult<IoctlResponse> {
-    use vck_common::jvck::metadata::{self, METADATA_BLOCK_SIZE};
+    use vck_common::jvck::metadata::METADATA_BLOCK_SIZE;
     use wdk_sys::ntddk::ZwDeviceIoControlFile;
 
     // OS (system) volumes register as Handover so DETACH_ALL / detach / unload
@@ -284,8 +303,8 @@ fn handle_jvck_prepare_adddevice_path(
     let volume = Arc::new(AttachedVolume {
         volume_path: req.volume_path.clone(),
         sector_size,
-        io_config: IoConfig::AesXts {
-            key1: [0u8; 32], key2: [0u8; 32],
+        io_config: IoConfig::Encrypted {
+            cipher: None,
             offset_sector,
             encrypted_offset: vck_common::types::EncryptedOffset { sector: 0, total_sectors: data_sectors },
             offset_store: Arc::new(DummyOffsetStore { total_sectors: data_sectors }),
@@ -297,7 +316,6 @@ fn handle_jvck_prepare_adddevice_path(
         offset_store: Arc::new(DummyOffsetStore { total_sectors: data_sectors }),
         attach_source,
         filter_device: AtomicPtr::new(filter_do),
-        cipher: None,
         sweep_io: Mutex::new(Arc::new(DummySectorIo { sector_size, total_sectors: data_sectors })),
         encrypted_boundary: AtomicU64::new(0),
     });
@@ -345,31 +363,22 @@ fn handle_jvck_prepare_adddevice_path(
         // 1. The filter (which now applies size hiding, reporting 20971008 sectors)
         // 2. NTFS (which might cache/remap sectors)
         // The raw partition has the metadata at the full partition's last sector.
-        let probe_io = LowerDeviceIo::new(lower_do, sector_size, total_sectors);
-        let store = JvckMetadataStore::open(probe_io, &req.vmk).map_err(|e| {
+        // Let the SAMPLE open + decrypt the metadata over the lower device and
+        // build the cipher. The probe IO is shared (Arc) so the sample's store
+        // owns one clone while we keep none here.
+        let probe_io: Arc<dyn SectorIo> =
+            Arc::new(LowerDeviceIo::new(lower_do, sector_size, total_sectors));
+        let io_config = on_attach_volume(&req.vmk, None, probe_io).map_err(|e| {
             registry.remove(&req.volume_path);
             crate::filter::detach_filter(filter_do);
             e
         })?;
-        let store_offset = store.offset_sector();
-        let store_data = store.data_sector_count();
-        let store_bps = store.sector_size();
-        let encrypted_offset = EncryptedOffset {
-            sector: store.load_offset()?,
-            total_sectors: store_data,
-        };
-        let (key1, key2) = store.fvek_keys();
-        let (key1, key2) = (*key1, *key2);
-        // Clone the full header before the store is moved into the Arc, so the
-        // cipher factory can select from the whole metadata (vendor_id/reserved).
-        let vol_header = store.header().clone();
-        let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
-        let io_config = IoConfig::AesXts {
-            key1, key2, offset_sector: store_offset,
-            encrypted_offset: encrypted_offset.clone(),
-            offset_store: offset_store.clone(),
-        };
-        let cipher = crate::crypto::build_volume_cipher(&vol_header, key1, key2)?;
+        let (store_offset, encrypted_offset, offset_store) =
+            io_config.geometry().ok_or(VckError::ValidationFailed(
+                "on_attach returned passthrough for a VMK-provided volume",
+            ))?;
+        let store_data = encrypted_offset.total_sectors;
+        let store_bps = sector_size;
         // sweep_io uses LowerDeviceIo — direct to raw disk, below PartMgr ✓
         let sweep_io: Arc<dyn SectorIo> = Arc::new(
             LowerDeviceIo::new(lower_do, store_bps, store_data)
@@ -384,7 +393,6 @@ fn handle_jvck_prepare_adddevice_path(
             offset_store,
             attach_source,
             filter_device: AtomicPtr::new(filter_do),
-            cipher: Some(cipher),
             sweep_io: Mutex::new(sweep_io),
             encrypted_boundary: AtomicU64::new(boundary),
         });
@@ -609,9 +617,8 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
     let volume = Arc::new(AttachedVolume {
         volume_path: req.volume_path.clone(),
         sector_size,
-        io_config: IoConfig::AesXts {
-            key1: [0u8; 32],
-            key2: [0u8; 32],
+        io_config: IoConfig::Encrypted {
+            cipher: None,
             offset_sector,
             encrypted_offset: vck_common::types::EncryptedOffset {
                 sector: 0, total_sectors: data_sectors,
@@ -625,7 +632,6 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         offset_store: Arc::new(DummyOffsetStore { total_sectors: data_sectors }),
         attach_source,
         filter_device: AtomicPtr::new(filter_do),
-        cipher: None,
         sweep_io: Mutex::new(Arc::new(DummySectorIo { sector_size, total_sectors: data_sectors })),
         encrypted_boundary: AtomicU64::new(0),
     });
@@ -784,39 +790,23 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
             err
         })?;
         let partition_total = probe_io.total_sectors();
+        let store_bps = probe_io.sector_size();
         crate::vck_log!("jvck_prepare: probe ok total={}", partition_total);
 
-        let store = JvckMetadataStore::open(probe_io, &req.vmk).map_err(|err| {
-            crate::vck_log!("jvck_prepare: metadata open failed: {}, detaching", err);
+        // Let the SAMPLE open + decrypt the metadata over the probe IO and build
+        // the cipher; the framework owns no crypto policy.
+        let probe_arc: Arc<dyn SectorIo> = Arc::new(probe_io);
+        let io_config = on_attach_volume(&req.vmk, None, probe_arc).map_err(|err| {
+            crate::vck_log!("jvck_prepare: on_attach failed: {}, detaching", err);
             registry.remove(&req.volume_path);
             crate::filter::detach_filter(filter_do);
             err
         })?;
-
-        let store_offset = store.offset_sector();
-        let store_data = store.data_sector_count();
-        let store_bps = store.sector_size();
-        let encrypted_offset = EncryptedOffset {
-            sector: store.load_offset()?,
-            total_sectors: store_data,
-        };
-        let (key1, key2) = store.fvek_keys();
-        let (key1, key2) = (*key1, *key2);
-        // Clone the full header before the store is moved into the Arc, so the
-        // cipher factory can select from the whole metadata (vendor_id/reserved).
-        let vol_header = store.header().clone();
-        let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
-        let io_config = IoConfig::AesXts {
-            key1, key2,
-            offset_sector: store_offset,
-            encrypted_offset: encrypted_offset.clone(),
-            offset_store: offset_store.clone(),
-        };
-        let cipher = crate::crypto::build_volume_cipher(&vol_header, key1, key2).map_err(|err| {
-            registry.remove(&req.volume_path);
-            crate::filter::detach_filter(filter_do);
-            err
-        })?;
+        let (store_offset, encrypted_offset, offset_store) =
+            io_config.geometry().ok_or(VckError::ValidationFailed(
+                "on_attach returned passthrough for a VMK-provided volume",
+            ))?;
+        let store_data = encrypted_offset.total_sectors;
 
         // sweep_io: prefer raw disk (bypass PartMgr), fall back to partition path.
         let sweep_io: Arc<dyn SectorIo> = if !raw_disk_path.is_empty() && partition_start_lba > 0 {
@@ -855,7 +845,6 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
             offset_store,
             attach_source,
             filter_device: AtomicPtr::new(filter_do),
-            cipher: Some(cipher),
             sweep_io: Mutex::new(sweep_io),
             encrypted_boundary: AtomicU64::new(initial_boundary),
         });
@@ -905,7 +894,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         .get(&req.volume_path)
         .ok_or(VckError::NotFound("volume not prepared; call IOCTL_JVCK_PREPARE first"))?;
 
-    if provisional.cipher.is_some() {
+    if provisional.cipher().is_some() {
         return Err(VckError::Unsupported("volume already fully attached"));
     }
 
@@ -954,34 +943,23 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         }
     }
 
-    let store = JvckMetadataStore::open(probe_io, &req.vmk).map_err(|err| {
-        crate::vck_log!("jvck_attach: metadata open failed: {}", err);
+    let store_sector_size = probe_io.sector_size();
+    // Let the SAMPLE open + decrypt the metadata over the probe IO and build the
+    // cipher; the framework owns no crypto policy.
+    let probe_arc: Arc<dyn SectorIo> = Arc::new(probe_io);
+    let io_config = on_attach_volume(&req.vmk, None, probe_arc).map_err(|err| {
+        crate::vck_log!("jvck_attach: on_attach failed: {}", err);
         err
     })?;
     crate::vck_log!("jvck_attach: metadata opened");
 
-    let offset_sector = store.offset_sector();
-    let store_data_sectors = store.data_sector_count();
-    let store_sector_size = store.sector_size();
-    let encrypted_offset = EncryptedOffset {
-        sector: store.load_offset()?,
-        total_sectors: store_data_sectors,
-    };
-    let (key1, key2) = store.fvek_keys();
-    let (key1, key2) = (*key1, *key2);
+    let (offset_sector, encrypted_offset, offset_store) =
+        io_config.geometry().ok_or(VckError::ValidationFailed(
+            "on_attach returned passthrough for a VMK-provided volume",
+        ))?;
+    let store_data_sectors = encrypted_offset.total_sectors;
 
-    let vol_header = store.header().clone();
-    let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
-    let io_config = IoConfig::AesXts {
-        key1,
-        key2,
-        offset_sector,
-        encrypted_offset: encrypted_offset.clone(),
-        offset_store: offset_store.clone(),
-    };
-
-    crate::vck_log!("jvck_attach: build cipher + sweep_io");
-    let cipher = crate::crypto::build_volume_cipher(&vol_header, key1, key2)?;
+    crate::vck_log!("jvck_attach: build sweep_io");
 
     // sweep_io must bypass both NTFS and the filter so that:
     //   1. NTFS write protection for its own sectors (e.g. VBR at lba=0) doesn't block us
@@ -1023,7 +1001,6 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         offset_store,
         attach_source,
         filter_device: AtomicPtr::new(filter_do),
-        cipher: Some(cipher),
         sweep_io: Mutex::new(sweep_io),
         encrypted_boundary: AtomicU64::new(initial_boundary),
     });

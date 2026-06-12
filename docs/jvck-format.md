@@ -44,25 +44,25 @@ data**로 구성되며, 탐색을 단순화하기 위해 분리 배치합니다.
 
 모든 정수는 little-endian, 용량 단위는 bytes. `Header CRC32`는 offset 0..507에 대해 계산합니다.
 
-| Offset | Size | 설명 |
-| ------ | ---- | ---- |
-| 0   | 4   | signature `JVCK` |
-| 4   | 8   | Vendor ID |
-| 12  | 2   | VCK Metadata Version |
-| 14  | 2   | Vendor Specific Version |
-| 16  | 4   | Metadata Size (이 replica 영역 전체 크기, 벤더 데이터 포함) |
-| 20  | 4   | Sector Size (예: 512) |
-| 24  | 1   | Header replica count |
-| 25  | 1   | Footer replica count |
-| 26  | 6   | Reserved (zero) |
-| 32  | 16  | Volume ID (UUIDv4) |
-| 48  | 16  | **Salt** — 키 파생 salt에 추가; Encrypted Metadata 갱신마다 CSPRNG로 재생성 |
-| 64  | 128 | Encrypted Metadata |
-| 192 | 32  | HMAC-SHA256(key = MAC_KEY, data = Encrypted Metadata) |
-| 224 | 80  | Reserved (zero) — 정렬 패딩 |
-| 304 | 192 | **Vendor Specific Reserved** (16바이트 정렬) — 벤더 정의(알고리즘 파라미터·추가 키 등) |
-| 496 | 12  | Reserved (zero) |
-| 508 | 4   | Header CRC32 |
+| Offset | Size | 설명                                                        |
+| ------ | ---- |-----------------------------------------------------------|
+| 0   | 4   | signature `JVCK`                                          |
+| 4   | 8   | **Vendor ID**                                             |
+| 12  | 2   | VCK Metadata Version                                      |
+| 14  | 2   | **Vendor Specific Version**                               |
+| 16  | 4   | Metadata Size (이 replica 영역 전체 크기, 벤더 데이터 포함)             |
+| 20  | 4   | Sector Size (예: 512)                                      |
+| 24  | 1   | Header replica count                                      |
+| 25  | 1   | Footer replica count                                      |
+| 26  | 6   | Reserved (zero)                                           |
+| 32  | 16  | Volume ID (UUIDv4)                                        |
+| 48  | 16  | Salt — 키 파생 salt에 추가; Encrypted Metadata 갱신마다 CSPRNG로 재생성 |
+| 64  | 128 | Encrypted Metadata                                        |
+| 192 | 32  | HMAC-SHA256(key = MAC_KEY, data = Encrypted Metadata)     |
+| 224 | 80  | Reserved (zero)                                           |
+| 304 | 192 | **Vendor Specific Reserved** — 벤더 정의(알고리즘 파라미터·추가 키 등)    |
+| 496 | 12  | Reserved (zero)                                           |
+| 508 | 4   | Header CRC32                                              |
 
 `Salt`는 평문으로 저장되어 복호화 시 읽어 키를 재파생합니다. 매 기록마다 새 salt를 쓰므로 AES-CBC의
 키/IV가 같은 볼륨에서 재사용되지 않습니다(Encrypted Metadata 평문 앞부분이 상수라, salt가 없으면 동일
@@ -118,17 +118,37 @@ ENC_IV  = HKDF_SHA256(salt = Volume ID ‖ Salt, ikm = VMK, info = "EncryptedMet
 
 ## Vendor ID 확장
 
-기본 suite는 EncryptedMetadata=AES-256-CBC, 볼륨 암호화=AES-256-XTS입니다. 벤더는 다음을 통해 이를
-달리 구현할 수 있습니다.
+기본 sample은 EncryptedMetadata=AES-256-CBC, 볼륨 암호화=AES-256-XTS를 선택합니다. **lib는 메타데이터
+복호화도 볼륨 cipher도 정해 두지 않습니다** — sample이 볼륨별로 결정합니다.
 
-- **전체 metadata 기반 결정**: 알고리즘 선택은 `vendor_id` 하나가 아니라 파싱된 전체 헤더로 합니다.
-  `JvckMetadataStore::header()`가 `JvckHeader`(= `vendor_id`, `vendor_version`, `volume_id`, sizes,
-  그리고 192B `vendor_reserved`)를 그대로 노출하므로, 벤더 suite는 `vendor_reserved`에 둔 알고리즘 식별자/
-  파라미터까지 보고 EncryptedMetadata 암복호 방식과 볼륨 cipher를 결정할 수 있습니다.
+- **sample이 직접 복호화 (정책 소유)**: lib는 attach 시 볼륨 데이터 경로 위의 owning `SectorIo`를 sample에
+  넘깁니다.
+  - 드라이버: `VolumeProvider::on_attach(&AttachContext)` — `ctx.io`(SectorIo) + `ctx.vmk`를 받아 sample이
+    메타데이터를 읽고 **자기 알고리즘으로 복호화**한 뒤 `VolumeCipher`를 만들어
+    `IoConfig::Encrypted { cipher, … }`로 반환. 기본 sample은 `JvckMetadataStore::open`(JVCK/AES-CBC) +
+    `AesXtsCipher`를 씁니다. `DriverEntry`의 `set_volume_provider(&PROVIDER)`로 등록되어 부팅 OS 볼륨 mount와
+    IOCTL attach 양쪽이 같은 경로를 탑니다.
+  - 로더: sample이 `locate_block_io_volume` → `JvckMetadataStore::open`으로 직접 복호화하고 cipher를 만들어
+    `BlockIoHookEngine::new(geometry, cipher)`로 넘깁니다.
+- **metadata cipher도 교체 가능 (2단계 open)**: `JvckMetadataStore`는 metadata cipher(EncryptedMetadata
+  봉인)를 하드코딩하지 않습니다. open이 2단계입니다.
+  - **Phase A** — `JvckMetadataReader::open(io)`: **복호화 없이** plaintext 헤더/레이아웃만 파싱.
+    `reader.header()`(`vendor_id`/`vendor_version`/192B `vendor_reserved` …)와
+    `reader.read_vendor_data(replica, rel_sector, buf)`로 **복호화 전에** codec을 고를 수 있습니다.
+  - **Phase B** — `reader.into_store(vmk, select)`: CRC 통과한 replica를 순회하며 각 replica마다
+    `ReplicaCtx`를 만들어 **`select(&ctx)` 클로저**를 호출, `Ok((codec, unsealed))`를 돌려준 **첫 replica를
+    채택**(아니면 다음 replica). `select`가 codec 선택 + unseal + 추가 검증을 모두 하고 **codec과 unsealed를
+    함께 반환**합니다 — CRC가 맞아도 복호화 결과(예: replica 간 `encrypted_offset` 불일치)나 vendor specific
+    data가 잘못됐을 수 있으므로, 그 replica를 `Err`로 건너뛸 수 있습니다. `ReplicaCtx`는 `header()` /
+    `encrypted_metadata()` / `block()` / `salt()` / `read_vendor_data()`를 제공.
+  - 반환된 codec(`MetadataCodec`)은 `unseal`(복호화) + `seal`(재봉인) **양방향**을 담당하며 store가 보관해
+    sweep 중 `store`/`store_state` 재봉인과 `load_offset` 복구에 그대로 씁니다. into_store 자체는 codec을 받지
+    않습니다 — selector가 replica를 보고 골라 돌려줍니다. 기본 suite는 `JvckCbcCodec`(AES-256-CBC + HKDF +
+    HMAC), 벤더는 JVCK 컨테이너(replica·salt·HMAC)를 유지한 채 내부 cipher만 바꾼 codec을 돌려줍니다.
+    `JvckMetadataStore::open(io, vmk)`은 기본 JVCK codec으로 두 단계를 잇는 convenience.
 - **Vendor specific data 영역**: 각 replica는 Metadata 블록(1 섹터) 외에 `metadata_size - sector_size`
   만큼의 벤더 전용 영역을 가집니다. `JvckMetadataStore`가 섹터 단위 R/W API를 제공합니다:
   `replica_count()`, `vendor_data_sector_count()`, `read_vendor_data(replica, rel_sector, buf)`,
   `write_vendor_data(replica, rel_sector, buf)`. (버퍼는 sector_size의 배수, 범위는 replica 영역 내로 검증.)
-- **볼륨 FVE 알고리즘 교체**: 키트의 저수준 경로(`IoConfig::Custom` + `IoHooks`)로 AES-XTS 대신 임의의
-  섹터 암호화를 구현할 수 있습니다. JVCK 컨테이너를 유지하면서 기본 고수준 AES-XTS 경로 자체를 벤더
-  cipher로 일반화(`VolumeCipher` 트레이트 디스패치)하는 작업은 드라이버 핫패스 변경이 필요한 후속 항목입니다.
+- **저수준 경로**: 고수준 `VolumeCipher` 디스패치가 맞지 않으면, `IoConfig::Custom` + `IoHooks`로 섹터 I/O
+  자체를 벤더가 직접 구동할 수도 있습니다.

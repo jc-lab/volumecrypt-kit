@@ -5,7 +5,7 @@
 //! Tracks every volume currently attached to the driver (OS via handover, data
 //! via IOCTL).
 
-use alloc::{boxed::Box, collections::BTreeMap, string::String, sync::Arc, vec::Vec};
+use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
@@ -88,9 +88,6 @@ pub struct AttachedVolume {
     pub attach_source: AttachSource,
     /// Filter device object attached above this volume (null if none yet).
     pub filter_device: AtomicPtr<DEVICE_OBJECT>,
-    /// Volume cipher for the background sweep (present on the high-level path).
-    /// A trait object so a vendor suite can supply a non-XTS algorithm.
-    pub cipher: Option<Box<dyn VolumeCipher>>,
     /// Raw sector I/O for the background sweep. After `attach_filter` this is
     /// replaced (via `Mutex`) with a handle opened directly against the lower
     /// device object, so sweep I/O bypasses our filter entirely.
@@ -252,12 +249,7 @@ impl AttachedVolume {
     }
 
     pub fn offset_sector(&self) -> u64 {
-        match &self.io_config {
-            IoConfig::Passthrough => 0,
-            IoConfig::AesXts { offset_sector, .. } | IoConfig::Custom { offset_sector, .. } => {
-                *offset_sector
-            }
-        }
+        self.io_config.offset_sector()
     }
 
     /// Number of sectors in the data (encryptable) region — i.e. the volume size
@@ -265,12 +257,22 @@ impl AttachedVolume {
     pub fn data_sectors(&self) -> u64 {
         match &self.io_config {
             IoConfig::Passthrough => 0,
-            IoConfig::AesXts {
+            IoConfig::Encrypted {
                 encrypted_offset, ..
             }
             | IoConfig::Custom {
                 encrypted_offset, ..
             } => encrypted_offset.total_sectors,
+        }
+    }
+
+    /// The volume cipher for the high-level path, if any. Lives inside
+    /// `io_config` (`IoConfig::Encrypted`); `None` for passthrough/custom or a
+    /// provisional (not-yet-keyed) attach.
+    pub fn cipher(&self) -> Option<&dyn VolumeCipher> {
+        match &self.io_config {
+            IoConfig::Encrypted { cipher: Some(c), .. } => Some(&**c),
+            _ => None,
         }
     }
 
@@ -284,14 +286,14 @@ impl AttachedVolume {
     /// Run one batch of the encrypt/decrypt sweep. Returns `Ok(true)` if this
     /// volume still has work pending, `Ok(false)` when idle (or not high-level).
     pub fn sweep_step(&self, batch_sectors: u64) -> VckResult<bool> {
-        let cipher = match self.cipher.as_ref() {
+        let cipher = match self.cipher() {
             Some(cipher) => cipher,
             None => return Ok(false),
         };
         let io = self.sweep_io.lock().clone();
         let result = {
             let mut engine = self.encryption.lock();
-            engine.progress_step(io.as_ref(), &**cipher, self.offset_store.as_ref(), batch_sectors)
+            engine.progress_step(io.as_ref(), cipher, self.offset_store.as_ref(), batch_sectors)
         }; // lock released here before sync_boundary
         if result.is_ok() {
             self.sync_boundary();

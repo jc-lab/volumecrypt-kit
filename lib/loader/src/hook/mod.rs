@@ -24,10 +24,11 @@
 pub mod block_io;
 pub mod block_io2;
 
-use vck_common::xts::XtsVolumeCipher;
-use vck_common::VckResult;
+use alloc::boxed::Box;
 
-use crate::provider::LoaderCrypto;
+use vck_common::{VckResult, VolumeCipher};
+
+use crate::provider::HookGeometry;
 
 /// Installs and removes Block IO read hooks for the target volume, and holds the
 /// crypto state used by the hooked read path.
@@ -37,10 +38,11 @@ use crate::provider::LoaderCrypto;
 ///
 /// [`uninstall`]: BlockIoHookEngine::uninstall
 pub struct BlockIoHookEngine {
-    /// AES-XTS key material and region geometry for transparent decryption.
-    crypto: LoaderCrypto,
-    /// Prebuilt AES-XTS cipher (shared `XtsVolumeCipher`, data-region relative).
-    cipher: XtsVolumeCipher,
+    /// Region geometry for transparent decryption.
+    geometry: HookGeometry,
+    /// Volume cipher selected by the sample (data-region relative). The default
+    /// JVCK suite is AES-256-XTS; a vendor may supply a different cipher.
+    cipher: Box<dyn VolumeCipher>,
     /// Saved `EFI_BLOCK_IO_PROTOCOL` hook state (original `ReadBlocks`, vtable ptr).
     block_io: Option<block_io::BlockIoHook>,
     /// Saved `EFI_BLOCK_IO2_PROTOCOL` hook state (original `ReadBlocksEx`, vtable ptr).
@@ -48,11 +50,11 @@ pub struct BlockIoHookEngine {
 }
 
 impl BlockIoHookEngine {
-    /// Creates an engine bound to the given crypto/geometry state.
-    pub fn new(crypto: LoaderCrypto) -> VckResult<Self> {
-        let cipher = XtsVolumeCipher::new(&crypto.key1, &crypto.key2)?;
+    /// Creates an engine bound to the given geometry and the sample-selected
+    /// volume cipher.
+    pub fn new(geometry: HookGeometry, cipher: Box<dyn VolumeCipher>) -> VckResult<Self> {
         Ok(Self {
-            crypto,
+            geometry,
             cipher,
             block_io: None,
             block_io2: None,
@@ -73,7 +75,7 @@ impl BlockIoHookEngine {
         use vck_common::types::guid_from_windows_bytes;
         use vck_common::VckError;
 
-        let target = self.crypto.partition_guid;
+        let target = self.geometry.partition_guid;
         let engine_ptr: *const BlockIoHookEngine = self;
 
         let handles = boot::locate_handle_buffer(SearchType::from_proto::<BlockIO>())
@@ -148,8 +150,8 @@ impl BlockIoHookEngine {
         if sector_size == 0 {
             return Ok(());
         }
-        let offset_sector = self.crypto.offset_sector;
-        let total = self.crypto.encrypted_offset.total_sectors;
+        let offset_sector = self.geometry.offset_sector;
+        let total = self.geometry.encrypted_offset.total_sectors;
         for (i, sector) in buf.chunks_mut(sector_size).enumerate() {
             let abs = lba + i as u64;
             // (1) header / metadata region before the data region -> plaintext.
@@ -161,7 +163,7 @@ impl BlockIoHookEngine {
                 continue;
             }
             // (4) only sectors below the progress boundary are ciphertext.
-            if self.crypto.encrypted_offset.is_encrypted(rel) {
+            if self.geometry.encrypted_offset.is_encrypted(rel) {
                 self.cipher.decrypt_sector(rel, sector);
             }
             // (5) else: not yet encrypted -> plaintext, leave as-is.

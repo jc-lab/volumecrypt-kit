@@ -175,7 +175,7 @@ pub unsafe fn bind(filter_do: PDEVICE_OBJECT, volume: Arc<AttachedVolume>) {
         (*(*ext).vthread).set_current(volume);
         return;
     }
-    if volume.cipher.is_some() {
+    if volume.cipher().is_some() {
         let vt = VolumeThread::start(volume);
         (*ext).vthread = Box::into_raw(vt);
     }
@@ -309,7 +309,7 @@ fn data_relative(volume: &AttachedVolume, abs_lba: u64) -> Option<u64> {
 }
 
 fn pipeline_for(volume: &AttachedVolume) -> Option<CryptoPipeline<'_>> {
-    volume.cipher.as_ref().map(|c| CryptoPipeline::new(&**c))
+    volume.cipher().map(CryptoPipeline::new)
 }
 
 unsafe fn map_mdl(irp: PIRP) -> *mut u8 {

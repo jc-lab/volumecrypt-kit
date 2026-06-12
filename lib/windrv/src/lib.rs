@@ -29,8 +29,8 @@ pub mod rng;
 
 pub use offset::engine::EncryptionEngine;
 pub use provider::{
-    AccessToken, AttachContext, DetachContext, IoConfig, IoHooks, IoctlAuthContext,
-    IoctlAuthorization, RequestorMode, VolumeProvider,
+    global_volume_provider, set_volume_provider, AccessToken, AttachContext, DetachContext,
+    IoConfig, IoHooks, IoctlAuthContext, IoctlAuthorization, RequestorMode, VolumeProvider,
 };
 pub use registry::{
     global_registry, set_global_registry, AttachSource, AttachedVolume, HandoverInfo,

@@ -3,40 +3,62 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Core provider interfaces a sample implements.
+//!
+//! The framework owns no full-volume-encryption policy: when a volume below our
+//! filter needs to be bound (boot-time OS volume via the ACPI handover, or a
+//! data volume via `IOCTL_JVCK_*`), the framework builds an [`AttachContext`]
+//! with an owning [`SectorIo`] over the volume's data path and calls the
+//! sample's [`VolumeProvider::on_attach`]. The sample reads the metadata (and any
+//! vendor-specific data) over that I/O, decrypts it with **its own** chosen
+//! algorithm, builds the [`VolumeCipher`], and returns an [`IoConfig`] carrying
+//! the cipher + offset store. The framework never decrypts metadata itself.
 
+use core::ptr::null_mut;
+use core::sync::atomic::{AtomicPtr, Ordering};
+
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use vck_common::{
-    handover::payload::HandoverPayload, EncryptedOffset, EncryptedOffsetStore, VckResult, VolumeId,
+    types::Guid, EncryptedOffset, EncryptedOffsetStore, SectorIo, VckResult, VolumeCipher,
+    VolumeId,
 };
 use wdk_sys::{
     ntddk::{PsDereferencePrimaryToken, PsReferencePrimaryToken, SeTokenIsAdmin},
     PACCESS_TOKEN, PEPROCESS,
 };
 
-/// OS Volume boot-time attach callback. Data volumes do not use this (they
-/// attach via `IOCTL_JVCK_ATTACH` handled in `ioctl::dispatch`).
+/// Volume bind policy implemented by the sample.
 ///
-/// `Payload` is the same `HandoverPayload` type the loader serializes; the
-/// framework deserializes the ACPI handover into it and hands it over as a
-/// concrete type (no `dyn Any` downcast needed).
+/// Object-safe and synchronous so the framework can call it from a C PnP
+/// completion routine (the boot OS-volume mount) as well as the IOCTL dispatch
+/// path, via the process-wide pointer installed with [`set_volume_provider`].
 pub trait VolumeProvider: Send + Sync + 'static {
-    type Payload: HandoverPayload;
+    /// Bind a volume below our filter. The sample opens the metadata over
+    /// `ctx.io` (which it may also use to read vendor-specific data sectors),
+    /// decrypts it with its own algorithm, builds the [`VolumeCipher`], and
+    /// returns the [`IoConfig`] — or [`IoConfig::Passthrough`] to leave the
+    /// volume untouched. Runs at `PASSIVE_LEVEL`.
+    fn on_attach(&self, ctx: &AttachContext<'_>) -> VckResult<IoConfig>;
 
-    async fn on_attach(&self, ctx: &AttachContext<'_, Self::Payload>) -> VckResult<IoConfig>;
-    async fn on_detach(&self, ctx: &DetachContext<'_>) -> VckResult<()>;
+    /// Called when a bound volume is being detached. Default no-op.
+    fn on_detach(&self, ctx: &DetachContext<'_>) -> VckResult<()> {
+        let _ = ctx;
+        Ok(())
+    }
 }
 
-/// I/O behaviour returned from attach. `offset_sector` is the absolute start LBA
-/// of the data region; the engine computes `rel = lba - offset_sector` and
-/// passes metadata-region I/O through untouched.
+/// I/O behaviour returned from [`VolumeProvider::on_attach`]. `offset_sector` is
+/// the absolute start LBA of the data region; the engine computes
+/// `rel = lba - offset_sector` and passes metadata-region I/O through untouched.
 pub enum IoConfig {
     /// Do not attach a filter to this volume.
     Passthrough,
-    /// High-level: the framework performs AES-XTS automatically.
-    AesXts {
-        key1: [u8; 32],
-        key2: [u8; 32],
+    /// High-level: the framework runs the sample-supplied [`VolumeCipher`] on the
+    /// data path and background sweep. `cipher` is `None` for a provisional
+    /// (size-hiding, not-yet-keyed) attach, in which case the sweep is idle.
+    Encrypted {
+        cipher: Option<Box<dyn VolumeCipher>>,
         offset_sector: u64,
         encrypted_offset: EncryptedOffset,
         offset_store: Arc<dyn EncryptedOffsetStore>,
@@ -48,6 +70,38 @@ pub enum IoConfig {
         encrypted_offset: EncryptedOffset,
         offset_store: Arc<dyn EncryptedOffsetStore>,
     },
+}
+
+impl IoConfig {
+    /// The data-region start LBA (0 for passthrough).
+    pub fn offset_sector(&self) -> u64 {
+        match self {
+            IoConfig::Passthrough => 0,
+            IoConfig::Encrypted { offset_sector, .. } | IoConfig::Custom { offset_sector, .. } => {
+                *offset_sector
+            }
+        }
+    }
+
+    /// The encrypt geometry + offset store for an `Encrypted`/`Custom` config.
+    /// `None` for `Passthrough`.
+    pub fn geometry(&self) -> Option<(u64, EncryptedOffset, Arc<dyn EncryptedOffsetStore>)> {
+        match self {
+            IoConfig::Passthrough => None,
+            IoConfig::Encrypted {
+                offset_sector,
+                encrypted_offset,
+                offset_store,
+                ..
+            }
+            | IoConfig::Custom {
+                offset_sector,
+                encrypted_offset,
+                offset_store,
+                ..
+            } => Some((*offset_sector, encrypted_offset.clone(), offset_store.clone())),
+        }
+    }
 }
 
 /// Low-level sector hooks for the `IoConfig::Custom` path. `sector` is
@@ -62,18 +116,47 @@ pub trait IoHooks: Send + Sync + 'static {
     fn write(&self, sector: u64, buf: &[u8]) -> VckResult<()>;
 }
 
-pub struct AttachContext<'a, P: HandoverPayload> {
-    pub volume_id: &'a VolumeId,
-    pub sector_size: u32,
-    /// Raw partition capacity in sectors. The data region / footer location is
-    /// computed by the provider from metadata.
-    pub volume_sectors: u64,
-    /// Handover payload, already deserialized into `P`.
-    pub handover_data: Option<&'a P>,
+/// Context for [`VolumeProvider::on_attach`].
+pub struct AttachContext<'a> {
+    /// Owning sector I/O over the volume's data path (bypasses our own filter).
+    /// The sample reads the metadata block + any vendor-specific data through
+    /// this and builds its metadata/offset store on top of a clone of it.
+    pub io: Arc<dyn SectorIo>,
+    /// Unlock secret (VMK) provided by the loader handover or the IOCTL request.
+    pub vmk: &'a [u8],
+    /// GPT unique partition GUID, when known (boot OS-volume path). `None` for
+    /// data-volume IOCTL attaches that are not matched by partition GUID.
+    pub partition_guid: Option<Guid>,
 }
 
 pub struct DetachContext<'a> {
     pub volume_id: &'a VolumeId,
+}
+
+/// Process-wide pointer to the sample's `VolumeProvider`. Set once at
+/// `DriverEntry` via [`set_volume_provider`] so the boot OS-volume mount (a C PnP
+/// completion routine that only receives a device object) and the IOCTL dispatch
+/// path can both reach the sample's bind policy.
+static GLOBAL_PROVIDER: AtomicPtr<()> = AtomicPtr::new(null_mut());
+
+/// Record the process-wide provider pointer. `provider` must outlive the driver
+/// (a `'static`).
+pub fn set_volume_provider(provider: &'static dyn VolumeProvider) {
+    // Store the fat pointer behind a 'static box so the vtable half survives.
+    let boxed: Box<&'static dyn VolumeProvider> = Box::new(provider);
+    GLOBAL_PROVIDER.store(Box::into_raw(boxed).cast(), Ordering::Release);
+}
+
+/// Borrow the process-wide provider, if installed.
+pub fn global_volume_provider() -> Option<&'static dyn VolumeProvider> {
+    let ptr = GLOBAL_PROVIDER.load(Ordering::Acquire);
+    if ptr.is_null() {
+        None
+    } else {
+        // Safety: set_volume_provider only ever stores a leaked
+        // `Box<&'static dyn VolumeProvider>`.
+        Some(*unsafe { &*ptr.cast::<&'static dyn VolumeProvider>() })
+    }
 }
 
 /// IOCTL authorization hook implemented by the sample.
