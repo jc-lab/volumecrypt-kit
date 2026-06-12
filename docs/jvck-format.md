@@ -115,3 +115,20 @@ ENC_IV  = HKDF_SHA256(salt = Volume ID ‖ Salt, ikm = VMK, info = "EncryptedMet
 데이터 영역 섹터는 `XtsVolumeCipher`(`lib/common/src/xts.rs`)로 암복호합니다. tweak = **데이터 영역 상대
 섹터 번호**(`rel = lba - offset_sector`). 로더와 드라이버가 동일 구현을 쓰므로 부팅 윈도우 복호화와 런타임
 복호화가 일치합니다. (섹터는 항상 16바이트 배수라 ciphertext stealing은 발생하지 않습니다.)
+
+## Vendor ID 확장
+
+기본 suite는 EncryptedMetadata=AES-256-CBC, 볼륨 암호화=AES-256-XTS입니다. 벤더는 다음을 통해 이를
+달리 구현할 수 있습니다.
+
+- **전체 metadata 기반 결정**: 알고리즘 선택은 `vendor_id` 하나가 아니라 파싱된 전체 헤더로 합니다.
+  `JvckMetadataStore::header()`가 `JvckHeader`(= `vendor_id`, `vendor_version`, `volume_id`, sizes,
+  그리고 192B `vendor_reserved`)를 그대로 노출하므로, 벤더 suite는 `vendor_reserved`에 둔 알고리즘 식별자/
+  파라미터까지 보고 EncryptedMetadata 암복호 방식과 볼륨 cipher를 결정할 수 있습니다.
+- **Vendor specific data 영역**: 각 replica는 Metadata 블록(1 섹터) 외에 `metadata_size - sector_size`
+  만큼의 벤더 전용 영역을 가집니다. `JvckMetadataStore`가 섹터 단위 R/W API를 제공합니다:
+  `replica_count()`, `vendor_data_sector_count()`, `read_vendor_data(replica, rel_sector, buf)`,
+  `write_vendor_data(replica, rel_sector, buf)`. (버퍼는 sector_size의 배수, 범위는 replica 영역 내로 검증.)
+- **볼륨 FVE 알고리즘 교체**: 키트의 저수준 경로(`IoConfig::Custom` + `IoHooks`)로 AES-XTS 대신 임의의
+  섹터 암호화를 구현할 수 있습니다. JVCK 컨테이너를 유지하면서 기본 고수준 AES-XTS 경로 자체를 벤더
+  cipher로 일반화(`VolumeCipher` 트레이트 디스패치)하는 작업은 드라이버 핫패스 변경이 필요한 후속 항목입니다.

@@ -104,6 +104,10 @@ pub struct JvckHeader {
     pub header_replica_count: u8,
     pub footer_replica_count: u8,
     pub volume_id: [u8; 16],
+    /// Vendor Specific Reserved area (offset 304, 192 bytes), surfaced as part of
+    /// the parsed header so a vendor suite can select crypto from the *whole*
+    /// metadata (vendor_id + vendor_version + these bytes), not just vendor_id.
+    pub vendor_reserved: [u8; VENDOR_RESERVED_SIZE],
 }
 
 /// Sensitive FVEK material decrypted from the EncryptedMetadata blob.
@@ -168,6 +172,9 @@ impl JvckHeader {
             header_replica_count: block[OFF_HEADER_COUNT],
             footer_replica_count: block[OFF_FOOTER_COUNT],
             volume_id: block[OFF_VOLUME_ID..OFF_VOLUME_ID + 16].try_into().unwrap(),
+            vendor_reserved: block[OFF_VENDOR_RESERVED..OFF_VENDOR_RESERVED + VENDOR_RESERVED_SIZE]
+                .try_into()
+                .unwrap(),
         })
     }
 
@@ -197,6 +204,9 @@ impl JvckHeader {
         out[OFF_VOLUME_ID..OFF_VOLUME_ID + 16].copy_from_slice(&self.volume_id);
         // Per-write salt (plaintext): read back at decrypt time to re-derive keys.
         out[OFF_SALT..OFF_SALT + SALT_SIZE].copy_from_slice(salt);
+        // Vendor Specific Reserved area (plaintext, CRC-covered).
+        out[OFF_VENDOR_RESERVED..OFF_VENDOR_RESERVED + VENDOR_RESERVED_SIZE]
+            .copy_from_slice(&self.vendor_reserved);
 
         // Build the 128-byte EncryptedMetadata plaintext (holds the FVEK), then
         // zeroize it before returning so the keys do not linger on the stack.
@@ -340,6 +350,7 @@ mod tests {
             header_replica_count: 0,
             footer_replica_count: 2,
             volume_id: [0x11; 16],
+            vendor_reserved: [0u8; VENDOR_RESERVED_SIZE],
         }
     }
 
@@ -398,6 +409,19 @@ mod tests {
 
         // Offset-only path returns the same value.
         assert_eq!(read_encrypted_offset(&block, vmk).unwrap(), 4096);
+    }
+
+    #[test]
+    fn vendor_reserved_round_trips() {
+        let vmk = b"vmk";
+        let mut header = sample_header();
+        header.vendor_reserved = [0xC7; VENDOR_RESERVED_SIZE];
+        let mut block = [0u8; METADATA_BLOCK_SIZE];
+        header
+            .encode(&sample_secrets(), 1, &TEST_SALT, vmk, &mut block)
+            .unwrap();
+        let parsed = JvckHeader::parse(&block).unwrap();
+        assert_eq!(parsed.vendor_reserved, [0xC7; VENDOR_RESERVED_SIZE]);
     }
 
     #[test]
@@ -460,6 +484,7 @@ mod tests {
             volume_id: [
                 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
             ],
+            vendor_reserved: [0u8; VENDOR_RESERVED_SIZE],
         };
         let secrets = JvckSecrets {
             fvek_key1: [0xA0; 32],

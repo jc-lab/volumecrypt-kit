@@ -218,6 +218,7 @@ impl<S: SectorIo> JvckMetadataStore<S> {
             header_replica_count: options.use_header as u8,
             footer_replica_count: options.use_footer as u8,
             volume_id,
+            vendor_reserved: [0u8; metadata::VENDOR_RESERVED_SIZE],
         };
         let secrets = JvckSecrets {
             fvek_key1,
@@ -315,6 +316,98 @@ impl<S: SectorIo> JvckMetadataStore<S> {
 
     pub fn metadata_size(&self) -> u32 {
         self.options.metadata_size
+    }
+
+    /// The parsed plaintext header (vendor_id, vendor_version, vendor_reserved,
+    /// volume_id, sizes). A vendor suite selects its crypto from this *whole*
+    /// metadata, not just `vendor_id`.
+    pub fn header(&self) -> &JvckHeader {
+        &self.header
+    }
+
+    // --- Vendor specific DATA region (outside the 512-byte Metadata block) ---
+    //
+    // Each replica region is `replica_sectors` long and holds the Metadata block
+    // in exactly one sector (first for header replicas, last for footer
+    // replicas). The remaining `replica_sectors - 1` sectors are free for vendor
+    // use; the API below reads/writes them at sector granularity.
+
+    /// Number of replica regions (header replicas first, then footer replicas).
+    pub fn replica_count(&self) -> usize {
+        (self.options.use_header + self.options.use_footer) as usize
+    }
+
+    /// Vendor-data sectors available per replica (replica region minus the one
+    /// Metadata sector).
+    pub fn vendor_data_sector_count(&self) -> u64 {
+        replica_sectors(self.options.metadata_size, self.geometry.sector_size).saturating_sub(1)
+    }
+
+    /// Absolute base LBA of `replica_index`'s vendor-data region.
+    fn vendor_data_base_lba(&self, replica_index: usize) -> Option<u64> {
+        let rs = replica_sectors(self.options.metadata_size, self.geometry.sector_size);
+        let uh = self.options.use_header as usize;
+        let uf = self.options.use_footer as usize;
+        if replica_index < uh {
+            // Header replica: Metadata is the first sector; vendor data follows.
+            Some(replica_index as u64 * rs + 1)
+        } else if replica_index < uh + uf {
+            let j = (replica_index - uh) as u64;
+            let footer_start = self.volume_sectors - uf as u64 * rs;
+            // Footer replica: Metadata is the last sector; vendor data precedes it.
+            Some(footer_start + j * rs)
+        } else {
+            None
+        }
+    }
+
+    fn vendor_data_lba_checked(
+        &self,
+        replica_index: usize,
+        rel_sector: u64,
+        len: usize,
+    ) -> VckResult<u64> {
+        let ss = self.geometry.sector_size as usize;
+        if ss == 0 || len == 0 || len % ss != 0 {
+            return Err(VckError::InvalidData(
+                "vendor data buffer must be a non-zero multiple of the sector size",
+            ));
+        }
+        let nsec = (len / ss) as u64;
+        let base = self
+            .vendor_data_base_lba(replica_index)
+            .ok_or(VckError::NotFound("vendor data replica index out of range"))?;
+        let count = self.vendor_data_sector_count();
+        if rel_sector.checked_add(nsec).map_or(true, |end| end > count) {
+            return Err(VckError::ValidationFailed(
+                "vendor data range exceeds the replica region",
+            ));
+        }
+        Ok(base + rel_sector)
+    }
+
+    /// Read `buf` (a whole number of sectors) from replica `replica_index`'s
+    /// vendor-data region, starting at vendor-relative sector `rel_sector`.
+    pub fn read_vendor_data(
+        &self,
+        replica_index: usize,
+        rel_sector: u64,
+        buf: &mut [u8],
+    ) -> VckResult<()> {
+        let lba = self.vendor_data_lba_checked(replica_index, rel_sector, buf.len())?;
+        self.io.read_sectors(lba, buf)
+    }
+
+    /// Write `buf` (a whole number of sectors) into replica `replica_index`'s
+    /// vendor-data region, starting at vendor-relative sector `rel_sector`.
+    pub fn write_vendor_data(
+        &self,
+        replica_index: usize,
+        rel_sector: u64,
+        buf: &[u8],
+    ) -> VckResult<()> {
+        let lba = self.vendor_data_lba_checked(replica_index, rel_sector, buf.len())?;
+        self.io.write_sectors(lba, buf)
     }
 }
 
@@ -606,6 +699,33 @@ mod tests {
 
         // load_offset must still report 500 (the other valid replica).
         assert_eq!(store.load_offset().unwrap(), 500);
+    }
+
+    #[test]
+    fn vendor_data_read_write_roundtrip() {
+        ensure_rng();
+        // footer-only: 2 replicas of 256 sectors -> 255 vendor-data sectors each.
+        let io = MemVolume::new(512, 1024);
+        let store =
+            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16])
+                .unwrap();
+        assert_eq!(store.replica_count(), 2);
+        assert_eq!(store.vendor_data_sector_count(), 255);
+
+        let data = alloc::vec![0xCDu8; 512];
+        store.write_vendor_data(0, 3, &data).unwrap();
+        let mut back = alloc::vec![0u8; 512];
+        store.read_vendor_data(0, 3, &mut back).unwrap();
+        assert_eq!(back, data);
+
+        // Out-of-range sector / replica index are rejected.
+        assert!(store.write_vendor_data(0, 255, &data).is_err());
+        assert!(store.write_vendor_data(2, 0, &data).is_err());
+        // Non-sector-aligned length is rejected.
+        assert!(store.read_vendor_data(0, 0, &mut [0u8; 100]).is_err());
+
+        // Vendor-data writes must not clobber the Metadata sector.
+        assert_eq!(store.load_offset().unwrap(), 0);
     }
 
     #[test]

@@ -32,6 +32,8 @@ const (
 	hmacSize              = 32
 	// SaltSize is the per-write random salt mixed into key derivation.
 	SaltSize = 16
+	// VendorReservedSize is the in-block vendor-defined area (offset 304).
+	VendorReservedSize = 192
 )
 
 var jvckSignature = [4]byte{'J', 'V', 'C', 'K'}
@@ -82,6 +84,8 @@ type JvckHeader struct {
 	HeaderReplicaCount uint8
 	FooterReplicaCount uint8
 	VolumeID           [16]byte
+	// VendorReserved is the 192-byte in-block vendor-defined area (offset 304).
+	VendorReserved [VendorReservedSize]byte
 }
 
 type derivedKeys struct {
@@ -152,6 +156,8 @@ func (h *JvckHeader) EncodeMetadataBlock(
 	copy(out[offVolumeID:], h.VolumeID[:])
 	// Per-write salt (plaintext): read back at decrypt time to re-derive keys.
 	copy(out[offSalt:offSalt+SaltSize], salt[:])
+	// Vendor Specific Reserved area (plaintext, CRC-covered).
+	copy(out[offVendorReserved:offVendorReserved+VendorReservedSize], h.VendorReserved[:])
 
 	// 128-byte EncryptedMetadata plaintext (signature + offset + FVEK halves).
 	var plain [encryptedMetadataSize]byte
