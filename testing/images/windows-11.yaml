@@ -22,7 +22,7 @@ qemu:
     - "driver=cfi.pflash01,property=secure,value=off"
 
 connection:
-  exec_method: "winrm" # "ssh" or "winrm"
+  exec_method: "ssh" # "ssh" or "winrm"
   file_method: "ssh" # "ssh" or "winrm"; defaults to exec_method when omitted
   username: "vagrant"
   password: "vagrant"
