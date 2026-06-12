@@ -25,6 +25,7 @@ irql.workspace = true
 messagepack-serde = { workspace = true, default-features = false }
 serde = { workspace = true, default-features = false }
 sha2.workspace = true
+spin = { workspace = true, features = ["once"] }
 thiserror = { workspace = true, default-features = false }
 uuid = { workspace = true, default-features = false }
 xts-mode.workspace = true

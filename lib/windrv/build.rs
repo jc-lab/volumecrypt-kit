@@ -10,5 +10,8 @@ fn main() -> Result<(), wdk_build::ConfigError> {
     // the km library search path is provided by the binary crate's wdk-build
     // setup (wdmsec.lib sits beside ntoskrnl.lib in the km/<arch> dir).
     println!("cargo::rustc-link-lib=dylib=wdmsec");
+    // `BCryptGenRandom` (kernel CNG) is exported by ksecdd.sys; link its import
+    // library so `rng::KernelRng` can fill the per-write metadata salt.
+    println!("cargo::rustc-link-lib=dylib=ksecdd");
     Ok(())
 }

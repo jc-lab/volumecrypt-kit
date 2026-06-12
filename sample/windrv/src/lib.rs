@@ -100,6 +100,9 @@ pub unsafe extern "system" fn DriverEntry(
         "DriverEntry: AES-NI {}",
         if vck_common::cpu::has_aes_ni() { "supported" } else { "not supported" }
     );
+    // Install the kernel RNG so the JVCK metadata store can generate a fresh
+    // per-write salt when persisting encrypted_offset.
+    vck_common::set_random_source(&vck_driver::rng::KERNEL_RNG);
     let driver = match driver.as_mut() {
         Some(driver) => driver,
         None => return STATUS_INVALID_PARAMETER,

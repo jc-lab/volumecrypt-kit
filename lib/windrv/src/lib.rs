@@ -25,6 +25,7 @@ pub mod nt;
 pub mod offset;
 pub mod provider;
 pub mod registry;
+pub mod rng;
 
 pub use offset::engine::EncryptionEngine;
 pub use provider::{

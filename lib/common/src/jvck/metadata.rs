@@ -6,6 +6,13 @@
 //!
 //! All integers are little-endian. The `Header CRC32` covers offsets 0..=507.
 //! `EncryptedMetadata` is AES-256-CBC (no padding), 128 bytes.
+//!
+//! A 16-byte random `salt` (plaintext, offset 48) is mixed into the key
+//! derivation (`HKDF salt = Volume ID ‖ salt`) and is regenerated on every
+//! re-encode, so the AES-CBC key+IV are never reused across writes (the inner
+//! plaintext is mostly constant, which would otherwise leak via identical
+//! leading ciphertext blocks). The 192-byte `Vendor Specific Reserved` area
+//! (offset 316) is available for vendor-defined parameters.
 
 use aes::Aes256;
 use cbc::{Decryptor, Encryptor};
@@ -29,14 +36,18 @@ pub const JVCK_SIGNATURE: [u8; 4] = *b"JVCK";
 pub const METADATA_BLOCK_SIZE: usize = 512;
 pub const ENCRYPTED_METADATA_SIZE: usize = 128;
 pub const HMAC_SIZE: usize = 32;
+/// Per-write random salt mixed into the key-derivation HKDF salt.
+pub const SALT_SIZE: usize = 16;
+/// Vendor-defined area before the Header CRC32 (zeroed by the default suite).
+pub const VENDOR_RESERVED_SIZE: usize = 192;
 
 /// HKDF-SHA256 info labels.
 pub const INFO_MAC: &[u8] = b"EncryptedMetadata:MAC";
 pub const INFO_ENC: &[u8] = b"EncryptedMetadata:ENC";
 pub const INFO_IV: &[u8] = b"EncryptedMetadata:IV";
 
-/// Keys derived from the VMK and the (plaintext) Volume ID salt. Zeroized on
-/// drop so the derived AES/HMAC material does not linger in memory.
+/// Keys derived from the VMK, the (plaintext) Volume ID, and the per-write
+/// salt. Zeroized on drop so the derived AES/HMAC material does not linger.
 #[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct DerivedKeys {
     pub mac_key: [u8; 32],
@@ -45,9 +56,15 @@ pub struct DerivedKeys {
 }
 
 /// Derive the MAC/ENC/IV material:
-/// `HKDF_SHA256(salt = Volume ID, ikm = VMK, info = label)`.
-pub fn derive_keys(volume_id: &[u8; 16], vmk: &[u8]) -> DerivedKeys {
-    let hk = Hkdf::<Sha256>::new(Some(volume_id), vmk);
+/// `HKDF_SHA256(salt = Volume ID ‖ salt, ikm = VMK, info = label)`.
+///
+/// The per-write `salt` (regenerated on every re-encode) makes all three keys
+/// fresh per write, so the AES-CBC key+IV are never reused for the same volume.
+pub fn derive_keys(volume_id: &[u8; 16], salt: &[u8; SALT_SIZE], vmk: &[u8]) -> DerivedKeys {
+    let mut hkdf_salt = [0u8; 16 + SALT_SIZE];
+    hkdf_salt[..16].copy_from_slice(volume_id);
+    hkdf_salt[16..].copy_from_slice(salt);
+    let hk = Hkdf::<Sha256>::new(Some(&hkdf_salt), vmk);
     let mut keys = DerivedKeys {
         mac_key: [0u8; 32],
         enc_key: [0u8; 32],
@@ -110,8 +127,12 @@ pub const OFF_SECTOR_SIZE: usize = 20;
 pub const OFF_HEADER_COUNT: usize = 24;
 pub const OFF_FOOTER_COUNT: usize = 25;
 pub const OFF_VOLUME_ID: usize = 32;
-pub const OFF_ENCRYPTED_METADATA: usize = 48;
-pub const OFF_HMAC: usize = 176;
+pub const OFF_SALT: usize = 48;
+pub const OFF_ENCRYPTED_METADATA: usize = 64;
+pub const OFF_HMAC: usize = 192;
+// Aligned tail: 224..304 Reserved (zero); 304..496 Vendor Specific Reserved (192,
+// 16-byte aligned); 496..508 Reserved (zero, 12); 508..512 Header CRC32.
+pub const OFF_VENDOR_RESERVED: usize = 304;
 pub const OFF_CRC32: usize = 508;
 /// CRC32 covers bytes [0, CRC_COVERAGE_END).
 pub const CRC_COVERAGE_END: usize = 508;
@@ -157,6 +178,7 @@ impl JvckHeader {
         &self,
         secrets: &JvckSecrets,
         encrypted_offset: u64,
+        salt: &[u8; SALT_SIZE],
         vmk: &[u8],
         out: &mut [u8; METADATA_BLOCK_SIZE],
     ) -> VckResult<()> {
@@ -173,6 +195,8 @@ impl JvckHeader {
         out[OFF_HEADER_COUNT] = self.header_replica_count;
         out[OFF_FOOTER_COUNT] = self.footer_replica_count;
         out[OFF_VOLUME_ID..OFF_VOLUME_ID + 16].copy_from_slice(&self.volume_id);
+        // Per-write salt (plaintext): read back at decrypt time to re-derive keys.
+        out[OFF_SALT..OFF_SALT + SALT_SIZE].copy_from_slice(salt);
 
         // Build the 128-byte EncryptedMetadata plaintext (holds the FVEK), then
         // zeroize it before returning so the keys do not linger on the stack.
@@ -183,7 +207,7 @@ impl JvckHeader {
         plain[EM_OFF_FVEK_KEY1..EM_OFF_FVEK_KEY1 + 32].copy_from_slice(&secrets.fvek_key1);
         plain[EM_OFF_FVEK_KEY2..EM_OFF_FVEK_KEY2 + 32].copy_from_slice(&secrets.fvek_key2);
 
-        let keys = derive_keys(&self.volume_id, vmk);
+        let keys = derive_keys(&self.volume_id, salt, vmk);
         let result = (|| {
             let enc = Encryptor::<Aes256>::new_from_slices(&keys.enc_key, &keys.enc_iv)
                 .map_err(|_| VckError::CryptoFailed("invalid ENC key/iv length"))?;
@@ -245,7 +269,8 @@ pub fn decrypt_payload(block: &[u8], vmk: &[u8]) -> VckResult<(u64, JvckSecrets)
     let block = &block[..METADATA_BLOCK_SIZE];
 
     let volume_id: [u8; 16] = block[OFF_VOLUME_ID..OFF_VOLUME_ID + 16].try_into().unwrap();
-    let keys = derive_keys(&volume_id, vmk);
+    let salt: [u8; SALT_SIZE] = block[OFF_SALT..OFF_SALT + SALT_SIZE].try_into().unwrap();
+    let keys = derive_keys(&volume_id, &salt, vmk);
 
     // Authenticate the encrypted blob before decrypting.
     let enc = &block[OFF_ENCRYPTED_METADATA..OFF_ENCRYPTED_METADATA + ENCRYPTED_METADATA_SIZE];
@@ -302,6 +327,9 @@ pub fn read_encrypted_offset(block: &[u8], vmk: &[u8]) -> VckResult<u64> {
 mod tests {
     use super::*;
 
+    /// Fixed salt so encode output is deterministic in tests.
+    const TEST_SALT: [u8; SALT_SIZE] = [0x5a; SALT_SIZE];
+
     fn sample_header() -> JvckHeader {
         JvckHeader {
             vendor_id: 0x0102_0304_0506_0708,
@@ -326,23 +354,27 @@ mod tests {
     fn encode_sample(vmk: &[u8], offset: u64) -> [u8; METADATA_BLOCK_SIZE] {
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         sample_header()
-            .encode(&sample_secrets(), offset, vmk, &mut block)
+            .encode(&sample_secrets(), offset, &TEST_SALT, vmk, &mut block)
             .unwrap();
         block
     }
 
     #[test]
     fn derive_keys_is_deterministic_and_label_separated() {
-        let a = derive_keys(&[1u8; 16], b"vmk-secret");
-        let b = derive_keys(&[1u8; 16], b"vmk-secret");
+        let a = derive_keys(&[1u8; 16], &TEST_SALT, b"vmk-secret");
+        let b = derive_keys(&[1u8; 16], &TEST_SALT, b"vmk-secret");
         assert_eq!(a.mac_key, b.mac_key);
         assert_eq!(a.enc_key, b.enc_key);
         assert_eq!(a.enc_iv, b.enc_iv);
         // Different labels must yield different material.
         assert_ne!(a.mac_key, a.enc_key);
-        // Different salt (Volume ID) must change the output.
-        let c = derive_keys(&[2u8; 16], b"vmk-secret");
+        // Different Volume ID must change the output.
+        let c = derive_keys(&[2u8; 16], &TEST_SALT, b"vmk-secret");
         assert_ne!(a.enc_key, c.enc_key);
+        // Different salt must change the output (per-write freshness).
+        let d = derive_keys(&[1u8; 16], &[0x11; SALT_SIZE], b"vmk-secret");
+        assert_ne!(a.enc_key, d.enc_key);
+        assert_ne!(a.enc_iv, d.enc_iv);
     }
 
     #[test]
@@ -434,14 +466,16 @@ mod tests {
             fvek_key2: [0x0B; 32],
         };
         let mut block = [0u8; METADATA_BLOCK_SIZE];
-        header.encode(&secrets, 12345, vmk, &mut block).unwrap();
+        header
+            .encode(&secrets, 12345, &TEST_SALT, vmk, &mut block)
+            .unwrap();
         block
     }
 
     /// Golden 512-byte block for the cross-check vector. The Go SDK encoder
     /// (sdk/jvck_test.go) asserts the identical hex, so a divergence in either
     /// implementation's on-disk format fails a unit test in both repos.
-    const CROSS_CHECK_HEX: &str = "4a56434b000000000000000001000000000002000002000000020000000000000102030405060708090a0b0c0d0e0f10aed78456db063a76376e3d7dc9f80d78bffb7989ec8747e0880a146a239c593b3a309d9e5e689fbf3c9e78e08c7e95c56f96cc5f9f25210dcd1c42aa00577104186fbba87c3b18334e326285d956bf34adf63f9b3538664017f0003123e95cd2c601c29a849e5ea83222b36eee0b255fe94466519e64fc74506952e3916d74f909b55a6cf38846ab7bc629af2857f1628d7638ff0a2e0b7213cf0bc4bca3adc3000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000bd09257c";
+    const CROSS_CHECK_HEX: &str = "4a56434b000000000000000001000000000002000002000000020000000000000102030405060708090a0b0c0d0e0f105a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a2596594092215a84c28c512040b89465b5013606c9597f80993d82ab7ed62de7b259177923c5ef67aac93ce844eea143fd524315ee5643556e076f10056cf8d0fcc73e43af3ce790249a042f0cdb4126c9f78e5b7c854745b21a67a672e1d20769aad3fdde489426a4de635e62cef042a1882b9b748c558df412234e9f8557732be236e87fba6a2265a5be53e8b778a960c389af50380dc8a62921672fd2627c0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000b17a9689";
 
     #[test]
     fn cross_check_vector_matches_golden() {

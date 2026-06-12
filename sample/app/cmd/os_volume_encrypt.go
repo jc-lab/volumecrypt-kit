@@ -358,6 +358,10 @@ func buildOSVolumeMetadataBlock(volumePath string, vmk []byte) ([]byte, error) {
 	if _, err := rand.Read(volumeID[:]); err != nil {
 		return nil, fmt.Errorf("failed to generate volume ID: %w", err)
 	}
+	var salt [vck.SaltSize]byte
+	if _, err := rand.Read(salt[:]); err != nil {
+		return nil, fmt.Errorf("failed to generate salt: %w", err)
+	}
 	header := &vck.JvckHeader{
 		MetadataVersion:    1,
 		MetadataSize:       osVolumeMetadataSize,
@@ -366,7 +370,7 @@ func buildOSVolumeMetadataBlock(volumePath string, vmk []byte) ([]byte, error) {
 		FooterReplicaCount: osVolumeFooterReplicaCount,
 		VolumeID:           volumeID,
 	}
-	block, err := header.EncodeMetadataBlock(fvek1, fvek2, 0, vmk)
+	block, err := header.EncodeMetadataBlock(fvek1, fvek2, 0, salt, vmk)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encode JVCK metadata: %w", err)
 	}

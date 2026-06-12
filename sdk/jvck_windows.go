@@ -106,7 +106,8 @@ func EnsureJvckMetadata(
 
 	var fvek1, fvek2 [32]byte
 	var volumeID [16]byte
-	if err := fillRandom(fvek1[:], fvek2[:], volumeID[:]); err != nil {
+	var salt [SaltSize]byte
+	if err := fillRandom(fvek1[:], fvek2[:], volumeID[:], salt[:]); err != nil {
 		return false, err
 	}
 
@@ -118,7 +119,7 @@ func EnsureJvckMetadata(
 		FooterReplicaCount: uint8(useFooter),
 		VolumeID:           volumeID,
 	}
-	block, err := header.EncodeMetadataBlock(fvek1, fvek2, 0, vmk)
+	block, err := header.EncodeMetadataBlock(fvek1, fvek2, 0, salt, vmk)
 	if err != nil {
 		return false, fmt.Errorf("failed to encode JVCK metadata: %w", err)
 	}

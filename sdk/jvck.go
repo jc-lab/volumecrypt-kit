@@ -30,6 +30,8 @@ const (
 
 	encryptedMetadataSize = 128
 	hmacSize              = 32
+	// SaltSize is the per-write random salt mixed into key derivation.
+	SaltSize = 16
 )
 
 var jvckSignature = [4]byte{'J', 'V', 'C', 'K'}
@@ -52,10 +54,14 @@ const (
 	offHeaderCount     = 24
 	offFooterCount     = 25
 	offVolumeID        = 32
-	offEncryptedMeta   = 48
-	offHMAC            = 176
-	offCRC32           = 508
-	crcCoverageEnd     = 508
+	offSalt            = 48
+	offEncryptedMeta   = 64
+	offHMAC = 192
+	// Aligned tail: 224..304 Reserved (zero); 304..496 Vendor Specific Reserved
+	// (192, 16-byte aligned); 496..508 Reserved (zero, 12); 508..512 Header CRC32.
+	offVendorReserved = 304
+	offCRC32          = 508
+	crcCoverageEnd    = 508
 )
 
 // EncryptedMetadata (128-byte plaintext) field offsets.
@@ -108,9 +114,12 @@ func hkdfExpand(prk, info []byte, length int) []byte {
 }
 
 // deriveKeys mirrors metadata.rs `derive_keys`:
-// HKDF-SHA256(salt = Volume ID, ikm = VMK, info = label).
-func deriveKeys(volumeID [16]byte, vmk []byte) derivedKeys {
-	prk := hkdfExtract(volumeID[:], vmk)
+// HKDF-SHA256(salt = Volume ID || salt, ikm = VMK, info = label).
+func deriveKeys(volumeID [16]byte, salt [SaltSize]byte, vmk []byte) derivedKeys {
+	hkdfSalt := make([]byte, 0, 16+SaltSize)
+	hkdfSalt = append(hkdfSalt, volumeID[:]...)
+	hkdfSalt = append(hkdfSalt, salt[:]...)
+	prk := hkdfExtract(hkdfSalt, vmk)
 	var k derivedKeys
 	copy(k.macKey[:], hkdfExpand(prk, infoMAC, 32))
 	copy(k.encKey[:], hkdfExpand(prk, infoENC, 32))
@@ -121,9 +130,14 @@ func deriveKeys(volumeID [16]byte, vmk []byte) derivedKeys {
 // EncodeMetadataBlock serializes the header, the (sensitive) FVEK halves, and
 // encryptedOffset into a 512-byte block: AES-256-CBC EncryptedMetadata,
 // HMAC-SHA256 over the ciphertext, and a Header CRC32 over [0,508).
+// The per-write `salt` (plaintext, offset 48) is mixed into key derivation and
+// must be freshly random for each (re)encode; callers generate it with
+// crypto/rand. The 192-byte Vendor Specific Reserved area (offset 316) is left
+// zero by this default encoder.
 func (h *JvckHeader) EncodeMetadataBlock(
 	fvek1, fvek2 [32]byte,
 	encryptedOffset uint64,
+	salt [SaltSize]byte,
 	vmk []byte,
 ) ([MetadataBlockSize]byte, error) {
 	var out [MetadataBlockSize]byte
@@ -136,6 +150,8 @@ func (h *JvckHeader) EncodeMetadataBlock(
 	out[offHeaderCount] = h.HeaderReplicaCount
 	out[offFooterCount] = h.FooterReplicaCount
 	copy(out[offVolumeID:], h.VolumeID[:])
+	// Per-write salt (plaintext): read back at decrypt time to re-derive keys.
+	copy(out[offSalt:offSalt+SaltSize], salt[:])
 
 	// 128-byte EncryptedMetadata plaintext (signature + offset + FVEK halves).
 	var plain [encryptedMetadataSize]byte
@@ -144,7 +160,7 @@ func (h *JvckHeader) EncodeMetadataBlock(
 	copy(plain[emOffFvekKey1:], fvek1[:])
 	copy(plain[emOffFvekKey2:], fvek2[:])
 
-	keys := deriveKeys(h.VolumeID, vmk)
+	keys := deriveKeys(h.VolumeID, salt, vmk)
 	block, err := aes.NewCipher(keys.encKey[:])
 	if err != nil {
 		return out, err

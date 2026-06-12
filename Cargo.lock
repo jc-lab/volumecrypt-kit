@@ -1032,6 +1032,7 @@ dependencies = [
  "messagepack-serde",
  "serde",
  "sha2",
+ "spin",
  "thiserror 1.0.69",
  "uefi",
  "uuid",

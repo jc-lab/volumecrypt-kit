@@ -278,9 +278,13 @@ impl<S: SectorIo> JvckMetadataStore<S> {
     }
 
     fn write_all_replicas(&self, encrypted_offset: u64) -> VckResult<()> {
+        // Fresh per-write salt so the AES-CBC key/IV are never reused across
+        // re-encodes (the EncryptedMetadata plaintext is mostly constant).
+        let mut salt = [0u8; metadata::SALT_SIZE];
+        crate::rng::fill_random(&mut salt)?;
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         self.header
-            .encode(&self.secrets, encrypted_offset, &self.vmk, &mut block)?;
+            .encode(&self.secrets, encrypted_offset, &salt, &self.vmk, &mut block)?;
         let rs = replica_sectors(self.options.metadata_size, self.geometry.sector_size);
         for lba in metadata_sector_lbas(
             self.volume_sectors,
@@ -442,6 +446,22 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    /// Deterministic randomness source for tests (no real entropy needed).
+    struct TestRng;
+    impl crate::rng::RandomSource for TestRng {
+        fn fill(&self, buf: &mut [u8]) -> VckResult<()> {
+            for (i, b) in buf.iter_mut().enumerate() {
+                *b = (i as u8).wrapping_mul(7).wrapping_add(1);
+            }
+            Ok(())
+        }
+    }
+    static TEST_RNG: TestRng = TestRng;
+    /// Install the test RNG (idempotent — `set_random_source` is call-once).
+    fn ensure_rng() {
+        crate::rng::set_random_source(&TEST_RNG);
+    }
+
     /// In-memory `SectorIo` for tests.
     struct MemVolume {
         sector_size: u32,
@@ -491,6 +511,7 @@ mod tests {
 
     #[test]
     fn create_then_load_geometry() {
+        ensure_rng();
         // 1024 sectors: 2 footer replicas (512) + 512 data sectors.
         let io = MemVolume::new(512, 1024);
         let store =
@@ -507,6 +528,7 @@ mod tests {
 
     #[test]
     fn header_plus_footer_geometry() {
+        ensure_rng();
         // use_header=1, use_footer=2 -> 3*256 = 768 reserved, 1280 volume.
         let io = MemVolume::new(512, 1280);
         let opts = JvckMetadataOptions {
@@ -521,6 +543,7 @@ mod tests {
 
     #[test]
     fn store_then_load_offset_roundtrip() {
+        ensure_rng();
         let io = MemVolume::new(512, 1024);
         let store =
             JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16])
@@ -539,6 +562,7 @@ mod tests {
 
     #[test]
     fn reopen_finds_existing_metadata() {
+        ensure_rng();
         let io = MemVolume::new(512, 1024);
         let store =
             JvckMetadataStore::create(io, VMK, footer_only_options(), [5; 32], [6; 32], [8; 16])
@@ -559,6 +583,7 @@ mod tests {
 
     #[test]
     fn recovery_picks_largest_offset() {
+        ensure_rng();
         let io = MemVolume::new(512, 1024);
         let store =
             JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16])
@@ -575,7 +600,7 @@ mod tests {
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         store
             .header
-            .encode(&store.secrets, 300, VMK, &mut block)
+            .encode(&store.secrets, 300, &[0u8; metadata::SALT_SIZE], VMK, &mut block)
             .unwrap();
         write_block(&store.io, 512, store.volume_sectors - 1, &block).unwrap();
 
@@ -594,6 +619,7 @@ mod tests {
 
     #[test]
     fn metadata_size_not_multiple_of_sector_is_floored() {
+        ensure_rng();
         // 4096-byte sectors with a metadata_size that is NOT a multiple of the
         // sector size: 128 KiB + 100 bytes. The replica region floors to
         // floor(131172 / 4096) = 32 sectors (the trailing 100 bytes are dropped).
