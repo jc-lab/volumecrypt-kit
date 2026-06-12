@@ -4,7 +4,7 @@
 
 .ONESHELL:
 SHELL := /bin/bash
-# .SHELLFLAGS := -lc
+.SHELLFLAGS := -eu -o pipefail -c
 
 .PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-crypto-test test-vm-os-handover test-vm-os-encrypt clean
 
@@ -19,12 +19,21 @@ testing/signing/MyTestDriverCert.cer: ./testing/signing/generate.sh
 
 # Driver-only rustflags: link the static CRT. panic=abort comes from the
 # workspace [profile] (test-safe; see Cargo.toml).
+#
+# Do NOT add -C target-feature=+aes here. The `aes` crate detects AES-NI at
+# runtime (via cpufeatures) and dispatches to its hardware backend, so the
+# driver already gets hardware AES on x64. Forcing +aes globally lets LLVM
+# INLINE the fully-unrolled AES-NI encrypt8/decrypt8 into the deep storage/
+# metadata/IOCTL call chain, ballooning kernel stack frames past the (small)
+# kernel stack and double-faulting on stack overflow. Keeping the AES-NI code
+# behind the crate's runtime-dispatch call boundary bounds those frames.
+#
 # On x64 the OS saves/restores the full thread context (including XMM/AES-NI)
 # on every context switch, so AES-NI is safe at PASSIVE_LEVEL without any
 # explicit save/restore wrapper.
 DRIVER_RUSTFLAGS = -C target-feature=+crt-static
 
-UEFI_RUSTFLAGS = -C target-feature=+mmx,+sse,+sse2,+sse4.1,+aes,-soft-float
+UEFI_RUSTFLAGS = -C target-feature=-soft-float
 
 # Built in release: unoptimized debug frames overflow the small (~12 KiB)
 # kernel stack on the metadata/crypto path.
@@ -97,6 +106,14 @@ test-vm-os-handover: $(TEST_VM_DIR) build-driver build-app build-loader
 test-vm-os-encrypt: $(TEST_VM_DIR) build-driver build-app build-loader
 	rm -rf ./testing/results/os-encrypt
 	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/os-encrypt --test ./testing/recipes/os-encrypt/os-encrypt.yaml
+
+test-vm-driver-load-dev: $(TEST_VM_DIR) build-driver build-app build-loader
+	rm -rf ./testing/results/driver-load-dev
+	test-foundry.exe --headless --vm-name=win11 test --output ./testing/results/driver-load-dev --test ./testing/recipes/driver-load-dev/driver-load-dev.yaml
+
+test-vm-os-encrypt-dev: $(TEST_VM_DIR) build-driver build-app build-loader
+	rm -rf ./testing/results/os-encrypt
+	test-foundry.exe --headless --vm-name=win11 test --output ./testing/results/os-encrypt-dev --test ./testing/recipes/os-encrypt-dev/os-encrypt-dev.yaml
 
 clean:
 	cargo clean

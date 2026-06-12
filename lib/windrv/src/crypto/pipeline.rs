@@ -33,11 +33,15 @@ impl<'a> CryptoPipeline<'a> {
         buf: &mut [u8],
         sector_size: usize,
     ) {
-        for (i, sector) in buf.chunks_mut(sector_size).enumerate() {
-            let rel = first_rel_sector + i as u64;
-            if rel < encrypted_offset {
-                self.cipher.decrypt_sector(rel, sector);
-            }
+        let total = buf.len() / sector_size;
+        let n = if encrypted_offset <= first_rel_sector {
+            0
+        } else {
+            ((encrypted_offset - first_rel_sector) as usize).min(total)
+        };
+        if n > 0 {
+            self.cipher
+                .decrypt_area(&mut buf[..n * sector_size], sector_size, first_rel_sector);
         }
     }
 
@@ -50,11 +54,15 @@ impl<'a> CryptoPipeline<'a> {
         buf: &mut [u8],
         sector_size: usize,
     ) {
-        for (i, sector) in buf.chunks_mut(sector_size).enumerate() {
-            let rel = first_rel_sector + i as u64;
-            if rel < encrypted_offset {
-                self.cipher.encrypt_sector(rel, sector);
-            }
+        let total = buf.len() / sector_size;
+        let n = if encrypted_offset <= first_rel_sector {
+            0
+        } else {
+            ((encrypted_offset - first_rel_sector) as usize).min(total)
+        };
+        if n > 0 {
+            self.cipher
+                .encrypt_area(&mut buf[..n * sector_size], sector_size, first_rel_sector);
         }
     }
 }

@@ -1,3 +1,9 @@
+<!--
+SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # volumecrypt-kit TODO
 
 `ARCH.md`를 기준으로 한 구현 작업 목록입니다. 아키텍처가 바뀌면 `ARCH.md`와 이 파일을 함께 갱신하세요(AGENTS.md §6).
@@ -166,7 +172,7 @@
   →드라이버 로드. **13/13 통과.** debug.log(0xe9)로 확인: 로더 실행→체인로드→Windows 부팅→드라이버
   `read_handover`가 UEFI 변수 읽어 partition GUID 복원. 로더는 0xe9 debugcon으로도 로그
   (`lib/loader/src/debug.rs`). **참고: test-foundry는 `--headless` 필수**(없으면 wait-boot 타임아웃).
-- [x] **암호화 경로 검증 완료**: `make test-vm-os-encrypt`(`testing/recipes/os-encrypt`) **21/21 통과**.
+- [x] **암호화 경로 검증 완료**: `make test-vm-os-encrypt`(`testing/recipes/os-encrypt`) **22/22 통과**.
   드라이버 INF 설치(Volume UpperFilter, boot-start)→재부팅→`os-volume encrypt --no-wait`(shrink+
   IOCTL_JVCK_PREPARE footer 쓰기+StartEncrypt)→부분 암호화(~2.7GB)→로더 설치→로더 경유 재부팅.
   Boot3에서 로더 `crypto=Some` BlockIo 후킹이 부팅 윈도우 복호화 + 드라이버가 handover로 C:
@@ -177,6 +183,12 @@
   `IoRegisterShutdownNotification` 등록(기존엔 IRP_MJ_SHUTDOWN이 안 왔음) + 핸들러를
   detach→`pause_all_volumes`로 변경(detach 시 OS 볼륨 평문 쓰기 손상 버그 수정; 필터 유지).
   `make test-vm-os-encrypt` 21/21, debug.log "IRP_MJ_SHUTDOWN — pausing sweeps" 확인.
+- [x] **AES-XTS 처리량 개선 + 커널 스택 안전성(8블록 병렬)**: `XtsVolumeCipher`를 8블록 병렬 경로로
+  재작성(`encrypt_blocks`→AES-NI `encrypt8` 배치, 지연 은닉). **주의: 드라이버 RUSTFLAGS에 `+aes`를
+  넣으면 안 됨** — 언롤된 AES-NI가 깊은 IOCTL/메타데이터 콜체인에 인라인되어 커널 스택(콜아웃 32KiB,
+  워커스레드 ~24KiB)을 넘겨 `0x7F` double-fault(스택 오버플로) BSOD 발생. `aes` 크레이트 런타임 감지로
+  HW AES 사용(콜 경계 유지). 완화: per-sector 진입점 `#[inline(never)]`, `XtsVolumeCipher`는 `Aes256` 2개만
+  보관. `make test-vm-os-encrypt` 22/22 재검증.
 - [ ] (잔여 한계) hard-crash(전원 차단) 시 배치 ciphertext 기록↔boundary 영속화 사이 1배치 손상 창:
   완전 crash-consistency는 hotzone 저널링 필요(샘플 범위 밖, engine.rs에 문서화). 전체 암호화
   소프트AES 속도(현재 부분 암호화로만 검증).

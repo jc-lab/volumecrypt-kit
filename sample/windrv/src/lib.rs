@@ -55,7 +55,7 @@ const STATUS_PENDING: NTSTATUS = 0x0000_0103;
 
 // The metadata/crypto path uses a large stack frame; run IOCTL dispatch on an
 // expanded kernel stack so the (deep) storage stack below us has headroom.
-const DISPATCH_STACK_SIZE: usize = 0x8000; // 32 KiB
+const DISPATCH_STACK_SIZE: u64 = 0x8000; // 32 KiB
 
 /// Context passed to the expanded-stack dispatch callout.
 struct ExpandCtx {

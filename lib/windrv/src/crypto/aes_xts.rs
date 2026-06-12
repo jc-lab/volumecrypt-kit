@@ -28,4 +28,15 @@ impl AesXtsCipher {
     pub fn encrypt_sector(&self, rel_sector: u64, buf: &mut [u8]) {
         self.inner.encrypt_sector(rel_sector, buf);
     }
+
+    /// Encrypt a contiguous buffer of `sector_size`-byte sectors using the
+    /// 8-block parallel AES-NI path. `first_rel_sector` is data-region relative.
+    pub fn encrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64) {
+        self.inner.encrypt_area(buf, sector_size, first_rel_sector);
+    }
+
+    /// Decrypt a contiguous buffer (inverse of [`encrypt_area`]).
+    pub fn decrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64) {
+        self.inner.decrypt_area(buf, sector_size, first_rel_sector);
+    }
 }

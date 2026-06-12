@@ -1214,25 +1214,21 @@ fn handle_bench_aes(input: &[u8]) -> VckResult<IoctlResponse> {
 
     let mut freq = LARGE_INTEGER { QuadPart: 1i64 };
 
-    // --- Encrypt pass ---
+    // --- Encrypt pass (8-block parallel AES-NI path) ---
     let enc_start = unsafe { KeQueryPerformanceCounter(&mut freq) };
     for ci in 0u64..chunks {
         let base_sector = ci * SECTORS_PER_CHUNK as u64;
         let slice = unsafe { core::slice::from_raw_parts_mut(buf, CHUNK_BYTES) };
-        for s in 0..SECTORS_PER_CHUNK {
-            cipher.encrypt_sector(base_sector + s as u64, &mut slice[s * SECTOR_SIZE..(s + 1) * SECTOR_SIZE]);
-        }
+        cipher.encrypt_area(slice, SECTOR_SIZE, base_sector);
     }
     let enc_end = unsafe { KeQueryPerformanceCounter(core::ptr::null_mut()) };
 
-    // --- Decrypt pass ---
+    // --- Decrypt pass (8-block parallel AES-NI path) ---
     let dec_start = unsafe { KeQueryPerformanceCounter(core::ptr::null_mut()) };
     for ci in 0u64..chunks {
         let base_sector = ci * SECTORS_PER_CHUNK as u64;
         let slice = unsafe { core::slice::from_raw_parts_mut(buf, CHUNK_BYTES) };
-        for s in 0..SECTORS_PER_CHUNK {
-            cipher.decrypt_sector(base_sector + s as u64, &mut slice[s * SECTOR_SIZE..(s + 1) * SECTOR_SIZE]);
-        }
+        cipher.decrypt_area(slice, SECTOR_SIZE, base_sector);
     }
     let dec_end = unsafe { KeQueryPerformanceCounter(core::ptr::null_mut()) };
 

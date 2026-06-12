@@ -168,9 +168,7 @@ impl EncryptionEngine {
             crate::driver_println!("sweep: read err: {}", e);
             e
         })?;
-        for (i, sector) in buf.chunks_mut(sector_size).enumerate() {
-            cipher.encrypt_sector(start_rel + i as u64, sector);
-        }
+        cipher.encrypt_area(&mut buf, sector_size, start_rel);
         crate::driver_println!("sweep: enc write abs={}", abs);
         io.write_sectors(abs, &buf).map_err(|e| {
             crate::driver_println!("sweep: write err: {}", e);
@@ -211,9 +209,7 @@ impl EncryptionEngine {
         let mut buf = alloc::vec![0u8; count as usize * sector_size];
         let abs = self.offset_sector + new_boundary;
         io.read_sectors(abs, &mut buf)?;
-        for (i, sector) in buf.chunks_mut(sector_size).enumerate() {
-            cipher.decrypt_sector(new_boundary + i as u64, sector);
-        }
+        cipher.decrypt_area(&mut buf, sector_size, new_boundary);
         io.write_sectors(abs, &buf)?;
 
         self.encrypted_offset.sector = new_boundary;
