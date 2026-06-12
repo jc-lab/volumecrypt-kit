@@ -163,22 +163,22 @@ impl EncryptionEngine {
 
         let mut buf = alloc::vec![0u8; count as usize * sector_size];
         let abs = self.offset_sector + start_rel;
-        crate::driver_println!("sweep: enc read abs={} count={}", abs, count);
+        crate::vck_log!("sweep: enc read abs={} count={}", abs, count);
         io.read_sectors(abs, &mut buf).map_err(|e| {
-            crate::driver_println!("sweep: read err: {}", e);
+            crate::vck_log!("sweep: read err: {}", e);
             e
         })?;
         cipher.encrypt_area(&mut buf, sector_size, start_rel);
-        crate::driver_println!("sweep: enc write abs={}", abs);
+        crate::vck_log!("sweep: enc write abs={}", abs);
         io.write_sectors(abs, &buf).map_err(|e| {
-            crate::driver_println!("sweep: write err: {}", e);
+            crate::vck_log!("sweep: write err: {}", e);
             e
         })?;
 
         self.encrypted_offset.sector += count;
-        crate::driver_println!("sweep: stored boundary={}", self.encrypted_offset.sector);
+        crate::vck_log!("sweep: stored boundary={}", self.encrypted_offset.sector);
         store.store(&self.encrypted_offset).map_err(|e| {
-            crate::driver_println!("sweep: store err: {}", e);
+            crate::vck_log!("sweep: store err: {}", e);
             e
         })?;
         store.flush()?;

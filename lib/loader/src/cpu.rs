@@ -19,7 +19,7 @@
 
 use vck_common::cpu::has_aes_ni;
 
-use crate::loader_dbg;
+use crate::vck_log;
 
 const CR0_MP: u64 = 1 << 1;
 const CR0_EM: u64 = 1 << 2;
@@ -74,11 +74,11 @@ fn bit(v: u64, b: u64) -> u32 {
 /// supported) set them to the values required for AES-NI execution.
 pub fn report_and_enable_xmm() {
     let aes = has_aes_ni();
-    loader_dbg!("cpu: AES-NI {}", if aes { "supported" } else { "not supported" });
+    vck_log!("cpu: AES-NI {}", if aes { "supported" } else { "not supported" });
 
     let cr0 = read_cr0();
     let cr4 = read_cr4();
-    loader_dbg!(
+    vck_log!(
         "cpu: current CR0.MP[1]={} CR0.EM[2]={} CR4.OSFXSR[9]={} CR4.OSXMMEXCPT[10]={}",
         bit(cr0, CR0_MP),
         bit(cr0, CR0_EM),
@@ -100,7 +100,7 @@ pub fn report_and_enable_xmm() {
     if new_cr4 != cr4 {
         write_cr4(new_cr4);
     }
-    loader_dbg!(
+    vck_log!(
         "cpu: enabled XMM CR0 {:#x}->{:#x} CR4 {:#x}->{:#x} (MP=1 EM=0 OSFXSR=1 OSXMMEXCPT=1)",
         cr0,
         new_cr0,

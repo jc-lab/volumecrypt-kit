@@ -123,7 +123,7 @@ impl VolumeAttachRegistry {
 
     /// Store the boot ACPI handover essentials (called once at DriverEntry).
     pub fn set_handover(&self, info: HandoverInfo) {
-        crate::driver_println!(
+        crate::vck_log!(
             "registry: handover set partition_guid={}", info.partition_guid
         );
         *self.handover.lock() = Some(info);
@@ -142,7 +142,7 @@ impl VolumeAttachRegistry {
         lower_do: *mut DEVICE_OBJECT,
         pdo_name: alloc::string::String,
     ) {
-        crate::driver_println!("add_pdo_filter: name={} filter={:p}", pdo_name, filter_do);
+        crate::vck_log!("add_pdo_filter: name={} filter={:p}", pdo_name, filter_do);
         self.pdo_filters.lock().push(PdoFilterEntry { pdo, filter_do, lower_do, pdo_name });
     }
 

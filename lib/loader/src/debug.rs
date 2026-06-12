@@ -103,9 +103,13 @@ pub fn write_log_line(prefix: &str, args: fmt::Arguments<'_>) {
     let _ = DebugConsole.write_str("\r\n");
 }
 
-/// Print a line (prefixed `vck-loader:`) to the debug console.
+/// Print a timestamped, `vck-loader:`-prefixed line to the 0xE9 debug console.
+///
+/// This is the loader-side counterpart of the driver's `vck_log!`
+/// (`lib/windrv/src/debug.rs`): same macro name and calling convention, same
+/// `{timestamp} vck-<component>: <message>` output shape.
 #[macro_export]
-macro_rules! loader_dbg {
+macro_rules! vck_log {
     ($($arg:tt)*) => {
         $crate::debug::write_log_line("vck-loader: ", core::format_args!($($arg)*))
     };

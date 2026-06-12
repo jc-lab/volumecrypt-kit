@@ -112,7 +112,7 @@ impl VolumeThread {
             Some(thread_main), self_ptr.cast::<c_void>(),
         );
         if !nt_success(st) {
-            crate::driver_println!("volume_thread: create failed 0x{:08x}", st);
+            crate::vck_log!("volume_thread: create failed 0x{:08x}", st);
             return vt; // thread null; enqueue falls back to direct completion
         }
         let mut obj: *mut c_void = null_mut();
@@ -262,7 +262,7 @@ unsafe extern "C" fn thread_main(context: *mut c_void) {
         match vol.sweep_step(BATCH_SECTORS) {
             Ok(true)  => did = true, // more sweep work remains
             Ok(false) => {}
-            Err(e)    => crate::driver_println!("volume_thread: sweep err: {}", e),
+            Err(e)    => crate::vck_log!("volume_thread: sweep err: {}", e),
         }
 
         // (3) Idle → wait for a wake (new IRP / rebind / start_encrypt) or timeout.

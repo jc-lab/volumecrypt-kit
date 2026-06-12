@@ -115,7 +115,7 @@ unsafe extern "C" fn size_ioctl_completion(
                     sysbuf.add(field_off),
                     8,
                 );
-                crate::driver_println!(
+                crate::vck_log!(
                     "filter: size ioctl 0x{:08x} reported as {} bytes",
                     code, ctx.data_bytes
                 );

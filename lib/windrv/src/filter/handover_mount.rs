@@ -99,7 +99,7 @@ pub unsafe extern "C" fn on_start_device_completed(
         // any read of an encrypted sector before binding would return ciphertext.
         let wi: PIO_WORKITEM = IoAllocateWorkItem(filter_do);
         if wi.is_null() {
-            crate::driver_println!("handover_mount: IoAllocateWorkItem failed; leaving unbound");
+            crate::vck_log!("handover_mount: IoAllocateWorkItem failed; leaving unbound");
             return STATUS_CONTINUE_COMPLETION;
         }
         let ctx = ExAllocatePool2(
@@ -109,7 +109,7 @@ pub unsafe extern "C" fn on_start_device_completed(
         ) as *mut StartWorkCtx;
         if ctx.is_null() {
             IoFreeWorkItem(wi);
-            crate::driver_println!("handover_mount: work ctx alloc failed; leaving unbound");
+            crate::vck_log!("handover_mount: work ctx alloc failed; leaving unbound");
             return STATUS_CONTINUE_COMPLETION;
         }
         (*ctx).filter_do = filter_do;
@@ -173,7 +173,7 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     // OBJECT_TYPE_MISMATCH.
     let mut footer_io = LowerDeviceIo::new(lower_do, 0, 0);
     if let Err(e) = footer_io.query_geometry() {
-        crate::driver_println!("handover_mount: geometry probe failed: {}", e);
+        crate::vck_log!("handover_mount: geometry probe failed: {}", e);
         return;
     }
 
@@ -181,16 +181,16 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     match footer_io.read_gpt_partition_id() {
         Ok(guid) => {
             if guid != handover.partition_guid {
-                crate::driver_println!(
+                crate::vck_log!(
                     "handover_mount: partition {} != target {}, skipping",
                     guid, handover.partition_guid
                 );
                 return;
             }
-            crate::driver_println!("handover_mount: OS volume matched ({})", guid);
+            crate::vck_log!("handover_mount: OS volume matched ({})", guid);
         }
         Err(e) => {
-            crate::driver_println!("handover_mount: partition id read failed: {}", e);
+            crate::vck_log!("handover_mount: partition id read failed: {}", e);
             return;
         }
     }
@@ -200,7 +200,7 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     let store = match JvckMetadataStore::open(footer_io, &handover.vmk) {
         Ok(s) => s,
         Err(e) => {
-            crate::driver_println!("handover_mount: footer metadata open failed: {}", e);
+            crate::vck_log!("handover_mount: footer metadata open failed: {}", e);
             return;
         }
     };
@@ -210,7 +210,7 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     let persisted_offset = match store.load_offset() {
         Ok(o) => o,
         Err(e) => {
-            crate::driver_println!("handover_mount: load_offset failed: {}", e);
+            crate::vck_log!("handover_mount: load_offset failed: {}", e);
             return;
         }
     };
@@ -223,7 +223,7 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     let cipher = match AesXtsCipher::new(key1, key2) {
         Ok(c) => c,
         Err(e) => {
-            crate::driver_println!("handover_mount: cipher init failed: {}", e);
+            crate::vck_log!("handover_mount: cipher init failed: {}", e);
             return;
         }
     };
@@ -269,7 +269,7 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     volume.encryption.lock().start_encrypt();
 
     crate::filter::filter_bind_volume(filter_do, volume.clone());
-    crate::driver_println!(
+    crate::vck_log!(
         "handover_mount: OS volume bound path={} offset_sector={} data_sectors={} boundary={}",
         volume_path, offset_sector, data_sectors, initial_boundary
     );

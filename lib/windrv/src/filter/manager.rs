@@ -113,7 +113,7 @@ pub fn attach_filter(
         (*filter_do).Flags &= !DO_DEVICE_INITIALIZING;
     }
 
-    crate::driver_println!(
+    crate::vck_log!(
         "filter: attached filter={:p} lower={:p} (NOTE: may be above FSD if FSD already mounted)",
         filter_do, lower
     );
@@ -377,7 +377,7 @@ where
     // Get the BASE device of the attachment stack for the volume. This is the
     // device object that was the PDO when AddDevice was called.
     let base_dev = unsafe { IoGetDeviceAttachmentBaseRef(vol_do) };
-    crate::driver_println!(
+    crate::vck_log!(
         "find_filter: vol_do={:p} base_dev={:p} nt_path={}", vol_do, base_dev, nt_path
     );
     // Primary: name-based lookup using the actual device object name.
@@ -399,16 +399,16 @@ where
             } else { alloc::string::String::new() }
         } else { alloc::string::String::new() }
     };
-    crate::driver_println!("find_filter: vol_do_name='{}' nt_path='{}'", dev_name, nt_path);
+    crate::vck_log!("find_filter: vol_do_name='{}' nt_path='{}'", dev_name, nt_path);
     if !dev_name.is_empty() {
         if let Some(result) = name_lookup_fn(&dev_name) {
-            crate::driver_println!("find_filter: found via vol_do_name={}", dev_name);
+            crate::vck_log!("find_filter: found via vol_do_name={}", dev_name);
             return Some(result);
         }
     }
     // Also try nt_path directly.
     if let Some(result) = name_lookup_fn(nt_path) {
-        crate::driver_println!("find_filter: found via nt_path={}", nt_path);
+        crate::vck_log!("find_filter: found via nt_path={}", nt_path);
         return Some(result);
     }
 
@@ -416,12 +416,12 @@ where
     if !base_dev.is_null() {
         unsafe { ObfDereferenceObject(base_dev.cast()) };
         if let Some(result) = lookup_fn(base_dev) {
-            crate::driver_println!("find_filter: found via base_dev={:p}", base_dev);
+            crate::vck_log!("find_filter: found via base_dev={:p}", base_dev);
             return Some(result);
         }
     }
     if let Some(result) = lookup_fn(vol_do) {
-        crate::driver_println!("find_filter: found via vol_do={:p}", vol_do);
+        crate::vck_log!("find_filter: found via vol_do={:p}", vol_do);
         return Some(result);
     }
     let top_dev = unsafe { wdk_sys::ntddk::IoGetAttachedDeviceReference(vol_do) };
@@ -429,7 +429,7 @@ where
         let result = lookup_fn(top_dev);
         unsafe { wdk_sys::ntddk::ObfDereferenceObject(top_dev.cast()) };
         if let Some(r) = result {
-            crate::driver_println!("find_filter: found via top_dev={:p}", top_dev);
+            crate::vck_log!("find_filter: found via top_dev={:p}", top_dev);
             return Some(r);
         }
     }
@@ -441,11 +441,11 @@ where
     // AddDevice-attached filter — e.g. the OS volume queried by its volume GUID
     // instead of by its PDO name (`\Device\HarddiskVolumeN`).
     if let Some(result) = find_our_filter_in_stack(nt_path) {
-        crate::driver_println!("find_filter: found via stack walk for {}", nt_path);
+        crate::vck_log!("find_filter: found via stack walk for {}", nt_path);
         return Some(result);
     }
 
-    crate::driver_println!("find_filter: not found for {}", nt_path);
+    crate::vck_log!("find_filter: not found for {}", nt_path);
     None
 }
 
@@ -496,13 +496,13 @@ pub fn find_our_filter_in_stack(nt_path: &str) -> Option<(PDEVICE_OBJECT, PDEVIC
         loop {
             let ext = (*current).DeviceExtension as *const DeviceExtension;
             let kind = if !ext.is_null() { (*ext).kind } else { 0xFFFF_FFFF };
-            crate::driver_println!(
+            crate::vck_log!(
                 "find_filter[{}]: do={:p} ext_kind=0x{:08x}", depth, current, kind
             );
             if !ext.is_null() && (*ext).kind == DEVICE_KIND_FILTER {
                 let lower = (*ext).lower_device;
                 ObfDereferenceObject(current.cast());
-                crate::driver_println!(
+                crate::vck_log!(
                     "find_filter: found filter_do={:p} lower={:p}", current, lower
                 );
                 return Some((current, lower));
@@ -511,7 +511,7 @@ pub fn find_our_filter_in_stack(nt_path: &str) -> Option<(PDEVICE_OBJECT, PDEVIC
             let next = IoGetLowerDeviceObject(current);
             ObfDereferenceObject(current.cast());
             if next.is_null() {
-                crate::driver_println!("find_filter: reached base (depth={})", depth);
+                crate::vck_log!("find_filter: reached base (depth={})", depth);
                 break;
             }
             current = next;

@@ -28,7 +28,7 @@ use crate::provider::VckLoaderProvider;
 #[entry]
 fn efi_main() -> Status {
     let _ = uefi::helpers::init();
-    vck_loader::loader_dbg!("efi_main: entered");
+    vck_loader::vck_log!("efi_main: entered");
 
     let provider = VckLoaderProvider;
 
@@ -37,12 +37,12 @@ fn efi_main() -> Status {
     // chainload the OS boot manager. On success `run` does not return.
     match vck_loader::run(&provider) {
         Ok(()) => {
-            vck_loader::loader_dbg!("chainloaded image returned unexpectedly");
+            vck_loader::vck_log!("chainloaded image returned unexpectedly");
             log::warn!("vck-loader: chainloaded image returned unexpectedly");
             Status::SUCCESS
         }
         Err(err) => {
-            vck_loader::loader_dbg!("boot failed: {}", err);
+            vck_loader::vck_log!("boot failed: {}", err);
             log::error!("vck-loader: boot failed: {err}");
             Status::LOAD_ERROR
         }

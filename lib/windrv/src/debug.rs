@@ -28,7 +28,7 @@ fn get_timestamp() -> (u64, u32) {
 pub fn debug_print(args: fmt::Arguments<'_>) {
     let (secs, millis) = get_timestamp();
     let mut line = String::new();
-    let _ = write!(&mut line, "{secs}.{millis:03} ");
+    let _ = write!(&mut line, "{secs}.{millis:03} vck-driver: ");
     if line.write_fmt(args).is_err() {
         return;
     }
@@ -73,7 +73,7 @@ pub fn remaining_stack() -> u64 {
 pub fn panic_print(info: &PanicInfo<'_>) -> ! {
     let mut writer = PanicWriter::new();
     let (secs, millis) = get_timestamp();
-    let _ = write!(&mut writer, "{secs}.{millis:03} panic: ");
+    let _ = write!(&mut writer, "{secs}.{millis:03} vck-driver: panic: ");
     if let Some(location) = info.location() {
         let _ = write!(
             &mut writer,
@@ -171,15 +171,15 @@ fn write_debugcon(bytes: &[u8]) {
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 fn write_debugcon(_bytes: &[u8]) {}
 
+/// Print a timestamped, `vck-driver:`-prefixed line to the kernel debugger
+/// (`DbgPrint`) and, with the `debugcon` feature, the 0xE9 debug console.
+///
+/// This is the driver-side counterpart of the loader's `vck_log!`
+/// (`lib/loader/src/debug.rs`): same macro name and calling convention, same
+/// `{timestamp} vck-<component>: <message>` output shape, so both components log
+/// the same way into the captured `debug.log`.
 #[macro_export]
-macro_rules! driver_print {
-    ($($arg:tt)*) => {
-        $crate::debug::debug_print(core::format_args!($($arg)*))
-    };
-}
-
-#[macro_export]
-macro_rules! driver_println {
+macro_rules! vck_log {
     ($($arg:tt)*) => {
         $crate::debug::debug_print(core::format_args!($($arg)*))
     };

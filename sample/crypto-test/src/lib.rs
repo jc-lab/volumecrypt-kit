@@ -33,7 +33,7 @@ pub unsafe extern "system" fn DriverEntry(
 ) -> NTSTATUS {
     let _ = (driver, registry_path);
     let report = tests::run_all();
-    vck_driver::driver_println!(
+    vck_driver::vck_log!(
         "crypto-test: {} passed, {} failed",
         report.passed,
         report.failed

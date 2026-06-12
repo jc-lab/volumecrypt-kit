@@ -52,12 +52,12 @@ use vck_common::VckResult;
 /// On success control passes to the chained image and this does not return;
 /// any `Err` should abort the boot.
 pub fn run<P: LoaderProvider>(provider: &P) -> VckResult<()> {
-    loader_dbg!("run: start");
+    vck_log!("run: start");
     // Report AES-NI support and ensure the SSE/XMM control bits are set before
     // any AES-NI code (cipher construction / Block IO decrypt hook) runs.
     cpu::report_and_enable_xmm();
     let config = provider.on_init()?;
-    loader_dbg!("run: on_init ok (crypto={})", config.crypto.is_some());
+    vck_log!("run: on_init ok (crypto={})", config.crypto.is_some());
 
     if let Some(crypto) = config.crypto {
         // Leak the engine to a stable 'static address: the hooked read routine
@@ -65,10 +65,10 @@ pub fn run<P: LoaderProvider>(provider: &P) -> VckResult<()> {
         // must outlive the chainload (the OS loader keeps reading through them).
         let engine = alloc::boxed::Box::leak(alloc::boxed::Box::new(BlockIoHookEngine::new(crypto)?));
         engine.install()?;
-        loader_dbg!("run: block io hook installed");
+        vck_log!("run: block io hook installed");
     }
 
     handover::install_handover(&config.handover_payload)?;
-    loader_dbg!("run: handover published (UEFI variable)");
+    vck_log!("run: handover published (UEFI variable)");
     chainload::chainload_next(&config.next_loader)
 }

@@ -80,7 +80,7 @@ fn read_handover_variable() -> VckResult<Vec<u8>> {
         )
     };
     if st != STATUS_BUFFER_TOO_SMALL || len == 0 {
-        crate::driver_println!("read_handover: size probe status=0x{:08x} len={}", st, len);
+        crate::vck_log!("read_handover: size probe status=0x{:08x} len={}", st, len);
         return Err(VckError::NotFound("handover variable not present"));
     }
 
@@ -105,7 +105,7 @@ fn read_handover_variable() -> VckResult<Vec<u8>> {
             core::ptr::write_bytes(buf, 0, total);
             ExFreePool(buf.cast());
         }
-        crate::driver_println!("read_handover: get status=0x{:08x}", st);
+        crate::vck_log!("read_handover: get status=0x{:08x}", st);
         return Err(VckError::Io("ExGetFirmwareEnvironmentVariable(get) failed".into()));
     }
 
@@ -118,6 +118,6 @@ fn read_handover_variable() -> VckResult<Vec<u8>> {
         ExFreePool(buf.cast());
         v
     };
-    crate::driver_println!("read_handover: variable read ok ({} bytes)", out.len());
+    crate::vck_log!("read_handover: variable read ok ({} bytes)", out.len());
     Ok(out)
 }
