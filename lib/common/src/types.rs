@@ -27,6 +27,35 @@ pub fn guid_from_windows_bytes(bytes: [u8; 16]) -> Guid {
     Guid::from_bytes_le(bytes)
 }
 
+/// Persisted sweep direction for a volume.
+///
+/// Stored in the EncryptedMetadata `state` field (offset 24, u16) so that after
+/// a reboot the driver resumes the sweep in the correct direction instead of
+/// always re-encrypting. `Encrypt` is `0`, so a zero `state` field (the default
+/// for a freshly-created volume) means "encrypting".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VolumeState {
+    Encrypt,
+    Decrypt,
+}
+
+impl VolumeState {
+    pub fn as_u16(self) -> u16 {
+        match self {
+            VolumeState::Encrypt => 0,
+            VolumeState::Decrypt => 1,
+        }
+    }
+
+    /// Parse from the on-disk u16; unknown values fall back to `Encrypt`.
+    pub fn from_u16(v: u16) -> Self {
+        match v {
+            1 => VolumeState::Decrypt,
+            _ => VolumeState::Encrypt,
+        }
+    }
+}
+
 /// Progressive-encryption progress state.
 ///
 /// All sector numbers are **relative to the data region** (`offset_sector`):

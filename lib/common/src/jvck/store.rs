@@ -17,6 +17,7 @@
 //!   last sector of the volume and can be found by a single read.
 
 use alloc::vec::Vec;
+use core::sync::atomic::{AtomicU16, AtomicU64, Ordering};
 
 use zeroize::Zeroizing;
 
@@ -26,7 +27,7 @@ use crate::{
         options::JvckMetadataOptions,
     },
     store::{EncryptedOffsetStore, SectorIo},
-    types::EncryptedOffset,
+    types::{EncryptedOffset, VolumeState},
     VckError, VckResult,
 };
 
@@ -52,6 +53,11 @@ pub struct JvckMetadataStore<S: SectorIo> {
     /// FVEK material, kept (zeroize-on-drop) so `store()` can re-encode the
     /// EncryptedMetadata blob when `encrypted_offset` advances.
     secrets: JvckSecrets,
+    /// Current on-disk encrypted_offset (data-region relative). Written together
+    /// with `state` on every metadata re-encode.
+    offset: AtomicU64,
+    /// Current on-disk sweep direction (`VolumeState` as u16).
+    state: AtomicU16,
 }
 
 /// Sectors-per-replica for the given layout.
@@ -169,7 +175,7 @@ impl<S: SectorIo> JvckMetadataStore<S> {
             }
             // Layout is plaintext; the VMK only gates the encrypted FVEK blob.
             let header = JvckHeader::parse(&block)?;
-            let (_offset, secrets) = metadata::decrypt_payload(&block, vmk)?;
+            let (_offset, state, secrets) = metadata::decrypt_payload(&block, vmk)?;
 
             let options = JvckMetadataOptions {
                 use_header: header.header_replica_count as u32,
@@ -177,7 +183,7 @@ impl<S: SectorIo> JvckMetadataStore<S> {
                 metadata_size: header.metadata_size,
             };
             let geometry = compute_geometry(sector_size, volume_sectors, &options)?;
-            return Ok(Self {
+            let store = Self {
                 io,
                 options,
                 vmk: Zeroizing::new(vmk.to_vec()),
@@ -185,7 +191,14 @@ impl<S: SectorIo> JvckMetadataStore<S> {
                 volume_sectors,
                 header,
                 secrets,
-            });
+                offset: AtomicU64::new(0),
+                state: AtomicU16::new(state.as_u16()),
+            };
+            // Track the recovered (max) offset so a later store_state() re-encodes
+            // with the correct progress, not 0.
+            let recovered = store.load_offset().unwrap_or(0);
+            store.offset.store(recovered, Ordering::Relaxed);
+            return Ok(store);
         }
         Err(VckError::NotFound("no JVCK metadata present"))
     }
@@ -233,8 +246,10 @@ impl<S: SectorIo> JvckMetadataStore<S> {
             volume_sectors,
             header,
             secrets,
+            offset: AtomicU64::new(0),
+            state: AtomicU16::new(VolumeState::Encrypt.as_u16()),
         };
-        store.write_all_replicas(0)?;
+        store.write_all_replicas()?;
         Ok(store)
     }
 
@@ -278,14 +293,16 @@ impl<S: SectorIo> JvckMetadataStore<S> {
         self.header.volume_id
     }
 
-    fn write_all_replicas(&self, encrypted_offset: u64) -> VckResult<()> {
+    fn write_all_replicas(&self) -> VckResult<()> {
         // Fresh per-write salt so the AES-CBC key/IV are never reused across
         // re-encodes (the EncryptedMetadata plaintext is mostly constant).
         let mut salt = [0u8; metadata::SALT_SIZE];
         crate::rng::fill_random(&mut salt)?;
+        let encrypted_offset = self.offset.load(Ordering::Relaxed);
+        let state = VolumeState::from_u16(self.state.load(Ordering::Relaxed));
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         self.header
-            .encode(&self.secrets, encrypted_offset, &salt, &self.vmk, &mut block)?;
+            .encode(&self.secrets, encrypted_offset, state, &salt, &self.vmk, &mut block)?;
         let rs = replica_sectors(self.options.metadata_size, self.geometry.sector_size);
         for lba in metadata_sector_lbas(
             self.volume_sectors,
@@ -423,12 +440,24 @@ where
     }
 
     fn store(&self, offset: &EncryptedOffset) -> VckResult<()> {
-        self.write_all_replicas(offset.sector)
+        self.offset.store(offset.sector, Ordering::Relaxed);
+        self.write_all_replicas()
     }
 
     fn flush(&self) -> VckResult<()> {
         // Writes go straight through the synchronous SectorIo; nothing to flush.
         Ok(())
+    }
+
+    fn load_state(&self) -> VckResult<VolumeState> {
+        Ok(VolumeState::from_u16(self.state.load(Ordering::Relaxed)))
+    }
+
+    fn store_state(&self, state: VolumeState) -> VckResult<()> {
+        // Persist the direction immediately (re-encode all replicas with the
+        // current offset + new state) so a reboot resumes the right direction.
+        self.state.store(state.as_u16(), Ordering::Relaxed);
+        self.write_all_replicas()
     }
 }
 
@@ -693,12 +722,41 @@ mod tests {
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         store
             .header
-            .encode(&store.secrets, 300, &[0u8; metadata::SALT_SIZE], VMK, &mut block)
+            .encode(
+                &store.secrets,
+                300,
+                VolumeState::Encrypt,
+                &[0u8; metadata::SALT_SIZE],
+                VMK,
+                &mut block,
+            )
             .unwrap();
         write_block(&store.io, 512, store.volume_sectors - 1, &block).unwrap();
 
         // load_offset must still report 500 (the other valid replica).
         assert_eq!(store.load_offset().unwrap(), 500);
+    }
+
+    #[test]
+    fn state_persists_across_reopen() {
+        ensure_rng();
+        let io = MemVolume::new(512, 1024);
+        let store =
+            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16])
+                .unwrap();
+        // Fresh volumes default to Encrypt.
+        assert_eq!(store.load_state().unwrap(), VolumeState::Encrypt);
+
+        store
+            .store(&EncryptedOffset { sector: 100, total_sectors: 512 })
+            .unwrap();
+        store.store_state(VolumeState::Decrypt).unwrap();
+
+        // Reopen: both the offset and the persisted direction survive.
+        let io = store.io;
+        let reopened = JvckMetadataStore::open(io, VMK).unwrap();
+        assert_eq!(reopened.load_state().unwrap(), VolumeState::Decrypt);
+        assert_eq!(reopened.load_offset().unwrap(), 100);
     }
 
     #[test]

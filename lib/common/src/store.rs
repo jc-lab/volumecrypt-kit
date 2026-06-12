@@ -2,7 +2,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::{types::EncryptedOffset, VckResult};
+use crate::{
+    types::{EncryptedOffset, VolumeState},
+    VckResult,
+};
 
 /// Abstraction over raw sector read/write of a single volume.
 ///
@@ -32,4 +35,16 @@ pub trait EncryptedOffsetStore: Send + Sync + 'static {
     fn load(&self) -> VckResult<EncryptedOffset>;
     fn store(&self, offset: &EncryptedOffset) -> VckResult<()>;
     fn flush(&self) -> VckResult<()>;
+
+    /// Load the persisted sweep direction (encrypt vs decrypt). Defaults to
+    /// `Encrypt` for stores that do not track it.
+    fn load_state(&self) -> VckResult<VolumeState> {
+        Ok(VolumeState::Encrypt)
+    }
+
+    /// Persist the sweep direction durably (so a reboot resumes the right
+    /// direction). Default no-op for stores that do not track it.
+    fn store_state(&self, _state: VolumeState) -> VckResult<()> {
+        Ok(())
+    }
 }

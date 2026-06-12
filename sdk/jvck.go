@@ -70,8 +70,12 @@ const (
 const (
 	emOffSignature       = 0
 	emOffEncryptedOffset = 16
-	emOffFvekKey1        = 32
-	emOffFvekKey2        = 64
+	// emOffState (u16): 0 = Encrypt, 1 = Decrypt. The app only ever creates
+	// volumes in the Encrypt state, so the zero-initialized plaintext already
+	// encodes it; this offset is documented here for cross-format parity.
+	emOffState    = 24
+	emOffFvekKey1 = 32
+	emOffFvekKey2 = 64
 )
 
 // JvckHeader holds the plaintext header fields of a Metadata block.

@@ -25,7 +25,10 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 const CRC32: Crc<u32> = Crc::<u32>::new(&CRC_32_ISO_HDLC);
 
-use crate::{types::Guid, VckError, VckResult};
+use crate::{
+    types::{Guid, VolumeState},
+    VckError, VckResult,
+};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -85,6 +88,8 @@ pub fn derive_keys(volume_id: &[u8; 16], salt: &[u8; SALT_SIZE], vmk: &[u8]) -> 
 pub const EM_OFF_SIGNATURE: usize = 0;
 pub const EM_OFF_MUST_ZERO: usize = 4;
 pub const EM_OFF_ENCRYPTED_OFFSET: usize = 16;
+/// Sweep direction (u16): 0 = Encrypt, 1 = Decrypt. 24..26; 26..32 reserved.
+pub const EM_OFF_STATE: usize = 24;
 pub const EM_OFF_FVEK_KEY1: usize = 32;
 pub const EM_OFF_FVEK_KEY2: usize = 64;
 
@@ -185,6 +190,7 @@ impl JvckHeader {
         &self,
         secrets: &JvckSecrets,
         encrypted_offset: u64,
+        state: VolumeState,
         salt: &[u8; SALT_SIZE],
         vmk: &[u8],
         out: &mut [u8; METADATA_BLOCK_SIZE],
@@ -214,6 +220,7 @@ impl JvckHeader {
         plain[EM_OFF_SIGNATURE..EM_OFF_SIGNATURE + 4].copy_from_slice(&JVCK_SIGNATURE);
         plain[EM_OFF_ENCRYPTED_OFFSET..EM_OFF_ENCRYPTED_OFFSET + 8]
             .copy_from_slice(&encrypted_offset.to_le_bytes());
+        plain[EM_OFF_STATE..EM_OFF_STATE + 2].copy_from_slice(&state.as_u16().to_le_bytes());
         plain[EM_OFF_FVEK_KEY1..EM_OFF_FVEK_KEY1 + 32].copy_from_slice(&secrets.fvek_key1);
         plain[EM_OFF_FVEK_KEY2..EM_OFF_FVEK_KEY2 + 32].copy_from_slice(&secrets.fvek_key2);
 
@@ -273,8 +280,8 @@ pub fn verify_crc(block: &[u8]) -> VckResult<()> {
 /// Verifies the Header CRC32, the HMAC (so a wrong VMK is rejected before any
 /// decryption), and the inner `JVCK` signature + zero field. The transient
 /// plaintext buffer is zeroized before returning; only the non-sensitive
-/// `encrypted_offset` and the zeroize-on-drop `JvckSecrets` survive.
-pub fn decrypt_payload(block: &[u8], vmk: &[u8]) -> VckResult<(u64, JvckSecrets)> {
+/// `encrypted_offset` + `state` and the zeroize-on-drop `JvckSecrets` survive.
+pub fn decrypt_payload(block: &[u8], vmk: &[u8]) -> VckResult<(u64, VolumeState, JvckSecrets)> {
     verify_crc(block)?;
     let block = &block[..METADATA_BLOCK_SIZE];
 
@@ -319,7 +326,8 @@ pub fn decrypt_payload(block: &[u8], vmk: &[u8]) -> VckResult<(u64, JvckSecrets)
         secrets
             .fvek_key2
             .copy_from_slice(&plain[EM_OFF_FVEK_KEY2..EM_OFF_FVEK_KEY2 + 32]);
-        Ok((le_u64(plain, EM_OFF_ENCRYPTED_OFFSET), secrets))
+        let state = VolumeState::from_u16(le_u16(plain, EM_OFF_STATE));
+        Ok((le_u64(plain, EM_OFF_ENCRYPTED_OFFSET), state, secrets))
     })();
     buf.zeroize();
     parsed
@@ -329,7 +337,7 @@ pub fn decrypt_payload(block: &[u8], vmk: &[u8]) -> VckResult<(u64, JvckSecrets)
 /// immediately (the returned `JvckSecrets` is dropped here). Use this on the
 /// recovery scan, which must not retain the volume keys.
 pub fn read_encrypted_offset(block: &[u8], vmk: &[u8]) -> VckResult<u64> {
-    let (encrypted_offset, _secrets) = decrypt_payload(block, vmk)?;
+    let (encrypted_offset, _state, _secrets) = decrypt_payload(block, vmk)?;
     Ok(encrypted_offset)
 }
 
@@ -365,7 +373,14 @@ mod tests {
     fn encode_sample(vmk: &[u8], offset: u64) -> [u8; METADATA_BLOCK_SIZE] {
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         sample_header()
-            .encode(&sample_secrets(), offset, &TEST_SALT, vmk, &mut block)
+            .encode(
+                &sample_secrets(),
+                offset,
+                VolumeState::Encrypt,
+                &TEST_SALT,
+                vmk,
+                &mut block,
+            )
             .unwrap();
         block
     }
@@ -402,8 +417,9 @@ mod tests {
         assert_eq!(header.volume_id, [0x11; 16]);
 
         // Secrets + offset require the VMK.
-        let (offset, secrets) = decrypt_payload(&block, vmk).unwrap();
+        let (offset, state, secrets) = decrypt_payload(&block, vmk).unwrap();
         assert_eq!(offset, 4096);
+        assert_eq!(state, VolumeState::Encrypt);
         assert_eq!(secrets.fvek_key1, [0xAA; 32]);
         assert_eq!(secrets.fvek_key2, [0xBB; 32]);
 
@@ -418,7 +434,7 @@ mod tests {
         header.vendor_reserved = [0xC7; VENDOR_RESERVED_SIZE];
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         header
-            .encode(&sample_secrets(), 1, &TEST_SALT, vmk, &mut block)
+            .encode(&sample_secrets(), 1, VolumeState::Encrypt, &TEST_SALT, vmk, &mut block)
             .unwrap();
         let parsed = JvckHeader::parse(&block).unwrap();
         assert_eq!(parsed.vendor_reserved, [0xC7; VENDOR_RESERVED_SIZE]);
@@ -492,7 +508,7 @@ mod tests {
         };
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         header
-            .encode(&secrets, 12345, &TEST_SALT, vmk, &mut block)
+            .encode(&secrets, 12345, VolumeState::Encrypt, &TEST_SALT, vmk, &mut block)
             .unwrap();
         block
     }
