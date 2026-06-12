@@ -5,18 +5,17 @@
 //! Driver-side loader handover reader (UEFI runtime variable).
 //!
 //! The UEFI loader publishes the handover payload as a UEFI runtime variable
-//! (`vck_common::handover::HANDOVER_VAR_NAME` under `HANDOVER_VAR_GUID`), with
-//! `RUNTIME_ACCESS`, whose value is the raw msgpack payload. The driver reads it
-//! at runtime via `ExGetFirmwareEnvironmentVariable` and decodes it.
+//! (the payload type's `VAR_NAME` under `VAR_GUID`), with `RUNTIME_ACCESS`, whose
+//! value is the raw msgpack payload. The driver reads it at runtime via
+//! `ExGetFirmwareEnvironmentVariable` and decodes it.
 //!
 //! Rationale: kernel-mode `ZwQuerySystemInformation(SystemFirmwareTableInformation,
-//! provider "ACPI")` returns `STATUS_NOT_IMPLEMENTED` on current Windows, so the
-//! original ACPI-table transport could not be read from the driver. UEFI runtime
-//! variables are readable from kernel mode and survive into the OS.
+//! provider "ACPI")` returns `STATUS_NOT_IMPLEMENTED` on current Windows, so an
+//! ACPI-table transport could not be read from the driver. UEFI runtime variables
+//! are readable from kernel mode and survive into the OS.
 
 use alloc::vec::Vec;
-use vck_common::{handover::payload::HandoverPayload, handover::HANDOVER_VAR_GUID,
-    handover::HANDOVER_VAR_NAME, VckError, VckResult};
+use vck_common::{handover::payload::HandoverPayload, VckError, VckResult};
 use wdk_sys::{ntddk::ExFreePool, GUID, NTSTATUS};
 
 use crate::nt::UnicodeString;
@@ -39,8 +38,7 @@ extern "system" {
 
 /// Construct the vendor `GUID` from the shared raw bytes (Windows GUID layout:
 /// `Data1`/`Data2`/`Data3` little-endian, `Data4` as-is).
-fn handover_guid() -> GUID {
-    let b = HANDOVER_VAR_GUID;
+fn handover_guid(b: [u8; 16]) -> GUID {
     GUID {
         Data1: u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
         Data2: u16::from_le_bytes([b[4], b[5]]),
@@ -51,21 +49,18 @@ fn handover_guid() -> GUID {
 
 /// Read the loader handover UEFI variable and deserialize it into `P`.
 ///
-/// Returns `NotFound` when no loader published the variable (the normal case
-/// when booting without the loader).
+/// The variable name/GUID come from the payload type (`P::VAR_NAME` /
+/// `P::VAR_GUID`). Returns `NotFound` when no loader published the variable (the
+/// normal case when booting without the loader).
 pub fn read_handover<P: HandoverPayload>() -> VckResult<P> {
-    let bytes = read_handover_variable()?;
-    payload_decode::<P>(&bytes)
-}
-
-fn payload_decode<P: HandoverPayload>(bytes: &[u8]) -> VckResult<P> {
-    vck_common::handover::payload::decode_payload::<P>(bytes)
+    let bytes = read_handover_variable(P::VAR_NAME, P::VAR_GUID)?;
+    vck_common::handover::payload::decode_payload::<P>(&bytes)
 }
 
 /// Read the raw value of the handover UEFI variable into an owned buffer.
-fn read_handover_variable() -> VckResult<Vec<u8>> {
-    let name = UnicodeString::from_str(HANDOVER_VAR_NAME);
-    let mut guid = handover_guid();
+fn read_handover_variable(var_name: &str, var_guid: [u8; 16]) -> VckResult<Vec<u8>> {
+    let name = UnicodeString::from_str(var_name);
+    let mut guid = handover_guid(var_guid);
 
     // First call: discover the value length (pass a zero-length buffer).
     let mut len: u32 = 0;

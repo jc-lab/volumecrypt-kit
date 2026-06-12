@@ -8,9 +8,21 @@ use serde::{de::DeserializeOwned, Serialize};
 
 use crate::VckResult;
 
+/// A loader→driver handover payload.
+///
+/// The associated constants identify the UEFI runtime variable the payload is
+/// published under: the loader writes `SetVariable(VAR_NAME, VAR_GUID, ...)` and
+/// the driver reads the same variable. They are part of the integrator's
+/// contract — see the sample's `VckHandoverPayload` impl — not the framework, so
+/// the concrete name/GUID live with the concrete payload type.
 pub trait HandoverPayload: Serialize + DeserializeOwned {
-    const ACPI_SIGNATURE: [u8; 4];
-    const ACPI_OEM_ID: [u8; 6];
+    /// UEFI variable name carrying this handover payload (UCS-2 convertible).
+    const VAR_NAME: &'static str;
+    /// Vendor GUID for [`VAR_NAME`](Self::VAR_NAME), as the 16 raw bytes of a
+    /// Windows/UEFI `GUID` (`Data1`/`Data2`/`Data3` little-endian, `Data4` as-is).
+    /// Both the loader (`uefi::Guid`) and the driver (`wdk_sys::GUID`) build their
+    /// GUID from these same bytes.
+    const VAR_GUID: [u8; 16];
 }
 
 pub fn encode_payload<P: HandoverPayload>(payload: &P) -> VckResult<Vec<u8>> {
@@ -23,19 +35,38 @@ pub fn decode_payload<P: HandoverPayload>(bytes: &[u8]) -> VckResult<P> {
         .map_err(|err| crate::VckError::MsgpackDecode(err.to_string()))?)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HandoverBlob {
-    pub signature: [u8; 4],
-    pub oem_id: [u8; 6],
-    pub payload: Vec<u8>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
 
-impl HandoverBlob {
-    pub fn new<P: HandoverPayload>(payload: &P) -> VckResult<Self> {
-        Ok(Self {
-            signature: P::ACPI_SIGNATURE,
-            oem_id: P::ACPI_OEM_ID,
-            payload: encode_payload(payload)?,
-        })
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+    struct TestPayload {
+        partition_guid: [u8; 16],
+        vmk: Vec<u8>,
+    }
+
+    impl HandoverPayload for TestPayload {
+        const VAR_NAME: &'static str = "TestHandover";
+        const VAR_GUID: [u8; 16] = [0u8; 16];
+    }
+
+    #[test]
+    fn encode_decode_round_trip() {
+        let original = TestPayload {
+            partition_guid: [
+                0x5a, 0x95, 0x77, 0x0f, 0x3e, 0xf6, 0x11, 0xf1, 0x8b, 0x5c, 0xb4, 0x2e, 0x99, 0x11,
+                0x84, 0x0a,
+            ],
+            vmk: (0u8..32).collect(),
+        };
+        let bytes = encode_payload(&original).expect("encode");
+        let decoded: TestPayload = decode_payload(&bytes).expect("decode");
+        assert_eq!(decoded, original);
+    }
+
+    #[test]
+    fn decode_rejects_garbage() {
+        assert!(decode_payload::<TestPayload>(&[0xff, 0x00, 0x12, 0x34]).is_err());
     }
 }

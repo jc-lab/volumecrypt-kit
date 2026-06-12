@@ -12,9 +12,8 @@
 //! - Block IO hooking engine ([`hook`]): hooks `EFI_BLOCK_IO_PROTOCOL` and
 //!   `EFI_BLOCK_IO2_PROTOCOL` so that the OS volume data region is decrypted
 //!   transparently while it is read during boot.
-//! - ACPI handover ([`handover`]): a thin wrapper over `vck_common`'s
-//!   `AcpiHandoverWriter` that installs the custom (e.g. `VCKD`) table carrying
-//!   the driver handover payload.
+//! - Handover ([`handover`]): publishes the driver handover payload as a UEFI
+//!   runtime variable (the driver reads it at OS runtime).
 //! - Chainloading ([`chainload`]): loads and starts the next EFI image
 //!   (the OS boot manager).
 //!
