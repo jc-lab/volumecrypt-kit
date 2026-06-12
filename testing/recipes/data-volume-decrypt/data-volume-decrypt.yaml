@@ -5,23 +5,21 @@
 
 name: "data-volume-decrypt"
 description: >
-  Data volume encrypt -> decrypt round-trip, exercising the decrypt sweep and the
-  encrypt/decrypt state flip added this session (EncryptionEngine::decrypt_step +
-  the VolumeState persisted in EncryptedMetadata):
+  Data volume prepare / encrypt / detach / attach (re-mount) / decrypt round-trip,
+  exercising the decrypt sweep + persisted state and the re-mountable detach
+  (unbind to pass-through, keep the filter) added this session:
     1) install driver, reboot (AddDevice attaches the filter below NTFS).
     2) prepare D: (shrink + write JVCK footer metadata + attach), write a marker.
     3) encrypt --no-wait, let the sweep advance a little.
-    4) decrypt --no-wait (same attach session) and wait until the boundary returns
-       to 0 (Idle) — drives the decrypt sweep and the in-place encrypt->decrypt
-       direction flip.
-    5) detach; the marker must still match (plaintext on disk again), proving the
+    4) detach (dismount) — the filter is unbound to pass-through but stays
+       attached, so it can be re-bound without a reboot.
+    5) attach (mount) again — re-binds via the kept filter, reads metadata + the
+       persisted boundary; the marker must still read correctly.
+    6) decrypt --no-wait back to boundary 0 (Idle) — drives EncryptionEngine::
+       decrypt_step and the encrypt->decrypt VolumeState flip.
+    7) detach; the marker must still match (plaintext on disk), proving the
        encrypt -> decrypt round-trip is lossless. The marker is verified readable
-       at every stage (before/during encryption, after decryption, after detach).
-
-  NOTE: the whole round-trip runs in ONE attach session. Detaching a partially-
-  encrypted data volume and re-attaching it (with or without a reboot) is a
-  separate, currently-unsupported path — the AddDevice filter is removed on
-  detach and re-attaching an already-prepared+shrunk volume is not handled.
+       at every stage.
 
 qemu:
   extra_args:
@@ -139,7 +137,29 @@ steps:
           if ($ok) { Write-Host "ENCRYPT_PROGRESS_OK" } else { Write-Host "NO_PROGRESS"; exit 1 }
       expect_exit_code: 0
 
-  # Marker still readable while partially encrypted (filter decrypts the prefix).
+  # Detach (dismount) the partially-encrypted volume. The filter is UNBOUND to
+  # pass-through but stays attached (re-mountable without a reboot).
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "C:\\Temp\\vck-app.exe data-volume detach --volume \\\\.\\D:"]
+      expect_exit_code: 0
+
+  # Re-attach (mount) without a reboot: re-binds via the kept filter and reads
+  # the existing metadata + persisted boundary. This is the path the new
+  # unbind_filter enables (previously failed: "device not functioning").
+  - action: exec
+    timeout: 120s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe data-volume attach --volume \\\\.\\D: --vmk AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+      expect_exit_code: 0
+
+  # Marker still readable after re-mount of the partially-encrypted volume
+  # (filter decrypts the encrypted prefix).
   - action: exec
     timeout: 30s
     params:
@@ -147,8 +167,8 @@ steps:
       args: ["/c", "type D:\\vck-rt.txt"]
       expect_exit_code: 0
 
-  # Decrypt (same attach session): flip the sweep to Decrypting and run it back
-  # to boundary 0. Wait until status reports Idle at 0 sectors.
+  # Decrypt: flip the sweep to Decrypting and run it back to boundary 0. Wait
+  # until status reports Idle at 0 sectors.
   - action: exec
     timeout: 30s
     params:

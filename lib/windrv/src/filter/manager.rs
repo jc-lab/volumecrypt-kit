@@ -312,6 +312,42 @@ pub fn attach_filter_to_device(
     Ok((filter_do, lower))
 }
 
+/// Unbind the cipher/volume from a filter and return it to **pass-through**
+/// (the AddDevice unbound state), but KEEP the filter device attached to the
+/// stack (and its PDO→filter map entry valid). Used by user-initiated detach
+/// (`data-volume detach` = dismount) so the volume can be re-attached later
+/// without a reboot.
+///
+/// Contrast with [`detach_filter`], which fully tears the filter down
+/// (IoDetachDevice + IoDeleteDevice) — reserved for driver unload / shutdown /
+/// half-attach error cleanup, where the device must actually go away.
+///
+/// # Safety
+/// `filter_do` must be a filter device object owned by this driver.
+pub fn unbind_filter(filter_do: PDEVICE_OBJECT) {
+    if filter_do.is_null() {
+        return;
+    }
+    unsafe {
+        let ext = (*filter_do).DeviceExtension as *mut DeviceExtension;
+        // Stop the per-volume IO+sweep thread FIRST so no thread touches the
+        // lower device or the volume Arc after this point.
+        if !(*ext).vthread.is_null() {
+            let vt = alloc::boxed::Box::from_raw((*ext).vthread);
+            vt.stop();
+            (*ext).vthread = null_mut();
+            // `vt` dropped here: drains any leftover IRPs + drops its volume Arc.
+        }
+        // Release the bound volume Arc -> filter becomes pass-through. The filter
+        // device and its `lower_device` attachment STAY, so a later attach can
+        // re-bind via `filter_bind_volume` (the PDO map still points here).
+        if !(*ext).volume.is_null() {
+            drop(Arc::from_raw((*ext).volume));
+            (*ext).volume = null_mut();
+        }
+    }
+}
+
 /// Detach and delete a filter device, releasing the `Arc<AttachedVolume>` held
 /// in its extension.
 pub fn detach_filter(filter_do: PDEVICE_OBJECT) {

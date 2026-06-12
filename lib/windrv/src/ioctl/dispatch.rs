@@ -335,7 +335,12 @@ fn handle_jvck_prepare_adddevice_path(
     };
 
     // If VMK provided, complete full attach (read metadata → cipher → sweep).
-    if !req.vmk.is_empty() && !req.metadata_block.is_empty() {
+    // This fires even when `metadata_block` is empty (re-attach of a volume whose
+    // metadata is already on disk): the footer is read here via LowerDeviceIo at
+    // the FULL partition size, so it is found at the true last sector — unlike the
+    // separate IOCTL_JVCK_ATTACH path, which reads through the size-hiding filter
+    // and would look at the wrong (data-region-end) LBA.
+    if !req.vmk.is_empty() {
         // Use LowerDeviceIo to read metadata. This bypasses:
         // 1. The filter (which now applies size hiding, reporting 20971008 sectors)
         // 2. NTFS (which might cache/remap sectors)
@@ -757,8 +762,10 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
 
     // If VMK was provided, complete the full attach now: read metadata, build
     // cipher, configure sweep_io, and replace the provisional volume.
-    // This merges the old two-IOCTL flow (PREPARE + ATTACH) into one.
-    if !req.vmk.is_empty() && !req.metadata_block.is_empty() {
+    // This merges the old two-IOCTL flow (PREPARE + ATTACH) into one, and also
+    // handles re-attach (empty metadata_block) since the metadata is read from
+    // disk here, not from the request.
+    if !req.vmk.is_empty() {
         let io_nt_path = if !req.nt_device_path.is_empty() {
             req.nt_device_path.clone()
         } else {
@@ -1034,13 +1041,15 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
 /// Cleanly detach an encrypted volume:
 ///   1. FSCTL_LOCK_VOLUME (if `ignore_open_files`, failure is non-fatal)
 ///   2. FSCTL_DISMOUNT_VOLUME (retry up to `max_dismount_retries`, 100 ms between attempts)
-///   3. Existing filter removal
+///   3. Filter teardown — `unbind_filter` (pass-through, re-attachable) when
+///      `keep_filter`, else `detach_filter` (full delete, for unload/shutdown).
 ///
 /// Must be called on an EXPANDED kernel stack (uses KeDelayExecutionThread).
 pub fn detach_volume_with_dismount(
     registry: &VolumeAttachRegistry,
     volume_path: &str,
     ignore_open_files: bool,
+    keep_filter: bool,
 ) -> VckResult<()> {
     use crate::io::{open_volume_handle_raw, send_fsctl};
     use wdk_sys::ntddk::{KeDelayExecutionThread, ZwClose};
@@ -1111,11 +1120,17 @@ pub fn detach_volume_with_dismount(
         unsafe { KeDelayExecutionThread(0, 0, &mut interval); }
     }
 
-    // Step 3: remove filter.
+    // Step 3: filter teardown. User detach keeps the filter as pass-through so
+    // the volume can be re-attached without a reboot; unload/shutdown fully
+    // deletes it.
     if !filter_do.is_null() {
-        crate::filter::detach_filter(filter_do);
+        if keep_filter {
+            crate::filter::unbind_filter(filter_do);
+        } else {
+            crate::filter::detach_filter(filter_do);
+        }
     }
-    crate::vck_log!("detach: done for {}", volume_path);
+    crate::vck_log!("detach: done for {} (keep_filter={})", volume_path, keep_filter);
     Ok(())
 }
 
@@ -1131,7 +1146,9 @@ fn handle_detach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<Ioc
             ));
         }
     }
-    detach_volume_with_dismount(registry, &req.volume_path, false).map_err(|e| {
+    // keep_filter=true: leave the filter attached as pass-through so the volume
+    // can be re-attached (mounted) again without a reboot.
+    detach_volume_with_dismount(registry, &req.volume_path, false, true).map_err(|e| {
         crate::vck_log!("detach: failed: {}", e);
         e
     })?;
@@ -1173,7 +1190,9 @@ fn handle_detach_all_volumes(registry: &VolumeAttachRegistry) -> VckResult<Ioctl
         .collect();
     for path in data_paths {
         crate::vck_log!("detach_all_data: detaching {}", path);
-        if let Err(e) = detach_volume_with_dismount(registry, &path, true) {
+        // keep_filter=false: this runs on shutdown/unload, so fully tear down the
+        // filter device (IoDetachDevice + IoDeleteDevice).
+        if let Err(e) = detach_volume_with_dismount(registry, &path, true, false) {
             crate::vck_log!("detach_all_data: {} failed: {}", path, e);
         }
     }

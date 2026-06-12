@@ -93,8 +93,10 @@ type JvckVolumePrepareRequest struct {
 	// Pre-encoded 512-byte JVCK Metadata block (with encrypted_offset=1 so the
 	// sweep starts from sector 1 after sector 0 is pre-encrypted). The driver
 	// writes this to every replica LBA while the volume lock is held.
-	// Empty means re-attach (skip write).
-	MetadataBlock []byte `msgpack:"metadata_block"`
+	// Empty means re-attach (skip write). omitempty so a nil/empty block is
+	// OMITTED on the wire (not sent as msgpack nil, which the driver's
+	// serde_bytes decoder would reject); the driver then defaults it to empty.
+	MetadataBlock []byte `msgpack:"metadata_block,omitempty"`
 	// IsOsVolume marks this as the OS (system) volume so the driver registers it
 	// as an OS volume (protected from DETACH_ALL_VOLUMES / detach / unload while
 	// encrypted) — the same volume the boot loader re-attaches via handover.
