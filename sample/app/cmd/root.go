@@ -58,27 +58,33 @@ var dataVolumeCmd = &cobra.Command{
 func init() {
 	rootCmd.PersistentFlags().StringVar(&volumeFlag, "volume", "", "target volume path (e.g. \\\\.\\D:)")
 
-	// data-volume attach flags.
-	attachCmd.Flags().StringVar(&vmkFlag, "vmk", "", "base64-encoded VMK")
-	attachCmd.Flags().Uint32Var(&useHeaderFlag, "use-header", 0, "number of header metadata replicas")
-	attachCmd.Flags().Uint32Var(&useFooterFlag, "use-footer", 2, "number of footer metadata replicas")
-	attachCmd.Flags().Uint32Var(&metadataSizeFlag, "metadata-size", 131072, "size of a single replica region in bytes (min 128KiB)")
+	// data-volume key/layout flags (shared by prepare + attach).
+	for _, c := range []*cobra.Command{prepareCmd, attachCmd} {
+		c.Flags().StringVar(&vmkFlag, "vmk", "", "base64-encoded VMK")
+		c.Flags().Uint32Var(&useHeaderFlag, "use-header", 0, "number of header metadata replicas")
+		c.Flags().Uint32Var(&useFooterFlag, "use-footer", 2, "number of footer metadata replicas")
+		c.Flags().Uint32Var(&metadataSizeFlag, "metadata-size", 131072, "size of a single replica region in bytes (min 128KiB)")
+	}
 
-	// data-volume subcommands.
+	// data-volume: prepare (first-time write+attach), attach (mount), detach
+	// (dismount), encrypt/decrypt (sweep).
+	dataVolumeCmd.AddCommand(prepareCmd)
 	dataVolumeCmd.AddCommand(attachCmd)
 	dataVolumeCmd.AddCommand(detachCmd)
 	dataVolumeCmd.AddCommand(newEncryptCmd())
+	dataVolumeCmd.AddCommand(newDecryptCmd())
 
-	// os-volume subcommands.
-	osVolumeCmd.AddCommand(newOSVolumeEncryptCmd())
+	// os-volume: prepare (shrink/EFI/metadata), encrypt/decrypt (sweep).
+	osVolumeCmd.AddCommand(newOSVolumePrepareCmd())
+	osVolumeCmd.AddCommand(newEncryptCmd())
+	osVolumeCmd.AddCommand(newDecryptCmd())
 	osVolumeCmd.AddCommand(newOSVolumeVerifyPrepareCmd())
 
 	// Top-level command groups.
 	rootCmd.AddCommand(osVolumeCmd)
 	rootCmd.AddCommand(dataVolumeCmd)
 
-	// Top-level convenience commands (as shown in the ARCH examples).
-	rootCmd.AddCommand(decryptCmd)
+	// Top-level status query.
 	rootCmd.AddCommand(statusCmd)
 }
 

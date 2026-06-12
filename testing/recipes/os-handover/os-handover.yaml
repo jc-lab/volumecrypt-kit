@@ -58,7 +58,7 @@ steps:
       cmd: "cmd.exe"
       args:
         - "/c"
-        - "C:\\Temp\\vck-app.exe --volume \\\\.\\C: os-volume encrypt --prepare-only"
+        - "C:\\Temp\\vck-app.exe --volume \\\\.\\C: os-volume prepare --prepare-only"
       expect_exit_code: 0
 
   # 2. Install our loader as bootmgfw.efi (firmware boot entry target). The

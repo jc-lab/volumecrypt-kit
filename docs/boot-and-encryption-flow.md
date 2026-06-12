@@ -8,24 +8,30 @@ SPDX-License-Identifier: Apache-2.0
 
 ## 데이터 볼륨 (UEFI 무관)
 
-OS 부팅 후 Go CLI가 IOCTL로 attach → 암호화합니다. 신규 파티션이면 header replica를, 기존 파티션이면
-footer replica만 사용합니다.
+OS 부팅 후 Go CLI로 최초 1회 `prepare`(메타데이터 기록 + attach) 후 `encrypt`로 sweep을 시작합니다.
+신규 파티션이면 header replica를, 기존 파티션이면 footer replica만 사용합니다.
+이후 재부팅 시에는 `attach`(mount)로 재연결하고 `detach`(dismount)로 해제합니다.
 
 ```
-[vck-app data-volume attach --volume \\.\D: --vmk <base64> --use-footer 2 ...]
+[vck-app data-volume prepare --volume \\.\D: --vmk <base64> --use-footer 2 ...]   # 최초 1회
+   │  shrink(footer 공간 확보) + JVCK 메타데이터 생성·기록
    │  IOCTL_JVCK_PREPARE   (1단계: 필터 부착 + size hiding → NTFS가 메타데이터 영역에
    │                        VBR 백업을 쓰지 않도록 보호. 앱은 이후 메타데이터를 안전하게 기록)
-   │  IOCTL_JVCK_ATTACH    (2단계: 볼륨에서 JVCK 메타데이터 읽기/생성 → VMK로 FVEK·encrypted_offset
-   │                        복원 → AES-XTS 볼륨으로 등록)
+   │  IOCTL_JVCK_ATTACH    (2단계: 볼륨에서 JVCK 메타데이터 읽기 → VMK로 FVEK·encrypted_offset
+   │                        복원 → 볼륨 cipher 등록)
    ▼
-[vck-app data-volume encrypt --volume \\.\D:]
+[vck-app data-volume encrypt --volume \\.\D:]   # decrypt 로 역방향
    │  IOCTL_VCK_START_ENCRYPT → 드라이버가 per-volume 스레드에서 백그라운드 sweep 시작
    │  IOCTL_VCK_GET_PROGRESS (논블로킹 polling) → 진행률 스트림
    ▼
 [encrypted_offset == total_sectors → StateIdle, 완료]
+
+재부팅 후: [vck-app data-volume attach --volume \\.\D: --vmk <base64>]   # mount (메타데이터 읽기만)
+해제:       [vck-app data-volume detach --volume \\.\D:]                  # dismount
 ```
 
-복호화는 `IOCTL_VCK_START_DECRYPT`로 역방향 sweep, `IOCTL_VCK_DETACH`로 암호화 레이어 해제.
+복호화는 `data-volume decrypt`(= `IOCTL_VCK_START_DECRYPT`, 역방향 sweep). `detach`는 `IOCTL_VCK_DETACH`로
+암호화 레이어 해제(dismount).
 
 ## OS(시스템) 볼륨 — 3부팅 흐름
 

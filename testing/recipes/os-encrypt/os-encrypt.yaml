@@ -100,9 +100,16 @@ steps:
       args: ["/c", "echo hello-before-encrypt> C:\\vck-ostest.txt && type C:\\vck-ostest.txt"]
       expect_exit_code: 0
 
-  # First-time encryption: shrink → PREPARE (footer metadata, fixed VMK) →
-  # StartEncrypt, then return immediately (--no-wait). The sweep keeps running in
-  # the driver; we reboot while the volume is only PARTIALLY encrypted so the
+  # First-time prepare: shrink → PREPARE (footer metadata, fixed VMK) + attach.
+  - action: exec
+    timeout: 240s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "C:\\Temp\\vck-app.exe --volume \\\\.\\C: os-volume prepare"]
+      expect_exit_code: 0
+
+  # Start the sweep and return immediately (--no-wait). The sweep keeps running
+  # in the driver; we reboot while the volume is only PARTIALLY encrypted so the
   # boot path exercises the loader's decrypt hook on real ciphertext without
   # waiting for the (slow, whole-disk soft-AES) sweep to finish.
   - action: exec

@@ -166,7 +166,7 @@ steps:
       cmd: "cmd.exe"
       args:
         - "/c"
-        - "C:\\Temp\\vck-app.exe data-volume attach --volume \\\\.\\D: --vmk AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8= --use-header 0 --use-footer 2 --metadata-size 131072"
+        - "C:\\Temp\\vck-app.exe data-volume prepare --volume \\\\.\\D: --vmk AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8= --use-header 0 --use-footer 2 --metadata-size 131072"
       expect_exit_code: 0
 
   # Volume info after attach: reduced size if filter activated.

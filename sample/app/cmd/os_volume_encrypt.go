@@ -5,7 +5,6 @@
 package cmd
 
 import (
-	"context"
 	"crypto/rand"
 	"fmt"
 	"encoding/base64"
@@ -30,7 +29,6 @@ const (
 )
 
 var osVolumePrepareOnly bool
-var osVolumeNoWait bool
 
 type osVolumePrepareResult struct {
 	VolumePath    string `json:"volume_path"`
@@ -73,10 +71,10 @@ const (
 	osVolumeFooterReplicaCount    = 2
 )
 
-func newOSVolumeEncryptCmd() *cobra.Command {
+func newOSVolumePrepareCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "encrypt",
-		Short: "prepare the OS volume for first-time encryption and start encryption when attach is ready",
+		Use:   "prepare",
+		Short: "prepare the OS volume for first-time encryption (shrink, EFI, vck.json, footer metadata)",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			prepareResult, err := prepareOSVolume(effectiveOSVolumePath())
 			if err != nil {
@@ -90,7 +88,7 @@ func newOSVolumeEncryptCmd() *cobra.Command {
 			fmt.Printf("Created config : %s\n", prepareResult.VckJSONPath)
 
 			if osVolumePrepareOnly {
-				fmt.Println("Preparation complete. Driver start skipped (--prepare-only).")
+				fmt.Println("Host preparation complete. Driver metadata write skipped (--prepare-only).")
 				return nil
 			}
 
@@ -104,7 +102,8 @@ func newOSVolumeEncryptCmd() *cobra.Command {
 			// encrypted with the FIXED OS VMK (the same one written to vck.json), so
 			// the loader/driver can recover the FVEK from the footer on the next
 			// boot. The driver writes the replicas below its AddDevice filter, which
-			// works on the live OS volume without lock/dismount.
+			// works on the live OS volume without lock/dismount. This attaches the
+			// volume but does NOT start the sweep — run `os-volume encrypt` for that.
 			vmk, err := hex.DecodeString(osVolumeVmkHex)
 			if err != nil {
 				return fmt.Errorf("failed to decode fixed OS volume VMK: %w", err)
@@ -133,40 +132,12 @@ func newOSVolumeEncryptCmd() *cobra.Command {
 			}
 			fmt.Printf("Metadata written. offset_sector=%d data_sectors=%d sector_size=%d fully_attached=%t\n",
 				prepResp.OffsetSector, prepResp.DataSectors, prepResp.SectorSize, prepResp.FullyAttached)
-
-			if err := client.StartEncrypt(&vck.EncryptRequest{
-				VolumePath: prepareResult.VolumePath,
-			}); err != nil {
-				return fmt.Errorf("OS volume encryption start failed: %w", err)
-			}
-
-			// --no-wait: return as soon as the sweep is started, leaving the
-			// volume partially encrypted. Used by the reboot-through-loader test
-			// (the blocking WatchProgress below would prevent the test from
-			// rebooting while encryption is in progress).
-			if osVolumeNoWait {
-				fmt.Println("Encryption started (running in background; --no-wait).")
-				return nil
-			}
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-
-			evCh, errCh := client.WatchProgress(ctx, prepareResult.VolumePath)
-			for ev := range evCh {
-				fmt.Printf("\rEncrypting: %.1f%% (%d / %d sectors)",
-					ev.ProgressPercent(), ev.EncryptedSector, ev.TotalSectors)
-			}
-			if err := <-errCh; err != nil {
-				return err
-			}
-			fmt.Println("\nEncryption complete.")
+			fmt.Println("Prepared. Run `os-volume encrypt` to start the sweep.")
 			return nil
 		},
 	}
 
-	cmd.Flags().BoolVar(&osVolumePrepareOnly, "prepare-only", false, "perform shrink/EFI/vck.json preparation only")
-	cmd.Flags().BoolVar(&osVolumeNoWait, "no-wait", false, "start encryption and return immediately (do not wait for completion)")
+	cmd.Flags().BoolVar(&osVolumePrepareOnly, "prepare-only", false, "host preparation only (skip the driver metadata write)")
 	return cmd
 }
 
