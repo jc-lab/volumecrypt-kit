@@ -80,6 +80,9 @@ jobs:
       - name: install WDK
         run: winget install --id Microsoft.WindowsWDK.10.0.26100 --exact  --accept-package-agreements  --accept-source-agreements --disable-interactivity
 
+      - name: install x86_64-unknown-uefi
+        run: rustup target add x86_64-unknown-uefi
+
       - name: cargo test (host)
         shell: msys2 {0}
         run: cargo test -p vck-common
