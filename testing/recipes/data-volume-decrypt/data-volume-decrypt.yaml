@@ -1,0 +1,215 @@
+# Copyright 2026 JC-Lab
+# SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: "data-volume-decrypt"
+description: >
+  Data volume encrypt -> decrypt round-trip, exercising the decrypt sweep and the
+  encrypt/decrypt state flip added this session (EncryptionEngine::decrypt_step +
+  the VolumeState persisted in EncryptedMetadata):
+    1) install driver, reboot (AddDevice attaches the filter below NTFS).
+    2) prepare D: (shrink + write JVCK footer metadata + attach), write a marker.
+    3) encrypt --no-wait, let the sweep advance a little.
+    4) decrypt --no-wait (same attach session) and wait until the boundary returns
+       to 0 (Idle) — drives the decrypt sweep and the in-place encrypt->decrypt
+       direction flip.
+    5) detach; the marker must still match (plaintext on disk again), proving the
+       encrypt -> decrypt round-trip is lossless. The marker is verified readable
+       at every stage (before/during encryption, after decryption, after detach).
+
+  NOTE: the whole round-trip runs in ONE attach session. Detaching a partially-
+  encrypted data volume and re-attaching it (with or without a reboot) is a
+  separate, currently-unsupported path — the AddDevice filter is removed on
+  detach and re-attaching an already-prepared+shrunk volume is not handled.
+
+qemu:
+  extra_args:
+    - "-chardev"
+    - "file,id=debugout,path=${{ output.dir }}/debug.log"
+    - "-device"
+    - "isa-debugcon,iobase=0xe9,chardev=debugout"
+
+steps:
+  - action: wait-boot
+    timeout: 120s
+    params:
+      retry_interval: 5s
+
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'C:\\Temp' -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'D:\\' -ErrorAction SilentlyContinue"
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.sys"
+      dst: "C:\\Temp\\vck-sample-driver.sys"
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.inf"
+      dst: "C:\\Temp\\vck-sample-driver.inf"
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.cat"
+      dst: "C:\\Temp\\vck-sample-driver.cat"
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-app.exe"
+      dst: "C:\\Temp\\vck-app.exe"
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "verifier.exe"
+      args: ["/volatile", "/adddriver", "vck-sample-driver.sys"]
+
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "pnputil /add-driver C:\\Temp\\vck-sample-driver.inf /install"]
+      expect_exit_code: 0
+
+  # Marker written BEFORE any encryption — must survive the full round-trip.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "echo decrypt-roundtrip-marker> D:\\vck-rt.txt && type D:\\vck-rt.txt"]
+      expect_exit_code: 0
+
+  # Reboot so AddDevice attaches the filter below NTFS before mount.
+  - action: reboot
+    timeout: 120s
+  - action: wait-boot
+    timeout: 120s
+    params:
+      retry_interval: 5s
+
+  # First-time prepare: shrink + write JVCK metadata + attach (boundary 0).
+  - action: exec
+    timeout: 120s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe data-volume prepare --volume \\\\.\\D: --vmk AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8= --use-header 0 --use-footer 2 --metadata-size 131072"
+      expect_exit_code: 0
+
+  # Marker readable after attach (boundary 0, filter pass-through).
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "type D:\\vck-rt.txt"]
+      expect_exit_code: 0
+
+  # Start encryption; advance a little so there is real ciphertext to decrypt.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "C:\\Temp\\vck-app.exe data-volume encrypt --volume \\\\.\\D: --no-wait"]
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - |
+          $deadline = (Get-Date).AddSeconds(30)
+          $ok = $false
+          do {
+            $out = & C:\Temp\vck-app.exe status --volume \\.\D: 2>&1 | Out-String
+            Write-Host $out.Trim()
+            $m = [regex]::Match($out, 'Progress\s*:\s*([\d.]+)%\s+\((\d+)')
+            if ($m.Success -and [int64]$m.Groups[2].Value -gt 0) { $ok = $true; break }
+            Start-Sleep -Seconds 2
+          } while ((Get-Date) -lt $deadline)
+          if ($ok) { Write-Host "ENCRYPT_PROGRESS_OK" } else { Write-Host "NO_PROGRESS"; exit 1 }
+      expect_exit_code: 0
+
+  # Marker still readable while partially encrypted (filter decrypts the prefix).
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "type D:\\vck-rt.txt"]
+      expect_exit_code: 0
+
+  # Decrypt (same attach session): flip the sweep to Decrypting and run it back
+  # to boundary 0. Wait until status reports Idle at 0 sectors.
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "C:\\Temp\\vck-app.exe data-volume decrypt --volume \\\\.\\D: --no-wait"]
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 240s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - |
+          $deadline = (Get-Date).AddSeconds(210)
+          $done = $false
+          do {
+            $out = & C:\Temp\vck-app.exe status --volume \\.\D: 2>&1 | Out-String
+            Write-Host $out.Trim()
+            $m = [regex]::Match($out, 'Progress\s*:\s*([\d.]+)%\s+\((\d+)')
+            if ($out -match 'Idle' -and $m.Success -and [int64]$m.Groups[2].Value -eq 0) { $done = $true; break }
+            Start-Sleep -Seconds 3
+          } while ((Get-Date) -lt $deadline)
+          if ($done) { Write-Host "DECRYPT_DONE" } else { Write-Host "DECRYPT_INCOMPLETE"; exit 1 }
+      expect_exit_code: 0
+
+  # Marker readable after full decrypt (boundary 0).
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "type D:\\vck-rt.txt"]
+      expect_exit_code: 0
+
+  # Detach: filter gone, NTFS re-mounts the raw volume. The data region is now
+  # plaintext (decrypted to 0), so the marker must still match — proving the
+  # encrypt -> decrypt round-trip restored the original bytes on disk.
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "C:\\Temp\\vck-app.exe data-volume detach --volume \\\\.\\D:"]
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args: ["/c", "type D:\\vck-rt.txt | findstr decrypt-roundtrip-marker"]
+      expect_exit_code: 0
+
+  - action: shutdown
+    timeout: 120s
+
+panic:
+  action_delay: 60s
+  steps:
+    - action: dump
+      timeout: 300s
+      params:
+        format: "win-dmp"
+        output: "${{ output.dir }}/memory.dmp"
+    - action: poweroff
+      timeout: 5s

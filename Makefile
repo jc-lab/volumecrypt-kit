@@ -6,7 +6,7 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-crypto-test test-vm-os-handover test-vm-os-encrypt clean
+.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-data-volume-decrypt test-vm-crypto-test test-vm-os-handover test-vm-os-encrypt clean
 
 TEST_VM_DIR = .testfoundry/win11
 LOAD_ENV := source ./.ci/scripts/load-wdk-env.sh
@@ -87,6 +87,12 @@ test-vm-os-volume-prepare: $(TEST_VM_DIR) build-driver-package build-app
 test-vm-data-volume: $(TEST_VM_DIR) build-driver-package build-app
 	rm -rf ./testing/results/data-volume
 	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/data-volume --test ./testing/recipes/data-volume/data-volume.yaml
+
+# Data volume encrypt -> detach -> attach -> decrypt round-trip (validates the
+# decrypt sweep, persisted state, and the prepare/attach/detach/encrypt/decrypt CLI).
+test-vm-data-volume-decrypt: $(TEST_VM_DIR) build-driver-package build-app
+	rm -rf ./testing/results/data-volume-decrypt
+	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/data-volume-decrypt --test ./testing/recipes/data-volume-decrypt/data-volume-decrypt.yaml
 
 test-vm-crypto-test: $(TEST_VM_DIR) build-crypto-test-driver
 	test-foundry.exe  --vm-name=win11 test --headless --output ./testing/results/crypto-test --test ./testing/recipes/crypto-test/crypto-test.yaml
