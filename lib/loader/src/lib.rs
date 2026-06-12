@@ -26,6 +26,7 @@
 extern crate alloc;
 
 pub mod chainload;
+pub mod cpu;
 pub mod debug;
 pub mod handover;
 pub mod hook;
@@ -52,6 +53,9 @@ use vck_common::VckResult;
 /// any `Err` should abort the boot.
 pub fn run<P: LoaderProvider>(provider: &P) -> VckResult<()> {
     loader_dbg!("run: start");
+    // Report AES-NI support and ensure the SSE/XMM control bits are set before
+    // any AES-NI code (cipher construction / Block IO decrypt hook) runs.
+    cpu::report_and_enable_xmm();
     let config = provider.on_init()?;
     loader_dbg!("run: on_init ok (crypto={})", config.crypto.is_some());
 

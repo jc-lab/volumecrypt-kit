@@ -96,6 +96,10 @@ pub unsafe extern "system" fn DriverEntry(
 ) -> NTSTATUS {
     let _ = registry_path;
     vck_driver::driver_println!("DriverEntry: vck-sample-driver loading");
+    vck_driver::driver_println!(
+        "DriverEntry: AES-NI {}",
+        if vck_common::cpu::has_aes_ni() { "supported" } else { "not supported" }
+    );
     let driver = match driver.as_mut() {
         Some(driver) => driver,
         None => return STATUS_INVALID_PARAMETER,

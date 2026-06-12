@@ -12,6 +12,7 @@
 
 extern crate alloc;
 
+pub mod cpu;
 pub mod error;
 pub mod handover;
 pub mod ioctl;
