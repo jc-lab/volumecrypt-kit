@@ -4,7 +4,7 @@
 
 //! `vck-loader` — UEFI loader framework for volumecrypt-kit.
 //!
-//! This crate provides the loader-side mechanisms described in `ARCH.md`
+//! This crate provides the loader-side mechanisms described in `docs/architecture.md`
 //! ("lib/loader"):
 //!
 //! - [`LoaderProvider`]: the trait a sample loader implements to drive the
@@ -31,7 +31,7 @@ pub mod handover;
 pub mod hook;
 pub mod provider;
 
-// Public API re-exports (see ARCH.md "LoaderProvider 트레이트").
+// Public API re-exports (see docs/architecture.md "LoaderProvider 트레이트").
 pub use provider::{LoaderConfig, LoaderCrypto, LoaderProvider};
 
 // Re-export the hooking engine entry point for sample loaders.

@@ -7,7 +7,7 @@
 //! Implements [`VckLoaderProvider`] and runs the lib/loader driver routine:
 //! read `vck.json`, decrypt the OS volume footer metadata, install Block IO
 //! hooks, publish the ACPI handover table, then chainload the next OS loader.
-//! See ARCH.md "sample/loader" and "시스템 볼륨 부팅 흐름".
+//! See docs/architecture.md "sample/loader" and "시스템 볼륨 부팅 흐름".
 
 #![no_std]
 #![no_main]

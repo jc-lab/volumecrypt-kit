@@ -6,7 +6,7 @@
 //!
 //! A sample loader implements [`LoaderProvider`] to tell the framework which
 //! volume to protect, what handover payload to publish for the driver, and how
-//! to chainload the next EFI image. See ARCH.md "lib/loader" for the contract.
+//! to chainload the next EFI image. See docs/architecture.md "lib/loader" for the contract.
 
 use vck_common::handover::payload::HandoverPayload;
 use vck_common::types::{EncryptedOffset, Guid};

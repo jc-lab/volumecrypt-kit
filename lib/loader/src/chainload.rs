@@ -5,7 +5,7 @@
 //! Chainloading the next EFI image.
 //!
 //! Loads and starts the next OS loader (e.g. the Windows Boot Manager,
-//! `msbootmgfw.os.efi`) using `LoadImage` / `StartImage`. See ARCH.md boot flow
+//! `msbootmgfw.os.efi`) using `LoadImage` / `StartImage`. See docs/architecture.md boot flow
 //! step 5.
 
 use alloc::format;

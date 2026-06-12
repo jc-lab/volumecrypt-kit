@@ -4,7 +4,7 @@
 
 //! Block IO hooking engine.
 //!
-//! See ARCH.md "Block IO 후킹 메커니즘". The engine:
+//! See docs/architecture.md "Block IO 후킹 메커니즘". The engine:
 //!
 //! 1. enumerates Block IO devices via `LocateHandleBuffer(EFI_BLOCK_IO_PROTOCOL)`,
 //! 2. matches the target partition by GPT partition GUID,

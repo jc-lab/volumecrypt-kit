@@ -5,7 +5,7 @@
 //! Loader→driver handover (loader side).
 //!
 //! Publishes the handover payload as a UEFI runtime variable that the driver
-//! reads at OS runtime. See ARCH.md "UEFI→Driver 핸드오버" and the boot flow step 4.
+//! reads at OS runtime. See docs/architecture.md "UEFI→Driver 핸드오버" and the boot flow step 4.
 
 use alloc::format;
 

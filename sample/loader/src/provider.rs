@@ -4,7 +4,7 @@
 
 //! Sample `LoaderProvider` implementation.
 //!
-//! Reproduces the ARCH.md "sample/loader" `on_init` flow:
+//! Reproduces the docs/architecture.md "sample/loader" `on_init` flow:
 //! read `vck.json`, open the OS volume footer metadata over Block IO and
 //! decrypt it with the VMK, build the minimal handover payload (partition_guid
 //! + vmk only — FVEK is NOT carried in the payload), and return a
@@ -16,7 +16,7 @@ use vck_loader::{LoaderConfig, LoaderCrypto, LoaderProvider};
 use vck_sample_common::VckHandoverPayload;
 
 // NOTE: these cross-crate symbols are owned by the parent (lib/common JVCK
-// module + sample/common config). Paths below match ARCH.md symbol names; the
+// module + sample/common config). Paths below match docs/architecture.md symbol names; the
 // exact module path may need adjustment once the parent lands them.
 // TODO(loader): confirm `vck_common::jvck::JvckMetadataStore` module path and
 // `vck_sample_common::VckConfig` import path.

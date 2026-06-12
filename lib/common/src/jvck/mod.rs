@@ -5,7 +5,7 @@
 //! JVCK default metadata format: on-disk layout, key derivation, and a
 //! volume-backed `EncryptedOffsetStore` implementation.
 //!
-//! Layout summary (see ARCH.md for the authoritative tables):
+//! Layout summary (see docs/jvck-format.md for the authoritative tables):
 //! - A replica region is `metadata_size` bytes (>= 128 KiB) and contains a
 //!   fixed 512-byte Metadata block plus vendor-specific data.
 //! - Header replica: `[Metadata][vendor]`. Footer replica: `[vendor][Metadata]`
