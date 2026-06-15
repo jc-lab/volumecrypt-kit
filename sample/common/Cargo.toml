@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "vck-sample-common"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = []
+uefi = ["dep:uefi", "vck-common/uefi"]
+
+[dependencies]
+vck-common = { path = "../../lib/common", default-features = false }
+serde = { workspace = true, default-features = false }
+uuid = { workspace = true, default-features = false }
+uefi = { version = "0.37", default-features = false, optional = true }

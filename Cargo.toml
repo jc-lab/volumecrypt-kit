@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[workspace]
+resolver = "2"
+members = [
+    "lib/common",
+    "lib/windrv",
+    "lib/loader",
+    "sample/common",
+    "sample/crypto-test",
+    "sample/windrv",
+    "sample/loader",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/jc-lab/volumecrypt-kit"
+
+# Kernel drivers cannot unwind, so builds use panic=abort. Cargo automatically
+# ignores this for the `test`/`bench` profiles (they always unwind), so
+# `cargo test -p vck-common` still works on the host. (windows-drivers-rs
+# recommends setting panic via [profile] rather than rustflags for this reason.)
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+
+[workspace.dependencies]
+aes = { version = "0.8", default-features = false }
+cbc = { version = "0.1", default-features = false }
+cipher = { version = "0.4", default-features = false, features = ["block-padding"] }
+crc = { version = "3", default-features = false }
+hkdf = { version = "0.12", default-features = false }
+hmac = { version = "0.12", default-features = false }
+irql = { version = "0.1.6" }
+messagepack-serde = { version = "0.2", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+serde_bytes = { version = "0.11", default-features = false, features = ["alloc"] }
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
+spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
+thiserror = { version = "1", default-features = false }
+uuid = { version = "1", default-features = false, features = ["serde"] }
+xts-mode = { version = "0.5.1", default-features = false }
+zeroize = { version = "1", default-features = false, features = ["alloc", "derive"] }
+wdk-alloc = "0.4.1"
+wdk-build = "0.5.1"

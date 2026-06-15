@@ -1,0 +1,20 @@
+// SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//! Volume filter: attach/detach above a target volume stack, per-volume
+//! context, and IRP interception (size-query rewrite + read/write offset shift).
+
+pub mod context;
+pub mod handover_mount;
+pub mod io;
+pub mod irp;
+pub mod manager;
+pub mod volume_thread;
+
+pub use context::FilterContext;
+pub use io::handle_filter_irp;
+pub use irp::pass_through;
+pub use manager::{attach_filter, attach_filter_to_device, attach_filter_to_raw_device,
+    attach_filter_unbound, detach_filter, filter_bind_volume, filter_rebind_volume,
+    find_our_filter_in_stack, find_filter_for_volume, unbind_filter};

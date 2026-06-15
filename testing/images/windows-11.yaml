@@ -1,0 +1,165 @@
+# SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: "windows-11-24h2"
+os: "windows"
+description: "Windows 11 24H2 Enterprise evaluation image"
+
+qemu:
+  image: "./testing/images/gusztavvargadr-windows-11-2601.0.0.qcow2"
+  firmware: "./testing/ovmf/OVMF_CODE_4M.fd"
+  firmware_vars: "./testing/ovmf/OVMF_VARS_4M.fd"
+  memory: "4G"
+  cpus: 4
+  cpu: "qemu64,+avx,+avx2,+sse4.1,+sse4.2,+ssse3,+xsave,+aes,+pdpe1gb,+virt-ssbd,+amd-ssbd,+apic"
+  extra_args:
+    - "-device"
+    - "virtio-tablet-pci"
+    - "-global"
+    - "ICH9-LPC.disable_s3=1"
+    - "-global"
+    - "driver=cfi.pflash01,property=secure,value=off"
+
+connection:
+  exec_method: "ssh" # "ssh" or "winrm"
+  file_method: "ssh" # "ssh" or "winrm"; defaults to exec_method when omitted
+  username: "vagrant"
+  password: "vagrant"
+  ssh_port: 22
+  winrm_port: 5985
+
+setup:
+  steps:
+    - action: wait-boot
+      timeout: 30m
+      params:
+        retry_interval: 5s
+
+    - action: wait-oobe
+      timeout: 10m
+    
+    - action: exec
+      timeout: 60s
+      params:
+        cmd: "ping"
+        args:
+          - "127.0.0.1"
+          - "-n"
+          - "30"
+
+    - action: file-upload
+      timeout: 180s
+      params:
+        src: "${{ test.dir }}/make-volume-d.ps1"
+        dst: "c:\\make-volume-d.ps1"
+    
+    - action: exec
+      timeout: 180s
+      params:
+        cmd: "powershell"
+        args:
+          - "c:\\make-volume-d.ps1"
+
+    - action: exec
+      timeout: 60s
+      params:
+        cmd: "powershell"
+        args:
+          - "-Command"
+          - "Set-ExecutionPolicy Bypass -Force"
+
+    - action: exec
+      timeout: 60s
+      params:
+        cmd: "powershell"
+        args:
+          - "-Command"
+          - "Set-Service -Name sshd -StartupType Automatic"
+
+    - action: exec
+      timeout: 60s
+      params:
+        cmd: "powershell"
+        args:
+          - "-Command"
+          - "Start-Service sshd"
+
+    - action: exec
+      timeout: 60s
+      params:
+        cmd: "sc.exe"
+        args:
+          - "config"
+          - "pvpanic"
+          - "start="
+          - "boot"
+
+    - action: exec
+      timeout: 60s
+      params:
+        cmd: "sc.exe"
+        args:
+          - "config"
+          - "fwcfg"
+          - "start="
+          - "boot"
+
+    - action: file-upload
+      timeout: 60s
+      params:
+        src: "${{ test.dir }}/../signing/MyTestDriverCert.cer"
+        dst: "c:\\Temp\\vck-test.cer"
+
+    - action: exec
+      timeout: 60s
+      params:
+        cmd: "certutil.exe"
+        args:
+          - "-addstore"
+          - "-f"
+          - "Root"
+          - "c:\\Temp\\vck-test.cer"
+
+    - action: exec
+      timeout: 60s
+      params:
+        cmd: "certutil.exe"
+        args:
+          - "-addstore"
+          - "-f"
+          - "TrustedPublisher"
+          - "c:\\Temp\\vck-test.cer"
+
+    - action: exec
+      timeout: 60s
+      params:
+        cmd: "bcdedit"
+        args:
+          - "/set"
+          - "{default}"
+          - "testsigning"
+          - "on"
+
+    - action: exec
+      timeout: 60s
+      params:
+        cmd: "bcdedit"
+        args:
+          - "/set"
+          - "{default}"
+          - "nointegritychecks"
+          - "on"
+
+    - action: exec
+      timeout: 60s
+      params:
+        cmd: "bcdedit"
+        args:
+          - "/set"
+          - "{default}"
+          - "debug"
+          - "on"
+
+    - action: shutdown
+      timeout: 120s

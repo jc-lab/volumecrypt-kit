@@ -1,0 +1,84 @@
+;;;
+;;; VCK Sample Driver — Volume Encryption Filter
+;;;
+;;; Copyright (c) 2026, JC-Lab
+;;;
+
+[Version]
+Signature   = "$Windows NT$"
+Class       = "Encryption"
+ClassGuid   = {a0a701c0-a511-42ff-aa6c-06dc0395576f}
+Provider    = %ProviderString%
+DriverVer   = 06/09/2026,1.0.0.0
+CatalogFile = vck-sample-driver.cat
+PnpLockdown = 1
+
+[DestinationDirs]
+DefaultDestDir              = 12
+vck-sample-driver.DriverFiles = 12      ; %windir%\system32\drivers
+
+;;
+;; Default install sections (x64 only for now)
+;;
+
+[DefaultInstall.NTamd64]
+OptionDesc  = %ServiceDescription%
+CopyFiles   = vck-sample-driver.DriverFiles
+AddReg      = vck-sample-driver.AddReg
+
+[DefaultInstall.NTamd64.Services]
+AddService  = VolumeCryptKitSample,,vck-sample-driver.Service
+
+;;
+;; Service section
+;;
+
+[vck-sample-driver.Service]
+DisplayName      = %ServiceDescription%
+Description      = %ServiceDescription%
+ServiceBinary    = %12%\vck-sample-driver.sys
+; SERVICE_FILE_SYSTEM_DRIVER = 2 (required for AddDevice to be called by PnP)
+ServiceType      = 2
+; SERVICE_BOOT_START = 0 (must load before any filesystem)
+StartType        = 0
+; SERVICE_ERROR_NORMAL = 1
+ErrorControl     = 1
+; Load in the filesystem filter group so we load at the right time
+LoadOrderGroup   = "FSFilter System"
+
+;;
+;; Copy Files
+;;
+
+[vck-sample-driver.DriverFiles]
+vck-sample-driver.sys
+
+[SourceDisksFiles]
+vck-sample-driver.sys = 1,,
+
+[SourceDisksNames]
+1 = %DiskId1%,,,
+
+;;
+;; Registry Entries
+;;
+;; Register as UpperFilter for the Volume device class.
+;; {71A27CDD-812A-11D0-BEC7-08002BE2092F} = "Volume" — represents logical disk
+;; volumes like \Device\HarddiskVolume5. AddDevice fires for each such volume
+;; BEFORE any filesystem (NTFS) mounts on it, giving us the correct filter
+;; position (between the volume device and the FSD).
+;;
+;; REG_MULTI_SZ append (0x00010008):
+;;
+
+[vck-sample-driver.AddReg]
+HKLM,System\CurrentControlSet\Control\Class\{71A27CDD-812A-11D0-BEC7-08002BE2092F},UpperFilters,0x00010008,VolumeCryptKitSample
+
+;;
+;; Strings
+;;
+
+[Strings]
+ProviderString   = "JC-Lab"
+ServiceDescription = "VCK Sample Driver"
+DiskId1          = "VCK Sample Driver Installation Disk"

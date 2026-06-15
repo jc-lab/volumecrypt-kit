@@ -1,0 +1,126 @@
+# Copyright 2026 JC-Lab
+# SPDX-FileCopyrightText: 2026 JC-Lab <joseph@jc-lab.net>
+#
+# SPDX-License-Identifier: Apache-2.0
+
+name: "os-handover"
+description: >
+  Validate the UEFI loader -> driver ACPI handover. Prepares the OS volume,
+  installs vck-sample-loader.efi as bootmgfw.efi, reboots THROUGH the loader
+  (which injects the VCKD table into the XSDT and chainloads the original
+  bootmgfw.os.efi), then loads the driver and confirms read_handover picks up
+  the VCKD table. The driver's debug output (0xe9) is captured to debug.log.
+
+qemu:
+  extra_args:
+    - "-chardev"
+    - "file,id=debugout,path=${{ output.dir }}/debug.log"
+    - "-device"
+    - "isa-debugcon,iobase=0xe9,chardev=debugout"
+
+steps:
+  - action: wait-boot
+    timeout: 120s
+    params:
+      retry_interval: 5s
+
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "powershell"
+      args:
+        - "-Command"
+        - "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Add-MpPreference -ExclusionPath 'C:\\Temp' -ErrorAction SilentlyContinue"
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-sample-driver.sys"
+      dst: "C:\\Windows\\System32\\drivers\\vck-sample-driver.sys"
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-app.exe"
+      dst: "C:\\Temp\\vck-app.exe"
+
+  - action: file-upload
+    timeout: 30s
+    params:
+      src: "./testing/artifacts/vck-sample-loader.efi"
+      dst: "C:\\Temp\\vck-sample-loader.efi"
+
+  # 1. Prepare the OS volume: shrink, copy bootmgfw.efi -> bootmgfw.os.efi,
+  #    write (EFI)/vck.json. MUST run before we overwrite bootmgfw.efi.
+  - action: exec
+    timeout: 240s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe --volume \\\\.\\C: os-volume prepare --prepare-only"
+      expect_exit_code: 0
+
+  # 2. Install our loader as bootmgfw.efi (firmware boot entry target). The
+  #    original now lives at bootmgfw.os.efi and is chainloaded by our loader.
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "mountvol S: /S && copy /Y C:\\Temp\\vck-sample-loader.efi S:\\EFI\\Microsoft\\Boot\\bootmgfw.efi && mountvol S: /D"
+      expect_exit_code: 0
+
+  # 3. Register the driver (demand-start). read_handover runs at DriverEntry;
+  #    the injected ACPI table persists for the whole OS session, so loading the
+  #    driver AFTER the loader boot is sufficient (and avoids boot-start risk).
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "sc create VolumeCryptKitSample type= kernel start= demand binPath= C:\\Windows\\System32\\drivers\\vck-sample-driver.sys"
+      expect_exit_code: 0
+
+  # 4. Reboot THROUGH the loader. If the XSDT injection or chainload is broken,
+  #    this wait-boot times out (the test fails) — a strong negative signal.
+  - action: reboot
+    timeout: 180s
+  - action: wait-boot
+    timeout: 180s
+    params:
+      retry_interval: 5s
+
+  # 5. Load the driver -> DriverEntry -> read_handover -> debug.log.
+  - action: exec
+    timeout: 60s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "sc start VolumeCryptKitSample"
+      expect_exit_code: 0
+
+  - action: exec
+    timeout: 30s
+    params:
+      cmd: "cmd.exe"
+      args:
+        - "/c"
+        - "C:\\Temp\\vck-app.exe status"
+
+  - action: shutdown
+    timeout: 120s
+
+# On bugcheck, capture a dump for analysis.
+panic:
+  steps:
+    - action: dump
+      timeout: 300s
+      params:
+        format: "win-dmp"
+        output: "${{ output.dir }}/memory.dmp"
+    - action: poweroff
+      timeout: 5s
