@@ -19,6 +19,8 @@ std = []
 debugcon = []
 
 [dependencies]
+vck-common = { workspace = true, default-features = false }
+
 aes.workspace = true
 irql.workspace = true
 messagepack-serde = { workspace = true, default-features = false }
@@ -26,5 +28,4 @@ serde = { workspace = true, default-features = false }
 serde_bytes = { workspace = true }
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
 xts-mode.workspace = true
-vck-common = { path = "../common", default-features = false }
 wdk-sys = "0.5.1"

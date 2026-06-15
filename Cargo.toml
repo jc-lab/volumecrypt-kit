@@ -49,3 +49,5 @@ xts-mode = { version = "0.5.1", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc", "derive"] }
 wdk-alloc = "0.4.1"
 wdk-build = "0.5.1"
+
+vck-common = { version = "0.0.1", path = "lib/common", default-features = false }

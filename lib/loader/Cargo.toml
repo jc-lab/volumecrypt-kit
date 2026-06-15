@@ -11,7 +11,8 @@ repository.workspace = true
 description = "UEFI pre-boot loader framework for VolumeCrypt-Kit"
 
 [dependencies]
-vck-common = { path = "../common", default-features = false, features = ["uefi"] }
+vck-common = { workspace = true, default-features = false, features = ["uefi"] }
+
 uefi = { version = "0.37", default-features = false }
 # Raw protocol structs (BlockIoProtocol) for vtable patching in the read hook.
 uefi-raw = "0.14"
