@@ -18,17 +18,6 @@ use core::ffi::c_void;
 use core::panic::PanicInfo;
 
 use spin::{Lazy, Mutex};
-use wdk_alloc::WdkAllocator;
-use wdk_sys::{
-    ntddk::{
-        IoBuildDeviceIoControlRequest, IoGetRequestorProcess, IofCallDriver, IofCompleteRequest,
-        KeInitializeEvent, KeWaitForSingleObject, KeExpandKernelStackAndCallout,
-    },
-    CCHAR, DRIVER_OBJECT, IO_NO_INCREMENT, IO_STATUS_BLOCK, IRP_MJ_CLEANUP, IRP_MJ_CLOSE,
-    IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, IRP_MJ_SHUTDOWN, KEVENT, NTSTATUS, PDEVICE_OBJECT,
-    PDRIVER_OBJECT, PIRP, PIO_STACK_LOCATION, PCUNICODE_STRING,
-    _EVENT_TYPE::NotificationEvent, _KWAIT_REASON::Executive, _MODE,
-};
 use vck_driver::{
     device::{ControlDevice, DeviceExtension, DEVICE_KIND_FILTER},
     filter::handle_filter_irp,
@@ -38,6 +27,19 @@ use vck_driver::{
     VolumeAttachRegistry,
 };
 use vck_sample_common::VckHandoverPayload;
+use wdk_alloc::WdkAllocator;
+use wdk_sys::{
+    ntddk::{
+        IoBuildDeviceIoControlRequest, IoGetRequestorProcess, IofCallDriver, IofCompleteRequest,
+        KeExpandKernelStackAndCallout, KeInitializeEvent, KeWaitForSingleObject,
+    },
+    CCHAR, DRIVER_OBJECT, IO_NO_INCREMENT, IO_STATUS_BLOCK, IRP_MJ_CLEANUP, IRP_MJ_CLOSE,
+    IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, IRP_MJ_SHUTDOWN, KEVENT, NTSTATUS, PCUNICODE_STRING,
+    PDEVICE_OBJECT, PDRIVER_OBJECT, PIO_STACK_LOCATION, PIRP,
+    _EVENT_TYPE::NotificationEvent,
+    _KWAIT_REASON::Executive,
+    _MODE,
+};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
@@ -98,7 +100,11 @@ pub unsafe extern "system" fn DriverEntry(
     vck_driver::vck_log!("DriverEntry: vck-sample-driver loading");
     vck_driver::vck_log!(
         "DriverEntry: AES-NI {}",
-        if vck_common::cpu::has_aes_ni() { "supported" } else { "not supported" }
+        if vck_common::cpu::has_aes_ni() {
+            "supported"
+        } else {
+            "not supported"
+        }
     );
     // Install the kernel RNG so the JVCK metadata store can generate a fresh
     // per-write salt when persisting encrypted_offset.
@@ -186,18 +192,31 @@ unsafe extern "C" fn add_device(driver: PDRIVER_OBJECT, pdo: PDEVICE_OBJECT) -> 
         let mut buf = [0u8; 256];
         let mut ret_len: u32 = 0;
         let st = wdk_sys::ntddk::ObQueryNameString(
-            pdo.cast::<c_void>(), buf.as_mut_ptr().cast(), 256, &mut ret_len,
+            pdo.cast::<c_void>(),
+            buf.as_mut_ptr().cast(),
+            256,
+            &mut ret_len,
         );
         if st >= 0 {
             let name_len = u16::from_le_bytes([buf[0], buf[1]]) as usize / 2;
-            let name_ptr = usize::from_le_bytes(buf[8..16].try_into().unwrap_or([0;8]));
+            let name_ptr = usize::from_le_bytes(buf[8..16].try_into().unwrap_or([0; 8]));
             if name_len > 0 && name_ptr != 0 {
                 let chars = core::slice::from_raw_parts(name_ptr as *const u16, name_len.min(64));
                 let mut s = alloc::string::String::new();
-                for &c in chars { if c >= 0x20 && c < 0x7F { s.push(c as u8 as char); } else { s.push('?'); } }
+                for &c in chars {
+                    if c >= 0x20 && c < 0x7F {
+                        s.push(c as u8 as char);
+                    } else {
+                        s.push('?');
+                    }
+                }
                 s
-            } else { alloc::string::String::new() }
-        } else { alloc::string::String::new() }
+            } else {
+                alloc::string::String::new()
+            }
+        } else {
+            alloc::string::String::new()
+        }
     };
     vck_driver::vck_log!("add_device: pdo={:p} name={}", pdo, pdo_name);
 
@@ -207,7 +226,9 @@ unsafe extern "C" fn add_device(driver: PDRIVER_OBJECT, pdo: PDEVICE_OBJECT) -> 
     match vck_driver::filter::attach_filter_to_raw_device(driver, pdo) {
         Ok((filter_do, lower_do)) => {
             vck_driver::vck_log!(
-                "add_device: filter attached filter={:p} lower={:p}", filter_do, lower_do
+                "add_device: filter attached filter={:p} lower={:p}",
+                filter_do,
+                lower_do
             );
             REGISTRY.add_pdo_filter(pdo, filter_do, lower_do, pdo_name);
             STATUS_SUCCESS
@@ -285,9 +306,7 @@ unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
     // Unloading would leave C: reading raw ciphertext → guaranteed corruption.
     // Refuse by bugchecking with STATUS_INVALID_DEVICE_STATE as a parameter.
     if REGISTRY.has_encrypted_os_volume() {
-        vck_driver::vck_log!(
-            "sample-driver: unload refused — OS volume encrypted; bugchecking"
-        );
+        vck_driver::vck_log!("sample-driver: unload refused — OS volume encrypted; bugchecking");
         const STATUS_INVALID_DEVICE_STATE: u64 = 0xC000_0184;
         // Custom bug check code "VCK\0" — identifiable in the crash dump. P1 is
         // STATUS_INVALID_DEVICE_STATE indicating why the unload was refused.
@@ -416,9 +435,11 @@ unsafe extern "C" fn dispatch_device_control(
         )
     };
     let dispatch_result = if callout_status >= 0 {
-        ex.result
-            .take()
-            .unwrap_or_else(|| Err(vck_driver::VckError::Io("dispatch callout did not run".into())))
+        ex.result.take().unwrap_or_else(|| {
+            Err(vck_driver::VckError::Io(
+                "dispatch callout did not run".into(),
+            ))
+        })
     } else {
         let auth_ctx = IoctlAuthContext {
             ioctl_code,
@@ -452,11 +473,7 @@ unsafe extern "C" fn dispatch_device_control(
             }
         }
         Err(err) => {
-            vck_driver::vck_log!(
-                "sample-driver: ioctl 0x{:08x} failed: {}",
-                ioctl_code,
-                err
-            );
+            vck_driver::vck_log!("sample-driver: ioctl 0x{:08x} failed: {}", ioctl_code, err);
             complete_irp(irp, STATUS_UNSUCCESSFUL, 0);
             STATUS_UNSUCCESSFUL
         }
@@ -464,7 +481,14 @@ unsafe extern "C" fn dispatch_device_control(
 }
 
 unsafe fn current_stack_location(irp: PIRP) -> PIO_STACK_LOCATION {
-    unsafe { (*irp).Tail.Overlay.__bindgen_anon_2.__bindgen_anon_1.CurrentStackLocation }
+    unsafe {
+        (*irp)
+            .Tail
+            .Overlay
+            .__bindgen_anon_2
+            .__bindgen_anon_1
+            .CurrentStackLocation
+    }
 }
 
 unsafe fn complete_irp(irp: PIRP, status: NTSTATUS, information: usize) {

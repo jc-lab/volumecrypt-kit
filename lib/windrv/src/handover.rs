@@ -81,7 +81,8 @@ fn read_handover_variable(var_name: &str, var_guid: [u8; 16]) -> VckResult<Vec<u
 
     // Second call: fetch the value into our buffer.
     let total = len as usize;
-    let buf = unsafe { ExAllocatePool2(POOL_FLAG_NON_PAGED, total as u64, VCK_POOL_TAG) as *mut u8 };
+    let buf =
+        unsafe { ExAllocatePool2(POOL_FLAG_NON_PAGED, total as u64, VCK_POOL_TAG) as *mut u8 };
     if buf.is_null() {
         return Err(VckError::Io("ExAllocatePool2(handover var) failed".into()));
     }
@@ -101,7 +102,9 @@ fn read_handover_variable(var_name: &str, var_guid: [u8; 16]) -> VckResult<Vec<u
             ExFreePool(buf.cast());
         }
         crate::vck_log!("read_handover: get status=0x{:08x}", st);
-        return Err(VckError::Io("ExGetFirmwareEnvironmentVariable(get) failed".into()));
+        return Err(VckError::Io(
+            "ExGetFirmwareEnvironmentVariable(get) failed".into(),
+        ));
     }
 
     // Copy into an owned Vec, then zeroize + free the pool buffer (it held the

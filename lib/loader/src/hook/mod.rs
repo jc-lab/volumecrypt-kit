@@ -86,7 +86,9 @@ impl BlockIoHookEngine {
             let matched = match open_protocol_exclusive::<PartitionInfo>(handle) {
                 Ok(pinfo) => pinfo
                     .gpt_partition_entry()
-                    .map(|gpt| guid_from_windows_bytes(gpt.unique_partition_guid.to_bytes()) == target)
+                    .map(|gpt| {
+                        guid_from_windows_bytes(gpt.unique_partition_guid.to_bytes()) == target
+                    })
                     .unwrap_or(false),
                 Err(_) => false,
             };
@@ -98,9 +100,12 @@ impl BlockIoHookEngine {
             // `read_blocks` field. `BlockIO` is `#[repr(transparent)]` over it.
             let mut scoped = open_protocol_exclusive::<BlockIO>(handle)
                 .map_err(|e| VckError::Io(format!("open BlockIO for hook failed: {e:?}")))?;
-            let proto = scoped.get_mut().ok_or(VckError::Io(
-                alloc::string::String::from("BlockIO interface is null"),
-            ))? as *mut BlockIO as *mut uefi_raw::protocol::block::BlockIoProtocol;
+            let proto = scoped
+                .get_mut()
+                .ok_or(VckError::Io(alloc::string::String::from(
+                    "BlockIO interface is null",
+                )))? as *mut BlockIO
+                as *mut uefi_raw::protocol::block::BlockIoProtocol;
 
             self.block_io = Some(block_io::BlockIoHook::install(proto, engine_ptr)?);
             // Keep the protocol open (and the patch live) past this scope.

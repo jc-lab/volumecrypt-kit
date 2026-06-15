@@ -1020,7 +1020,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vck-common"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes",
  "cbc",
@@ -1042,7 +1042,7 @@ dependencies = [
 
 [[package]]
 name = "vck-crypto-test-driver"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "vck-common",
  "vck-driver",
@@ -1053,7 +1053,7 @@ dependencies = [
 
 [[package]]
 name = "vck-driver"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes",
  "irql",
@@ -1069,7 +1069,7 @@ dependencies = [
 
 [[package]]
 name = "vck-loader"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "aes",
  "uefi",
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "vck-sample-common"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "serde",
  "uefi",
@@ -1090,7 +1090,7 @@ dependencies = [
 
 [[package]]
 name = "vck-sample-driver"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "spin",
  "vck-common",
@@ -1103,7 +1103,7 @@ dependencies = [
 
 [[package]]
 name = "vck-sample-loader"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "log",
  "uefi",

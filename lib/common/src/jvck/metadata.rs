@@ -434,7 +434,14 @@ mod tests {
         header.vendor_reserved = [0xC7; VENDOR_RESERVED_SIZE];
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         header
-            .encode(&sample_secrets(), 1, VolumeState::Encrypt, &TEST_SALT, vmk, &mut block)
+            .encode(
+                &sample_secrets(),
+                1,
+                VolumeState::Encrypt,
+                &TEST_SALT,
+                vmk,
+                &mut block,
+            )
             .unwrap();
         let parsed = JvckHeader::parse(&block).unwrap();
         assert_eq!(parsed.vendor_reserved, [0xC7; VENDOR_RESERVED_SIZE]);
@@ -497,9 +504,7 @@ mod tests {
             sector_size: 512,
             header_replica_count: 0,
             footer_replica_count: 2,
-            volume_id: [
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-            ],
+            volume_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             vendor_reserved: [0u8; VENDOR_RESERVED_SIZE],
         };
         let secrets = JvckSecrets {
@@ -508,7 +513,14 @@ mod tests {
         };
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         header
-            .encode(&secrets, 12345, VolumeState::Encrypt, &TEST_SALT, vmk, &mut block)
+            .encode(
+                &secrets,
+                12345,
+                VolumeState::Encrypt,
+                &TEST_SALT,
+                vmk,
+                &mut block,
+            )
             .unwrap();
         block
     }

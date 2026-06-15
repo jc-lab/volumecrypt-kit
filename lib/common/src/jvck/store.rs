@@ -727,7 +727,9 @@ impl<S: SectorIo> JvckMetadataReader<S> {
             }
         }
         let (codec, unsealed) = chosen.ok_or_else(|| {
-            last_err.unwrap_or(VckError::NotFound("no JVCK metadata replica could be unsealed"))
+            last_err.unwrap_or(VckError::NotFound(
+                "no JVCK metadata replica could be unsealed",
+            ))
         })?;
 
         let store = JvckMetadataStore {
@@ -831,7 +833,9 @@ mod uefi_io {
                 .map_err(|e| VckError::Io(format!("open BlockIO failed: {e:?}")))?;
             let media = block_io.media();
             if !media.is_media_present() {
-                return Err(VckError::Io("matched partition has no media present".into()));
+                return Err(VckError::Io(
+                    "matched partition has no media present".into(),
+                ));
             }
             let sector_size = media.block_size();
             let media_id = media.media_id();
@@ -937,9 +941,16 @@ mod tests {
         ensure_rng();
         // 1024 sectors: 2 footer replicas (512) + 512 data sectors.
         let io = MemVolume::new(512, 1024);
-        let store =
-            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16], default_codec())
-                .unwrap();
+        let store = JvckMetadataStore::create(
+            io,
+            VMK,
+            footer_only_options(),
+            [1; 32],
+            [2; 32],
+            [9; 16],
+            default_codec(),
+        )
+        .unwrap();
         assert_eq!(store.offset_sector(), 0);
         assert_eq!(store.data_sector_count(), 512);
         assert_eq!(store.footer_replica_count(), 2);
@@ -959,7 +970,9 @@ mod tests {
             use_footer: 2,
             metadata_size: MD_SIZE,
         };
-        let store = JvckMetadataStore::create(io, VMK, opts, [3; 32], [4; 32], [7; 16], default_codec()).unwrap();
+        let store =
+            JvckMetadataStore::create(io, VMK, opts, [3; 32], [4; 32], [7; 16], default_codec())
+                .unwrap();
         assert_eq!(store.offset_sector(), 256);
         assert_eq!(store.data_sector_count(), 512);
     }
@@ -968,9 +981,16 @@ mod tests {
     fn store_then_load_offset_roundtrip() {
         ensure_rng();
         let io = MemVolume::new(512, 1024);
-        let store =
-            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16], default_codec())
-                .unwrap();
+        let store = JvckMetadataStore::create(
+            io,
+            VMK,
+            footer_only_options(),
+            [1; 32],
+            [2; 32],
+            [9; 16],
+            default_codec(),
+        )
+        .unwrap();
 
         store
             .store(&EncryptedOffset {
@@ -987,9 +1007,16 @@ mod tests {
     fn reopen_finds_existing_metadata() {
         ensure_rng();
         let io = MemVolume::new(512, 1024);
-        let store =
-            JvckMetadataStore::create(io, VMK, footer_only_options(), [5; 32], [6; 32], [8; 16], default_codec())
-                .unwrap();
+        let store = JvckMetadataStore::create(
+            io,
+            VMK,
+            footer_only_options(),
+            [5; 32],
+            [6; 32],
+            [8; 16],
+            default_codec(),
+        )
+        .unwrap();
         store
             .store(&EncryptedOffset {
                 sector: 777,
@@ -1008,9 +1035,16 @@ mod tests {
     fn recovery_picks_largest_offset() {
         ensure_rng();
         let io = MemVolume::new(512, 1024);
-        let store =
-            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16], default_codec())
-                .unwrap();
+        let store = JvckMetadataStore::create(
+            io,
+            VMK,
+            footer_only_options(),
+            [1; 32],
+            [2; 32],
+            [9; 16],
+            default_codec(),
+        )
+        .unwrap();
         // All replicas at 500.
         store
             .store(&EncryptedOffset {
@@ -1042,14 +1076,24 @@ mod tests {
     fn state_persists_across_reopen() {
         ensure_rng();
         let io = MemVolume::new(512, 1024);
-        let store =
-            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16], default_codec())
-                .unwrap();
+        let store = JvckMetadataStore::create(
+            io,
+            VMK,
+            footer_only_options(),
+            [1; 32],
+            [2; 32],
+            [9; 16],
+            default_codec(),
+        )
+        .unwrap();
         // Fresh volumes default to Encrypt.
         assert_eq!(store.load_state().unwrap(), VolumeState::Encrypt);
 
         store
-            .store(&EncryptedOffset { sector: 100, total_sectors: 512 })
+            .store(&EncryptedOffset {
+                sector: 100,
+                total_sectors: 512,
+            })
             .unwrap();
         store.store_state(VolumeState::Decrypt).unwrap();
 
@@ -1065,9 +1109,16 @@ mod tests {
         ensure_rng();
         // footer-only: 2 replicas of 256 sectors -> 255 vendor-data sectors each.
         let io = MemVolume::new(512, 1024);
-        let store =
-            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16], default_codec())
-                .unwrap();
+        let store = JvckMetadataStore::create(
+            io,
+            VMK,
+            footer_only_options(),
+            [1; 32],
+            [2; 32],
+            [9; 16],
+            default_codec(),
+        )
+        .unwrap();
         assert_eq!(store.replica_count(), 2);
         assert_eq!(store.vendor_data_sector_count(), 255);
 
@@ -1091,9 +1142,16 @@ mod tests {
     fn write_vendor_data_all_mirrors_every_replica() {
         ensure_rng();
         let io = MemVolume::new(512, 1024);
-        let store =
-            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16], default_codec())
-                .unwrap();
+        let store = JvckMetadataStore::create(
+            io,
+            VMK,
+            footer_only_options(),
+            [1; 32],
+            [2; 32],
+            [9; 16],
+            default_codec(),
+        )
+        .unwrap();
         assert_eq!(store.replica_count(), 2);
 
         let data = alloc::vec![0x5Au8; 1024]; // 2 sectors
@@ -1115,10 +1173,20 @@ mod tests {
     fn set_vendor_reserved_persists_to_all_replicas() {
         ensure_rng();
         let io = MemVolume::new(512, 1024);
-        let mut store =
-            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16], default_codec())
-                .unwrap();
-        assert_eq!(store.vendor_reserved(), &[0u8; metadata::VENDOR_RESERVED_SIZE]);
+        let mut store = JvckMetadataStore::create(
+            io,
+            VMK,
+            footer_only_options(),
+            [1; 32],
+            [2; 32],
+            [9; 16],
+            default_codec(),
+        )
+        .unwrap();
+        assert_eq!(
+            store.vendor_reserved(),
+            &[0u8; metadata::VENDOR_RESERVED_SIZE]
+        );
 
         let vr = [0xABu8; metadata::VENDOR_RESERVED_SIZE];
         store.set_vendor_reserved(&vr).unwrap();
@@ -1138,9 +1206,16 @@ mod tests {
     fn reader_replica_ctx_exposes_block_and_vendor_data() {
         ensure_rng();
         let io = MemVolume::new(512, 1024);
-        let store =
-            JvckMetadataStore::create(io, VMK, footer_only_options(), [1; 32], [2; 32], [9; 16], default_codec())
-                .unwrap();
+        let store = JvckMetadataStore::create(
+            io,
+            VMK,
+            footer_only_options(),
+            [1; 32],
+            [2; 32],
+            [9; 16],
+            default_codec(),
+        )
+        .unwrap();
         let marker = alloc::vec![0xE7u8; 512];
         store.write_vendor_data_all(0, &marker).unwrap();
 
@@ -1152,7 +1227,10 @@ mod tests {
         let ctx = reader.replica_ctx(1).unwrap();
         assert_eq!(ctx.replica_index(), 1);
         assert_eq!(&ctx.block()[..4], b"JVCK");
-        assert_eq!(ctx.encrypted_metadata().len(), metadata::ENCRYPTED_METADATA_SIZE);
+        assert_eq!(
+            ctx.encrypted_metadata().len(),
+            metadata::ENCRYPTED_METADATA_SIZE
+        );
         let mut vd = alloc::vec![0u8; 512];
         ctx.read_vendor_data(0, &mut vd).unwrap();
         assert_eq!(vd, marker);
@@ -1189,7 +1267,8 @@ mod tests {
         // 2 footer replicas (64 sectors) + 64 data sectors.
         let io = MemVolume::new(sector_size, 128);
         let store =
-            JvckMetadataStore::create(io, VMK, opts, [1; 32], [2; 32], [9; 16], default_codec()).unwrap();
+            JvckMetadataStore::create(io, VMK, opts, [1; 32], [2; 32], [9; 16], default_codec())
+                .unwrap();
         assert_eq!(store.data_sector_count(), 128 - 2 * expected_rs);
         assert_eq!(store.sector_size(), sector_size);
 

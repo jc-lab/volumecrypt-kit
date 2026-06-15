@@ -126,6 +126,8 @@ fn require_administrator(ctx: &IoctlAuthContext<'_>) -> VckResult<()> {
     }
     match ctx.requestor_token {
         Some(token) if token.is_admin() => Ok(()),
-        _ => Err(VckError::PermissionDenied("administrator privilege required")),
+        _ => Err(VckError::PermissionDenied(
+            "administrator privilege required",
+        )),
     }
 }

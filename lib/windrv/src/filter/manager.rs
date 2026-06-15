@@ -87,7 +87,9 @@ pub fn attach_filter(
     };
     if !nt_success(status) {
         unsafe { IoDeleteDevice(filter_do) };
-        return Err(VckError::Io("IoGetDeviceObjectPointer(target) failed".into()));
+        return Err(VckError::Io(
+            "IoGetDeviceObjectPointer(target) failed".into(),
+        ));
     }
 
     let mut lower: PDEVICE_OBJECT = null_mut();
@@ -95,7 +97,9 @@ pub fn attach_filter(
     unsafe { ObfDereferenceObject(file_obj.cast()) };
     if !nt_success(status) || lower.is_null() {
         unsafe { IoDeleteDevice(filter_do) };
-        return Err(VckError::Io("IoAttachDeviceToDeviceStackSafe failed".into()));
+        return Err(VckError::Io(
+            "IoAttachDeviceToDeviceStackSafe failed".into(),
+        ));
     }
 
     unsafe {
@@ -115,7 +119,8 @@ pub fn attach_filter(
 
     crate::vck_log!(
         "filter: attached filter={:p} lower={:p} (NOTE: may be above FSD if FSD already mounted)",
-        filter_do, lower
+        filter_do,
+        lower
     );
     Ok((filter_do, lower))
 }
@@ -160,7 +165,9 @@ pub fn attach_filter_unbound(
     };
     if !nt_success(status) {
         unsafe { IoDeleteDevice(filter_do) };
-        return Err(VckError::Io("IoGetDeviceObjectPointer(unbound) failed".into()));
+        return Err(VckError::Io(
+            "IoGetDeviceObjectPointer(unbound) failed".into(),
+        ));
     }
 
     let mut lower: PDEVICE_OBJECT = null_mut();
@@ -168,7 +175,9 @@ pub fn attach_filter_unbound(
     unsafe { ObfDereferenceObject(file_obj.cast()) };
     if !nt_success(status) || lower.is_null() {
         unsafe { IoDeleteDevice(filter_do) };
-        return Err(VckError::Io("IoAttachDeviceToDeviceStackSafe(unbound) failed".into()));
+        return Err(VckError::Io(
+            "IoAttachDeviceToDeviceStackSafe(unbound) failed".into(),
+        ));
     }
 
     unsafe {
@@ -215,7 +224,9 @@ pub fn attach_filter_to_raw_device(
     let status = unsafe { IoAttachDeviceToDeviceStackSafe(filter_do, target_do, &mut lower) };
     if !nt_success(status) || lower.is_null() {
         unsafe { IoDeleteDevice(filter_do) };
-        return Err(VckError::Io("IoAttachDeviceToDeviceStackSafe(raw) failed".into()));
+        return Err(VckError::Io(
+            "IoAttachDeviceToDeviceStackSafe(raw) failed".into(),
+        ));
     }
 
     unsafe {
@@ -292,7 +303,9 @@ pub fn attach_filter_to_device(
     let status = unsafe { IoAttachDeviceToDeviceStackSafe(filter_do, target_do, &mut lower) };
     if !nt_success(status) || lower.is_null() {
         unsafe { IoDeleteDevice(filter_do) };
-        return Err(VckError::Io("IoAttachDeviceToDeviceStackSafe(device) failed".into()));
+        return Err(VckError::Io(
+            "IoAttachDeviceToDeviceStackSafe(device) failed".into(),
+        ));
     }
 
     unsafe {
@@ -414,7 +427,10 @@ where
     // device object that was the PDO when AddDevice was called.
     let base_dev = unsafe { IoGetDeviceAttachmentBaseRef(vol_do) };
     crate::vck_log!(
-        "find_filter: vol_do={:p} base_dev={:p} nt_path={}", vol_do, base_dev, nt_path
+        "find_filter: vol_do={:p} base_dev={:p} nt_path={}",
+        vol_do,
+        base_dev,
+        nt_path
     );
     // Primary: name-based lookup using the actual device object name.
     // vol_do might be e.g. \Device\HarddiskVolume5 even if nt_path=\??\D:.
@@ -426,16 +442,30 @@ where
         let st = ObQueryNameString(vol_do.cast(), buf.as_mut_ptr().cast(), 256, &mut ret_len);
         if st >= 0 {
             let name_len = u16::from_le_bytes([buf[0], buf[1]]) as usize / 2;
-            let name_ptr = usize::from_le_bytes(buf[8..16].try_into().unwrap_or([0;8]));
+            let name_ptr = usize::from_le_bytes(buf[8..16].try_into().unwrap_or([0; 8]));
             if name_len > 0 && name_ptr != 0 {
                 let chars = core::slice::from_raw_parts(name_ptr as *const u16, name_len.min(64));
                 let mut s = alloc::string::String::new();
-                for &c in chars { if c >= 0x20 && c < 0x7F { s.push(c as u8 as char); } else { s.push('?'); } }
+                for &c in chars {
+                    if c >= 0x20 && c < 0x7F {
+                        s.push(c as u8 as char);
+                    } else {
+                        s.push('?');
+                    }
+                }
                 s
-            } else { alloc::string::String::new() }
-        } else { alloc::string::String::new() }
+            } else {
+                alloc::string::String::new()
+            }
+        } else {
+            alloc::string::String::new()
+        }
     };
-    crate::vck_log!("find_filter: vol_do_name='{}' nt_path='{}'", dev_name, nt_path);
+    crate::vck_log!(
+        "find_filter: vol_do_name='{}' nt_path='{}'",
+        dev_name,
+        nt_path
+    );
     if !dev_name.is_empty() {
         if let Some(result) = name_lookup_fn(&dev_name) {
             crate::vck_log!("find_filter: found via vol_do_name={}", dev_name);
@@ -531,15 +561,24 @@ pub fn find_our_filter_in_stack(nt_path: &str) -> Option<(PDEVICE_OBJECT, PDEVIC
         let mut depth = 0u32;
         loop {
             let ext = (*current).DeviceExtension as *const DeviceExtension;
-            let kind = if !ext.is_null() { (*ext).kind } else { 0xFFFF_FFFF };
+            let kind = if !ext.is_null() {
+                (*ext).kind
+            } else {
+                0xFFFF_FFFF
+            };
             crate::vck_log!(
-                "find_filter[{}]: do={:p} ext_kind=0x{:08x}", depth, current, kind
+                "find_filter[{}]: do={:p} ext_kind=0x{:08x}",
+                depth,
+                current,
+                kind
             );
             if !ext.is_null() && (*ext).kind == DEVICE_KIND_FILTER {
                 let lower = (*ext).lower_device;
                 ObfDereferenceObject(current.cast());
                 crate::vck_log!(
-                    "find_filter: found filter_do={:p} lower={:p}", current, lower
+                    "find_filter: found filter_do={:p} lower={:p}",
+                    current,
+                    lower
                 );
                 return Some((current, lower));
             }
@@ -552,7 +591,9 @@ pub fn find_our_filter_in_stack(nt_path: &str) -> Option<(PDEVICE_OBJECT, PDEVIC
             }
             current = next;
             depth += 1;
-            if depth > 12 { break; }
+            if depth > 12 {
+                break;
+            }
         }
     }
     None

@@ -10,16 +10,14 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use wdk_sys::{
-    ntddk::MmMapLockedPagesSpecifyCache,
-    DRIVER_CANCEL, LARGE_INTEGER, PIO_STACK_LOCATION, PIRP, PMDL,
+    ntddk::MmMapLockedPagesSpecifyCache, DRIVER_CANCEL, LARGE_INTEGER, PIO_STACK_LOCATION, PIRP,
+    PMDL,
 };
 
 extern "C" {
     /// Query the performance counter. When `performance_frequency` is non-null
     /// the counter frequency (ticks/second) is written there. Callable at any IRQL.
-    pub fn KeQueryPerformanceCounter(
-        performance_frequency: *mut LARGE_INTEGER,
-    ) -> LARGE_INTEGER;
+    pub fn KeQueryPerformanceCounter(performance_frequency: *mut LARGE_INTEGER) -> LARGE_INTEGER;
 }
 
 /// Read the system clock as a Windows FILETIME (100-ns ticks since 1601-01-01).
@@ -122,7 +120,7 @@ pub unsafe fn MmGetSystemAddressForMdlSafe(mdl: PMDL) -> *mut c_void {
 pub unsafe fn IoSetCancelRoutine(irp: PIRP, routine: DRIVER_CANCEL) -> DRIVER_CANCEL {
     let new_ptr = match routine {
         Some(r) => r as *mut c_void,
-        None    => core::ptr::null_mut(),
+        None => core::ptr::null_mut(),
     };
     let slot = &raw mut (*irp).CancelRoutine as *mut _ as *mut AtomicPtr<c_void>;
     let old_ptr = (*slot).swap(new_ptr, Ordering::SeqCst);

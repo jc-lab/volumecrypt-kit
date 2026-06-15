@@ -13,11 +13,11 @@ use core::ptr::null_mut;
 use vck_common::VckResult;
 use wdk_sys::{
     ntddk::{
-        IoCreateSymbolicLink, IoDeleteDevice, IoDeleteSymbolicLink,
-        IoRegisterShutdownNotification, IoUnregisterShutdownNotification,
+        IoCreateSymbolicLink, IoDeleteDevice, IoDeleteSymbolicLink, IoRegisterShutdownNotification,
+        IoUnregisterShutdownNotification,
     },
     BOOLEAN, DO_BUFFERED_IO, DO_DEVICE_INITIALIZING, DRIVER_OBJECT, FILE_DEVICE_SECURE_OPEN,
-    FILE_DEVICE_UNKNOWN, GUID, NTSTATUS, PCUNICODE_STRING, PDEVICE_OBJECT, UNICODE_STRING, ULONG,
+    FILE_DEVICE_UNKNOWN, GUID, NTSTATUS, PCUNICODE_STRING, PDEVICE_OBJECT, ULONG, UNICODE_STRING,
 };
 
 use crate::nt::{ntstatus_to_result, UnicodeString};
@@ -119,19 +119,22 @@ impl ControlDevice {
         let sddl = UnicodeString::from_str(security.sddl);
         let mut device_object = null_mut();
 
-        ntstatus_to_result(unsafe {
-            IoCreateDeviceSecure(
-                driver_object,
-                DEVICE_EXTENSION_SIZE,
-                device_name.as_ptr(),
-                FILE_DEVICE_UNKNOWN,
-                FILE_DEVICE_SECURE_OPEN,
-                BOOLEAN::default(),
-                sddl.as_ptr() as PCUNICODE_STRING,
-                &security.class_guid as *const GUID,
-                &mut device_object,
-            )
-        }, "IoCreateDeviceSecure failed")?;
+        ntstatus_to_result(
+            unsafe {
+                IoCreateDeviceSecure(
+                    driver_object,
+                    DEVICE_EXTENSION_SIZE,
+                    device_name.as_ptr(),
+                    FILE_DEVICE_UNKNOWN,
+                    FILE_DEVICE_SECURE_OPEN,
+                    BOOLEAN::default(),
+                    sddl.as_ptr() as PCUNICODE_STRING,
+                    &security.class_guid as *const GUID,
+                    &mut device_object,
+                )
+            },
+            "IoCreateDeviceSecure failed",
+        )?;
 
         unsafe {
             (*device_object).Flags |= DO_BUFFERED_IO;
@@ -184,4 +187,3 @@ impl ControlDevice {
         Ok(())
     }
 }
-

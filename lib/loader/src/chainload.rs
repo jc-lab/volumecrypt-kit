@@ -36,6 +36,7 @@ pub fn chainload_next(next_loader: &DevicePath) -> VckResult<()> {
     )
     .map_err(|e| VckError::Io(format!("LoadImage(next loader) failed: {e:?}")))?;
 
-    start_image(image).map_err(|e| VckError::Io(format!("StartImage(next loader) failed: {e:?}")))?;
+    start_image(image)
+        .map_err(|e| VckError::Io(format!("StartImage(next loader) failed: {e:?}")))?;
     Ok(())
 }

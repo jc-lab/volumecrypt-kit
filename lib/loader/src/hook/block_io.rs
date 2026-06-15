@@ -111,7 +111,8 @@ impl BlockIoHook {
                 (*self.protocol).read_blocks = entry.original;
                 let entries = &mut *HOOK_TABLE.entries.get();
                 for slot in entries.iter_mut() {
-                    if matches!(slot, Some(e) if e.protocol == self.protocol as *const BlockIoProtocol) {
+                    if matches!(slot, Some(e) if e.protocol == self.protocol as *const BlockIoProtocol)
+                    {
                         *slot = None;
                     }
                 }

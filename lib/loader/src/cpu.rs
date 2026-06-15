@@ -74,7 +74,10 @@ fn bit(v: u64, b: u64) -> u32 {
 /// supported) set them to the values required for AES-NI execution.
 pub fn report_and_enable_xmm() {
     let aes = has_aes_ni();
-    vck_log!("cpu: AES-NI {}", if aes { "supported" } else { "not supported" });
+    vck_log!(
+        "cpu: AES-NI {}",
+        if aes { "supported" } else { "not supported" }
+    );
 
     let cr0 = read_cr0();
     let cr4 = read_cr4();

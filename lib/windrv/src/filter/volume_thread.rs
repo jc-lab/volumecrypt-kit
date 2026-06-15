@@ -33,9 +33,8 @@ use wdk_sys::{
         IofCompleteRequest, KeInitializeEvent, KeSetEvent, KeWaitForSingleObject,
         ObReferenceObjectByHandle, ObfDereferenceObject, PsCreateSystemThread, ZwClose,
     },
-    CCHAR, HANDLE, IO_NO_INCREMENT, KEVENT, LARGE_INTEGER, NTSTATUS,
-    PDEVICE_OBJECT, PIO_STACK_LOCATION, PIRP,
-    SL_PENDING_RETURNED,
+    CCHAR, HANDLE, IO_NO_INCREMENT, KEVENT, LARGE_INTEGER, NTSTATUS, PDEVICE_OBJECT,
+    PIO_STACK_LOCATION, PIRP, SL_PENDING_RETURNED,
     _EVENT_TYPE::SynchronizationEvent,
     _KWAIT_REASON::Executive,
     _MODE::KernelMode,
@@ -72,7 +71,7 @@ const IDLE_TIMEOUT_100NS: i64 = -5_000_000;
 // ---------------------------------------------------------------------------
 
 struct IrpEntry {
-    irp:      PIRP,
+    irp: PIRP,
     is_write: bool,
 }
 
@@ -81,12 +80,12 @@ struct IrpEntry {
 // ---------------------------------------------------------------------------
 
 pub struct VolumeThread {
-    queue:    Mutex<VecDeque<IrpEntry>>,
+    queue: Mutex<VecDeque<IrpEntry>>,
     /// The volume currently bound to the owning filter (swapped on rebind).
-    current:  Mutex<Arc<AttachedVolume>>,
-    wake:     KEVENT,
+    current: Mutex<Arc<AttachedVolume>>,
+    wake: KEVENT,
     shutdown: AtomicBool,
-    thread:   *mut c_void, // PETHREAD (set after PsCreateSystemThread)
+    thread: *mut c_void, // PETHREAD (set after PsCreateSystemThread)
 }
 
 unsafe impl Send for VolumeThread {}
@@ -97,19 +96,24 @@ impl VolumeThread {
     /// pointer is stored in the filter's DeviceExtension.
     pub unsafe fn start(volume: Arc<AttachedVolume>) -> Box<VolumeThread> {
         let mut vt = Box::new(VolumeThread {
-            queue:    Mutex::new(VecDeque::new()),
-            current:  Mutex::new(volume),
-            wake:     core::mem::zeroed(),
+            queue: Mutex::new(VecDeque::new()),
+            current: Mutex::new(volume),
+            wake: core::mem::zeroed(),
             shutdown: AtomicBool::new(false),
-            thread:   null_mut(),
+            thread: null_mut(),
         });
         KeInitializeEvent(&mut vt.wake, SynchronizationEvent, 0);
 
         let self_ptr: *mut VolumeThread = &mut *vt;
         let mut handle: HANDLE = null_mut();
         let st = PsCreateSystemThread(
-            &mut handle, THREAD_ALL_ACCESS, null_mut(), null_mut(), null_mut(),
-            Some(thread_main), self_ptr.cast::<c_void>(),
+            &mut handle,
+            THREAD_ALL_ACCESS,
+            null_mut(),
+            null_mut(),
+            null_mut(),
+            Some(thread_main),
+            self_ptr.cast::<c_void>(),
         );
         if !nt_success(st) {
             crate::vck_log!("volume_thread: create failed 0x{:08x}", st);
@@ -117,7 +121,12 @@ impl VolumeThread {
         }
         let mut obj: *mut c_void = null_mut();
         let _ = ObReferenceObjectByHandle(
-            handle, SYNCHRONIZE, null_mut(), KernelMode as i8, &mut obj, null_mut(),
+            handle,
+            SYNCHRONIZE,
+            null_mut(),
+            KernelMode as i8,
+            &mut obj,
+            null_mut(),
         );
         let _ = ZwClose(handle);
         vt.thread = obj;
@@ -196,7 +205,12 @@ pub unsafe fn enqueue(vt: *mut VolumeThread, irp: PIRP, is_write: bool) -> NTSTA
     }
     // Mark pending before returning STATUS_PENDING. Cancellation is handled at
     // dequeue (see `claim_irp`), so we install no cancel routine here.
-    let sl = (*irp).Tail.Overlay.__bindgen_anon_2.__bindgen_anon_1.CurrentStackLocation;
+    let sl = (*irp)
+        .Tail
+        .Overlay
+        .__bindgen_anon_2
+        .__bindgen_anon_1
+        .CurrentStackLocation;
     (*sl).Control |= SL_PENDING_RETURNED as u8;
     q.push_back(IrpEntry { irp, is_write });
     drop(q);
@@ -220,7 +234,9 @@ unsafe fn claim_cancelled(irp: PIRP) -> bool {
 /// engine state) so the sweep resumes promptly.
 pub unsafe fn wake_for(volume: &AttachedVolume) {
     let filter_do = volume.filter_device.load(Ordering::Acquire);
-    if filter_do.is_null() { return; }
+    if filter_do.is_null() {
+        return;
+    }
     let ext = (*filter_do).DeviceExtension as *mut DeviceExtension;
     if !(*ext).vthread.is_null() {
         (*(*ext).vthread).signal();
@@ -260,17 +276,22 @@ unsafe extern "C" fn thread_main(context: *mut c_void) {
 
         // (2) One sweep batch (no-op unless engine is Encrypting/Decrypting).
         match vol.sweep_step(BATCH_SECTORS) {
-            Ok(true)  => did = true, // more sweep work remains
+            Ok(true) => did = true, // more sweep work remains
             Ok(false) => {}
-            Err(e)    => crate::vck_log!("volume_thread: sweep err: {}", e),
+            Err(e) => crate::vck_log!("volume_thread: sweep err: {}", e),
         }
 
         // (3) Idle → wait for a wake (new IRP / rebind / start_encrypt) or timeout.
         if !did {
-            let mut timeout = LARGE_INTEGER { QuadPart: IDLE_TIMEOUT_100NS };
+            let mut timeout = LARGE_INTEGER {
+                QuadPart: IDLE_TIMEOUT_100NS,
+            };
             KeWaitForSingleObject(
                 &vt.wake as *const KEVENT as *mut c_void,
-                Executive, KernelMode as i8, 0, &mut timeout,
+                Executive,
+                KernelMode as i8,
+                0,
+                &mut timeout,
             );
         }
     }
@@ -299,12 +320,19 @@ unsafe fn process_irp(vol: &AttachedVolume, ep: IrpEntry) {
 // ---------------------------------------------------------------------------
 
 fn current_sl(irp: PIRP) -> PIO_STACK_LOCATION {
-    unsafe { (*irp).Tail.Overlay.__bindgen_anon_2.__bindgen_anon_1.CurrentStackLocation }
+    unsafe {
+        (*irp)
+            .Tail
+            .Overlay
+            .__bindgen_anon_2
+            .__bindgen_anon_1
+            .CurrentStackLocation
+    }
 }
 
 fn data_relative(volume: &AttachedVolume, abs_lba: u64) -> Option<u64> {
     let offset = volume.offset_sector();
-    let total  = volume.data_sectors();
+    let total = volume.data_sectors();
     abs_lba.checked_sub(offset).filter(|rel| *rel < total)
 }
 
@@ -332,16 +360,16 @@ unsafe fn complete_irp(irp: PIRP, status: NTSTATUS, information: usize) {
 // an already-locked MDL faults (PAGE_FAULT_IN_NONPAGED_AREA).
 
 unsafe fn process_read(irp: PIRP, volume: &AttachedVolume) {
-    let stack       = current_sl(irp);
+    let stack = current_sl(irp);
     let byte_offset = (*stack).Parameters.Read.ByteOffset.QuadPart as u64;
-    let length      = (*stack).Parameters.Read.Length as usize;
+    let length = (*stack).Parameters.Read.Length as usize;
     let sector_size = volume.sector_size as usize;
 
     if sector_size == 0 || length == 0 {
         complete_irp(irp, STATUS_SUCCESS, 0);
         return;
     }
-    let first_lba    = byte_offset / sector_size as u64;
+    let first_lba = byte_offset / sector_size as u64;
     let sector_count = length / sector_size;
     if sector_count == 0 {
         complete_irp(irp, STATUS_SUCCESS, 0);
@@ -388,16 +416,16 @@ unsafe fn process_read(irp: PIRP, volume: &AttachedVolume) {
 // ---------------------------------------------------------------------------
 
 unsafe fn process_write(irp: PIRP, volume: &AttachedVolume) {
-    let stack       = current_sl(irp);
+    let stack = current_sl(irp);
     let byte_offset = (*stack).Parameters.Write.ByteOffset.QuadPart as u64;
-    let length      = (*stack).Parameters.Write.Length as usize;
+    let length = (*stack).Parameters.Write.Length as usize;
     let sector_size = volume.sector_size as usize;
 
     if sector_size == 0 || length == 0 {
         complete_irp(irp, STATUS_SUCCESS, 0);
         return;
     }
-    let first_lba    = byte_offset / sector_size as u64;
+    let first_lba = byte_offset / sector_size as u64;
     let sector_count = length / sector_size;
     if sector_count == 0 {
         complete_irp(irp, STATUS_SUCCESS, 0);

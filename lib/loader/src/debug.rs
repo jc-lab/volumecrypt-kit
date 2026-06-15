@@ -65,10 +65,7 @@ fn efi_time_to_unix(t: &uefi::runtime::Time) -> (u64, u32) {
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // day-of-era [0, 146096]
     let days = era * 146_097 + doe - EPOCH_DAYS;
 
-    let secs = days * 86_400
-        + t.hour() as u64 * 3_600
-        + t.minute() as u64 * 60
-        + t.second() as u64;
+    let secs = days * 86_400 + t.hour() as u64 * 3_600 + t.minute() as u64 * 60 + t.second() as u64;
     let millis = t.nanosecond() / 1_000_000;
     (secs, millis)
 }
