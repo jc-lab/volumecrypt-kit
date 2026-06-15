@@ -40,7 +40,7 @@ UEFI_RUSTFLAGS = -C target-feature=-soft-float
 
 clippy-driver:
 	$(LOAD_ENV)
-	cargo clippy -p vck-windrv -p vck-sample-driver -p vck-crypto-test-driver -- -D warnings
+	RUSTFLAGS="$(DRIVER_RUSTFLAGS)" cargo clippy -p vck-windrv -p vck-sample-driver -p vck-crypto-test-driver -- -D warnings
 
 build-driver: testing/signing/MyTestDriverCert.cer
 	$(LOAD_ENV)
