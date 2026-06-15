@@ -16,10 +16,10 @@
 
 use aes::Aes256;
 use cbc::{Decryptor, Encryptor};
-use cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cipher::{block_padding::NoPadding, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use crc::{Crc, CRC_32_ISO_HDLC};
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -228,7 +228,7 @@ impl JvckHeader {
         let result = (|| {
             let enc = Encryptor::<Aes256>::new_from_slices(&keys.enc_key, &keys.enc_iv)
                 .map_err(|_| VckError::CryptoFailed("invalid ENC key/iv length"))?;
-            enc.encrypt_padded_mut::<NoPadding>(&mut plain, ENCRYPTED_METADATA_SIZE)
+            enc.encrypt_padded::<NoPadding>(&mut plain, ENCRYPTED_METADATA_SIZE)
                 .map_err(|_| VckError::CryptoFailed("EncryptedMetadata CBC encrypt failed"))?;
             out[OFF_ENCRYPTED_METADATA..OFF_ENCRYPTED_METADATA + ENCRYPTED_METADATA_SIZE]
                 .copy_from_slice(&plain);
@@ -305,7 +305,7 @@ pub fn decrypt_payload(block: &[u8], vmk: &[u8]) -> VckResult<(u64, VolumeState,
         let dec = Decryptor::<Aes256>::new_from_slices(&keys.enc_key, &keys.enc_iv)
             .map_err(|_| VckError::CryptoFailed("invalid ENC key/iv length"))?;
         let plain = dec
-            .decrypt_padded_mut::<NoPadding>(&mut buf)
+            .decrypt_padded::<NoPadding>(&mut buf)
             .map_err(|_| VckError::CryptoFailed("EncryptedMetadata CBC decrypt failed"))?;
 
         // Verify the inner signature + zero field (wrong VMK -> garbage here).

@@ -37,7 +37,7 @@
 //! with a caller's frame. (A prior build with `+aes` inlined the unrolled AES
 //! into the IOCTL path and double-faulted on stack overflow.)
 
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::{Aes256, Block};
 
 use crate::{VckError, VckResult};
@@ -138,7 +138,7 @@ impl XtsVolumeCipher {
     #[inline(never)]
     fn encrypt_sector_inner(&self, rel_sector: u64, sector: &mut [u8]) {
         // T_0 = AES_K2(sector_number as 128-bit little-endian)
-        let mut tw = *Block::from_slice(&(rel_sector as u128).to_le_bytes());
+        let mut tw: Block = (rel_sector as u128).to_le_bytes().into();
         self.cipher_2.encrypt_block(&mut tw);
 
         let n = sector.len() / 16;
@@ -177,7 +177,7 @@ impl XtsVolumeCipher {
             for j in 0..16 {
                 block[j] ^= tw[j];
             }
-            let mut ga = *Block::from_slice(block);
+            let mut ga: Block = Block::try_from(&block[..]).unwrap();
             self.cipher_1.encrypt_block(&mut ga);
             block.copy_from_slice(&ga);
             for j in 0..16 {
@@ -191,7 +191,7 @@ impl XtsVolumeCipher {
     #[inline(never)]
     fn decrypt_sector_inner(&self, rel_sector: u64, sector: &mut [u8]) {
         // Tweak is always encrypted with K2 (even during decryption).
-        let mut tw = *Block::from_slice(&(rel_sector as u128).to_le_bytes());
+        let mut tw: Block = (rel_sector as u128).to_le_bytes().into();
         self.cipher_2.encrypt_block(&mut tw);
 
         let n = sector.len() / 16;
@@ -227,7 +227,7 @@ impl XtsVolumeCipher {
             for j in 0..16 {
                 block[j] ^= tw[j];
             }
-            let mut ga = *Block::from_slice(block);
+            let mut ga: Block = Block::try_from(&block[..]).unwrap();
             self.cipher_1.decrypt_block(&mut ga);
             block.copy_from_slice(&ga);
             for j in 0..16 {

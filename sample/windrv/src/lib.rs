@@ -17,7 +17,8 @@ pub use provider::VckVolumeProvider;
 use core::ffi::c_void;
 use core::panic::PanicInfo;
 
-use spin::{Lazy, Mutex};
+use spin::{LazyLock, Mutex};
+use vck_sample_common::VckHandoverPayload;
 use vck_windrv::{
     device::{ControlDevice, DeviceExtension, DEVICE_KIND_FILTER},
     filter::handle_filter_irp,
@@ -26,7 +27,6 @@ use vck_windrv::{
     provider::{AccessToken, IoctlAuthContext, RequestorMode},
     VolumeAttachRegistry,
 };
-use vck_sample_common::VckHandoverPayload;
 use wdk_alloc::WdkAllocator;
 use wdk_sys::{
     ntddk::{
@@ -44,7 +44,7 @@ use wdk_sys::{
 static GLOBAL_ALLOCATOR: WdkAllocator = WdkAllocator;
 
 static CONTROL_DEVICE: Mutex<Option<ControlDevice>> = Mutex::new(None);
-static REGISTRY: Lazy<VolumeAttachRegistry> = Lazy::new(VolumeAttachRegistry::new);
+static REGISTRY: LazyLock<VolumeAttachRegistry> = LazyLock::new(VolumeAttachRegistry::new);
 static PROVIDER: VckVolumeProvider = VckVolumeProvider;
 
 const STATUS_SUCCESS: NTSTATUS = 0;
