@@ -1045,26 +1045,10 @@ name = "vck-crypto-test-driver"
 version = "0.0.1"
 dependencies = [
  "vck-common",
- "vck-driver",
+ "vck-windrv",
  "wdk-alloc",
  "wdk-build",
  "wdk-sys",
-]
-
-[[package]]
-name = "vck-driver"
-version = "0.0.1"
-dependencies = [
- "aes",
- "irql",
- "messagepack-serde",
- "serde",
- "serde_bytes",
- "spin",
- "vck-common",
- "wdk-build",
- "wdk-sys",
- "xts-mode",
 ]
 
 [[package]]
@@ -1094,8 +1078,8 @@ version = "0.0.1"
 dependencies = [
  "spin",
  "vck-common",
- "vck-driver",
  "vck-sample-common",
+ "vck-windrv",
  "wdk-alloc",
  "wdk-build",
  "wdk-sys",
@@ -1110,6 +1094,22 @@ dependencies = [
  "vck-common",
  "vck-loader",
  "vck-sample-common",
+]
+
+[[package]]
+name = "vck-windrv"
+version = "0.0.1"
+dependencies = [
+ "aes",
+ "irql",
+ "messagepack-serde",
+ "serde",
+ "serde_bytes",
+ "spin",
+ "vck-common",
+ "wdk-build",
+ "wdk-sys",
+ "xts-mode",
 ]
 
 [[package]]

@@ -40,7 +40,7 @@ UEFI_RUSTFLAGS = -C target-feature=-soft-float
 
 clippy-driver:
 	$(LOAD_ENV)
-	cargo clippy -p vck-driver -p vck-sample-driver -p vck-crypto-test-driver -- -D warnings
+	cargo clippy -p vck-windrv -p vck-sample-driver -p vck-crypto-test-driver -- -D warnings
 
 build-driver: testing/signing/MyTestDriverCert.cer
 	$(LOAD_ENV)
@@ -50,7 +50,7 @@ build-driver: testing/signing/MyTestDriverCert.cer
 	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver-package.ps1 \
 	  -DriverSys ./testing/artifacts/vck-sample-driver.sys \
 	  -DriverInf ./testing/artifacts/vck-sample-driver.inf \
-	  -OutputDir ./testing/artifacts/vck-driver-pkg
+	  -OutputDir ./testing/artifacts/vck-windrv-pkg
 
 build-crypto-test-driver: testing/signing/MyTestDriverCert.cer
 	$(LOAD_ENV)
@@ -77,7 +77,7 @@ build-driver-package: testing/signing/MyTestDriverCert.cer testing/artifacts/vck
 	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver-package.ps1 \
 	  -DriverSys ./testing/artifacts/vck-sample-driver.sys \
 	  -DriverInf ./testing/artifacts/vck-sample-driver.inf \
-	  -OutputDir ./testing/artifacts/vck-driver-pkg
+	  -OutputDir ./testing/artifacts/vck-windrv-pkg
 
 test-vm-smoke: $(TEST_VM_DIR)
 	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/smoke-guest-exec --test ./testing/recipes/smoke-guest-exec/smoke.yaml

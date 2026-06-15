@@ -88,7 +88,7 @@ jobs:
       - name: clippy (vck-common, host)
         run: cargo clippy -p vck-common -- -D warnings
 
-      - name: clippy (vck-driver)
+      - name: clippy (vck-windrv)
         shell: msys2 {0}
         run: |
           make clippy-driver
@@ -107,7 +107,7 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: vck-artifacts-${{ github.run_id }}
-          # vck-sample-driver.sys, vck-driver-pkg/, vck-sample-loader.efi, vck-app.exe
+          # vck-sample-driver.sys, vck-windrv-pkg/, vck-sample-loader.efi, vck-app.exe
           path: testing/artifacts/
 
   # ── VM tests (parallel matrix) ─────────────────────────────────────────────
@@ -213,11 +213,11 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
         run: cargo publish -p vck-common
 
-      - name: Publish vck-driver
+      - name: Publish vck-windrv
         shell: msys2 {0}
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
-        run: cargo publish -p vck-driver
+        run: cargo publish -p vck-windrv
 
       - name: Publish vck-loader
         shell: msys2 {0}

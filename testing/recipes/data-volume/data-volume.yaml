@@ -32,7 +32,7 @@ steps:
     action: file-upload
     timeout: 30s
     params:
-      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.sys"
+      src: "./testing/artifacts/vck-windrv-pkg/vck-sample-driver.sys"
       dst: "C:\\Temp\\vck-sample-driver.sys"
 
   - id: "upload-driver-inf"
@@ -40,7 +40,7 @@ steps:
     action: file-upload
     timeout: 30s
     params:
-      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.inf"
+      src: "./testing/artifacts/vck-windrv-pkg/vck-sample-driver.inf"
       dst: "C:\\Temp\\vck-sample-driver.inf"
 
   - id: "upload-driver-cat"
@@ -48,7 +48,7 @@ steps:
     action: file-upload
     timeout: 30s
     params:
-      src: "./testing/artifacts/vck-driver-pkg/vck-sample-driver.cat"
+      src: "./testing/artifacts/vck-windrv-pkg/vck-sample-driver.cat"
       dst: "C:\\Temp\\vck-sample-driver.cat"
 
   - id: "upload-vck-app"

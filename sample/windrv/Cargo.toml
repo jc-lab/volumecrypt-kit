@@ -21,12 +21,12 @@ crate-type = ["cdylib"]
 [features]
 # Always enable debugcon so VM test logs are always captured.
 default = ["debugcon"]
-debugcon = ["vck-driver/debugcon"]
+debugcon = ["vck-windrv/debugcon"]
 
 [dependencies]
 spin = { workspace = true, features = ["lazy", "once", "mutex", "spin_mutex"] }
 vck-common = { path = "../../lib/common", default-features = false }
-vck-driver = { path = "../../lib/windrv" }
+vck-windrv = { path = "../../lib/windrv" }
 vck-sample-common = { path = "../common" }
 wdk-alloc.workspace = true
 wdk-sys = "0.5.1"

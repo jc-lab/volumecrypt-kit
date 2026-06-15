@@ -4,7 +4,7 @@
 
 //! `vck-sample-driver`: the JVCK sample kernel driver (builds to a `.sys`).
 //!
-//! Wires the sample `VckVolumeProvider` into the `vck-driver` framework.
+//! Wires the sample `VckVolumeProvider` into the `vck-windrv` framework.
 #![no_std]
 #![allow(non_snake_case)]
 
