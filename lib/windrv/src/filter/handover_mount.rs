@@ -35,12 +35,11 @@ use wdk_sys::{
         ExAllocatePool2, ExFreePool, IoAllocateWorkItem, IoFreeWorkItem, IoQueueWorkItem,
         KeGetCurrentIrql, KeInitializeEvent, KeSetEvent, KeWaitForSingleObject,
     },
-    KEVENT, NTSTATUS, PDEVICE_OBJECT, PIO_WORKITEM, PIRP,
-    SL_PENDING_RETURNED,
     _EVENT_TYPE::NotificationEvent,
     _KWAIT_REASON::Executive,
     _MODE::KernelMode,
     _WORK_QUEUE_TYPE::DelayedWorkQueue,
+    KEVENT, NTSTATUS, PDEVICE_OBJECT, PIO_WORKITEM, PIRP, SL_PENDING_RETURNED,
 };
 
 use crate::{
@@ -56,7 +55,12 @@ const POOL_FLAG_NON_PAGED: u64 = 0x0000_0000_0000_0040;
 const VCK_POOL_TAG: u32 = u32::from_le_bytes(*b"VCKM");
 
 unsafe fn current_sl(irp: PIRP) -> wdk_sys::PIO_STACK_LOCATION {
-    (*irp).Tail.Overlay.__bindgen_anon_2.__bindgen_anon_1.CurrentStackLocation
+    (*irp)
+        .Tail
+        .Overlay
+        .__bindgen_anon_2
+        .__bindgen_anon_1
+        .CurrentStackLocation
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +183,8 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
             if guid != handover.partition_guid {
                 crate::vck_log!(
                     "handover_mount: partition {} != target {}, skipping",
-                    guid, handover.partition_guid
+                    guid,
+                    handover.partition_guid
                 );
                 return;
             }
@@ -260,7 +265,10 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     crate::filter::filter_bind_volume(filter_do, volume.clone());
     crate::vck_log!(
         "handover_mount: OS volume bound path={} offset_sector={} data_sectors={} boundary={}",
-        volume_path, offset_sector, data_sectors, initial_boundary
+        volume_path,
+        offset_sector,
+        data_sectors,
+        initial_boundary
     );
     unsafe { crate::filter::volume_thread::wake_for(&volume) };
 }

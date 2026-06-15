@@ -125,7 +125,7 @@ impl<'a> ReplicaCtx<'a> {
     /// vendor-specific data region, starting at vendor-relative `rel_sector`.
     pub fn read_vendor_data(&self, rel_sector: u64, buf: &mut [u8]) -> VckResult<()> {
         let ss = self.sector_size as usize;
-        if ss == 0 || buf.is_empty() || buf.len() % ss != 0 {
+        if ss == 0 || buf.is_empty() || !buf.len().is_multiple_of(ss) {
             return Err(VckError::InvalidData(
                 "vendor data buffer must be a non-zero multiple of the sector size",
             ));
@@ -133,7 +133,7 @@ impl<'a> ReplicaCtx<'a> {
         let nsec = (buf.len() / ss) as u64;
         if rel_sector
             .checked_add(nsec)
-            .map_or(true, |end| end > self.vendor_sector_count)
+            .is_none_or(|end| end > self.vendor_sector_count)
         {
             return Err(VckError::ValidationFailed(
                 "vendor data range exceeds the replica region",
@@ -157,6 +157,7 @@ pub trait MetadataCodec: Send + Sync {
     /// Serialize `header` + the sensitive `secrets`/`encrypted_offset`/`state`
     /// into a 512-byte `out` block (encrypting the inner payload, computing
     /// auth). `salt` is the per-write random salt.
+    #[allow(clippy::too_many_arguments)]
     fn seal(
         &self,
         header: &JvckHeader,

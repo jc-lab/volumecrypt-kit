@@ -12,7 +12,7 @@ use vck_common::{
     jvck::{JvckCbcCodec, JvckMetadataReader, MetadataCodec},
     EncryptedOffset, EncryptedOffsetStore, VckError, VckResult, VolumeCipher,
 };
-use vck_driver::{
+use vck_windrv::{
     crypto::AesXtsCipher, device::ControlDeviceSecurity, ioctl::codes::IOCTL_VCK_GET_PROGRESS,
     AttachContext, DetachContext, IoConfig, IoctlAuthContext, IoctlAuthorization, RequestorMode,
     VolumeProvider,
@@ -100,7 +100,7 @@ impl VolumeProvider for VckVolumeProvider {
 impl IoctlAuthorization for VckVolumeProvider {
     fn authorize(&self, ctx: &IoctlAuthContext<'_>) -> VckResult<()> {
         if ctx.ioctl_code == IOCTL_VCK_GET_PROGRESS
-            || ctx.ioctl_code == vck_driver::ioctl::codes::IOCTL_VCK_GET_STATUS
+            || ctx.ioctl_code == vck_windrv::ioctl::codes::IOCTL_VCK_GET_STATUS
         {
             return Ok(());
         }
@@ -126,6 +126,8 @@ fn require_administrator(ctx: &IoctlAuthContext<'_>) -> VckResult<()> {
     }
     match ctx.requestor_token {
         Some(token) if token.is_admin() => Ok(()),
-        _ => Err(VckError::PermissionDenied("administrator privilege required")),
+        _ => Err(VckError::PermissionDenied(
+            "administrator privilege required",
+        )),
     }
 }

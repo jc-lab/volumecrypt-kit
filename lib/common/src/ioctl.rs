@@ -75,12 +75,24 @@ mod tests {
     #[test]
     fn ctl_code_matches_windows_layout() {
         // DeviceType occupies bits 31..16.
-        assert_eq!(ctl_code(0x22, 0, METHOD_BUFFERED, FILE_ANY_ACCESS), 0x0022_0000);
+        assert_eq!(
+            ctl_code(0x22, 0, METHOD_BUFFERED, FILE_ANY_ACCESS),
+            0x0022_0000
+        );
         // Access occupies bits 15..14.
-        assert_eq!(ctl_code(0, 0, METHOD_BUFFERED, FILE_READ_ACCESS), 0x0000_4000);
-        assert_eq!(ctl_code(0, 0, METHOD_BUFFERED, FILE_WRITE_ACCESS), 0x0000_8000);
+        assert_eq!(
+            ctl_code(0, 0, METHOD_BUFFERED, FILE_READ_ACCESS),
+            0x0000_4000
+        );
+        assert_eq!(
+            ctl_code(0, 0, METHOD_BUFFERED, FILE_WRITE_ACCESS),
+            0x0000_8000
+        );
         // Function occupies bits 13..2.
-        assert_eq!(ctl_code(0, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS), 0x0000_2000);
+        assert_eq!(
+            ctl_code(0, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS),
+            0x0000_2000
+        );
         // Method occupies bits 1..0.
         assert_eq!(ctl_code(0, 0, METHOD_NEITHER, FILE_ANY_ACCESS), 0x0000_0003);
     }

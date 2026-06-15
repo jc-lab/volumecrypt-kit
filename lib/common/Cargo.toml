@@ -4,10 +4,11 @@
 
 [package]
 name = "vck-common"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Shared types, JVCK metadata format, and crypto primitives for VolumeCrypt-Kit"
 
 [features]
 default = ["std"]

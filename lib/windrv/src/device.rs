@@ -13,11 +13,11 @@ use core::ptr::null_mut;
 use vck_common::VckResult;
 use wdk_sys::{
     ntddk::{
-        IoCreateSymbolicLink, IoDeleteDevice, IoDeleteSymbolicLink,
-        IoRegisterShutdownNotification, IoUnregisterShutdownNotification,
+        IoCreateSymbolicLink, IoDeleteDevice, IoDeleteSymbolicLink, IoRegisterShutdownNotification,
+        IoUnregisterShutdownNotification,
     },
     BOOLEAN, DO_BUFFERED_IO, DO_DEVICE_INITIALIZING, DRIVER_OBJECT, FILE_DEVICE_SECURE_OPEN,
-    FILE_DEVICE_UNKNOWN, GUID, NTSTATUS, PCUNICODE_STRING, PDEVICE_OBJECT, UNICODE_STRING, ULONG,
+    FILE_DEVICE_UNKNOWN, GUID, NTSTATUS, PCUNICODE_STRING, PDEVICE_OBJECT, ULONG, UNICODE_STRING,
 };
 
 use crate::nt::{ntstatus_to_result, UnicodeString};
@@ -110,28 +110,32 @@ impl ControlDevice {
     /// `security` (supplied by the driver binary) controls the device's SDDL so
     /// the OS gates who may open it and with what access. Non-exclusive so the
     /// management app and the driver's own shutdown self-IOCTL can both reach it.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn create(
         driver_object: *mut DRIVER_OBJECT,
         security: &ControlDeviceSecurity<'_>,
     ) -> VckResult<Self> {
-        let device_name = UnicodeString::from_str(DEVICE_NAME);
-        let symlink_name = UnicodeString::from_str(SYMLINK_NAME);
-        let sddl = UnicodeString::from_str(security.sddl);
+        let device_name = UnicodeString::new(DEVICE_NAME);
+        let symlink_name = UnicodeString::new(SYMLINK_NAME);
+        let sddl = UnicodeString::new(security.sddl);
         let mut device_object = null_mut();
 
-        ntstatus_to_result(unsafe {
-            IoCreateDeviceSecure(
-                driver_object,
-                DEVICE_EXTENSION_SIZE,
-                device_name.as_ptr(),
-                FILE_DEVICE_UNKNOWN,
-                FILE_DEVICE_SECURE_OPEN,
-                BOOLEAN::default(),
-                sddl.as_ptr() as PCUNICODE_STRING,
-                &security.class_guid as *const GUID,
-                &mut device_object,
-            )
-        }, "IoCreateDeviceSecure failed")?;
+        ntstatus_to_result(
+            unsafe {
+                IoCreateDeviceSecure(
+                    driver_object,
+                    DEVICE_EXTENSION_SIZE,
+                    device_name.as_ptr(),
+                    FILE_DEVICE_UNKNOWN,
+                    FILE_DEVICE_SECURE_OPEN,
+                    BOOLEAN::default(),
+                    sddl.as_ptr() as PCUNICODE_STRING,
+                    &security.class_guid as *const GUID,
+                    &mut device_object,
+                )
+            },
+            "IoCreateDeviceSecure failed",
+        )?;
 
         unsafe {
             (*device_object).Flags |= DO_BUFFERED_IO;
@@ -170,7 +174,7 @@ impl ControlDevice {
 
     /// Delete the symbolic link and device object.
     pub fn destroy(self) -> VckResult<()> {
-        let symlink_name = UnicodeString::from_str(SYMLINK_NAME);
+        let symlink_name = UnicodeString::new(SYMLINK_NAME);
         unsafe {
             IoUnregisterShutdownNotification(self.device_object);
         }
@@ -184,4 +188,3 @@ impl ControlDevice {
         Ok(())
     }
 }
-

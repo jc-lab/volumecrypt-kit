@@ -20,8 +20,7 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use vck_common::{
-    types::Guid, EncryptedOffset, EncryptedOffsetStore, SectorIo, VckResult, VolumeCipher,
-    VolumeId,
+    types::Guid, EncryptedOffset, EncryptedOffsetStore, SectorIo, VckResult, VolumeCipher, VolumeId,
 };
 use wdk_sys::{
     ntddk::{PsDereferencePrimaryToken, PsReferencePrimaryToken, SeTokenIsAdmin},
@@ -99,7 +98,11 @@ impl IoConfig {
                 encrypted_offset,
                 offset_store,
                 ..
-            } => Some((*offset_sector, encrypted_offset.clone(), offset_store.clone())),
+            } => Some((
+                *offset_sector,
+                encrypted_offset.clone(),
+                offset_store.clone(),
+            )),
         }
     }
 }

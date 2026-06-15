@@ -15,6 +15,8 @@ pub mod volume_thread;
 pub use context::FilterContext;
 pub use io::handle_filter_irp;
 pub use irp::pass_through;
-pub use manager::{attach_filter, attach_filter_to_device, attach_filter_to_raw_device,
-    attach_filter_unbound, detach_filter, filter_bind_volume, filter_rebind_volume,
-    find_our_filter_in_stack, find_filter_for_volume, unbind_filter};
+pub use manager::{
+    attach_filter, attach_filter_to_device, attach_filter_to_raw_device, attach_filter_unbound,
+    detach_filter, filter_bind_volume, filter_rebind_volume, find_filter_for_volume,
+    find_our_filter_in_stack, unbind_filter,
+};

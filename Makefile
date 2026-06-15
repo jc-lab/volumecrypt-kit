@@ -6,7 +6,7 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-data-volume-decrypt test-vm-crypto-test test-vm-os-handover test-vm-os-encrypt clean
+.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test test-vm-setup test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-data-volume-decrypt test-vm-crypto-test test-vm-os-handover test-vm-os-encrypt clean
 
 TEST_VM_DIR = .testfoundry/win11
 LOAD_ENV := source ./.ci/scripts/load-wdk-env.sh
@@ -38,6 +38,10 @@ UEFI_RUSTFLAGS = -C target-feature=-soft-float
 # Built in release: unoptimized debug frames overflow the small (~12 KiB)
 # kernel stack on the metadata/crypto path.
 
+clippy-driver:
+	$(LOAD_ENV)
+	cargo clippy -p vck-windrv -p vck-sample-driver -p vck-crypto-test-driver -- -D warnings
+
 build-driver: testing/signing/MyTestDriverCert.cer
 	$(LOAD_ENV)
 	RUSTFLAGS="$(DRIVER_RUSTFLAGS)" cargo build -p vck-sample-driver --target x86_64-pc-windows-msvc --release
@@ -46,7 +50,7 @@ build-driver: testing/signing/MyTestDriverCert.cer
 	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver-package.ps1 \
 	  -DriverSys ./testing/artifacts/vck-sample-driver.sys \
 	  -DriverInf ./testing/artifacts/vck-sample-driver.inf \
-	  -OutputDir ./testing/artifacts/vck-driver-pkg
+	  -OutputDir ./testing/artifacts/vck-windrv-pkg
 
 build-crypto-test-driver: testing/signing/MyTestDriverCert.cer
 	$(LOAD_ENV)
@@ -68,12 +72,14 @@ test:
 $(TEST_VM_DIR): testing/signing/MyTestDriverCert.cer
 	test-foundry.exe --vm-name="win11" vm-setup --image ./testing/images/windows-11.yaml
 
+test-vm-setup: $(TEST_VM_DIR)
+
 build-driver-package: testing/signing/MyTestDriverCert.cer testing/artifacts/vck-sample-driver.sys testing/artifacts/vck-sample-driver.inf build-driver
 	$(LOAD_ENV)
 	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver-package.ps1 \
 	  -DriverSys ./testing/artifacts/vck-sample-driver.sys \
 	  -DriverInf ./testing/artifacts/vck-sample-driver.inf \
-	  -OutputDir ./testing/artifacts/vck-driver-pkg
+	  -OutputDir ./testing/artifacts/vck-windrv-pkg
 
 test-vm-smoke: $(TEST_VM_DIR)
 	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/smoke-guest-exec --test ./testing/recipes/smoke-guest-exec/smoke.yaml

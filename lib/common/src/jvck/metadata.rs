@@ -16,10 +16,10 @@
 
 use aes::Aes256;
 use cbc::{Decryptor, Encryptor};
-use cipher::{block_padding::NoPadding, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
+use cipher::{block_padding::NoPadding, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use crc::{Crc, CRC_32_ISO_HDLC};
 use hkdf::Hkdf;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -228,7 +228,7 @@ impl JvckHeader {
         let result = (|| {
             let enc = Encryptor::<Aes256>::new_from_slices(&keys.enc_key, &keys.enc_iv)
                 .map_err(|_| VckError::CryptoFailed("invalid ENC key/iv length"))?;
-            enc.encrypt_padded_mut::<NoPadding>(&mut plain, ENCRYPTED_METADATA_SIZE)
+            enc.encrypt_padded::<NoPadding>(&mut plain, ENCRYPTED_METADATA_SIZE)
                 .map_err(|_| VckError::CryptoFailed("EncryptedMetadata CBC encrypt failed"))?;
             out[OFF_ENCRYPTED_METADATA..OFF_ENCRYPTED_METADATA + ENCRYPTED_METADATA_SIZE]
                 .copy_from_slice(&plain);
@@ -305,7 +305,7 @@ pub fn decrypt_payload(block: &[u8], vmk: &[u8]) -> VckResult<(u64, VolumeState,
         let dec = Decryptor::<Aes256>::new_from_slices(&keys.enc_key, &keys.enc_iv)
             .map_err(|_| VckError::CryptoFailed("invalid ENC key/iv length"))?;
         let plain = dec
-            .decrypt_padded_mut::<NoPadding>(&mut buf)
+            .decrypt_padded::<NoPadding>(&mut buf)
             .map_err(|_| VckError::CryptoFailed("EncryptedMetadata CBC decrypt failed"))?;
 
         // Verify the inner signature + zero field (wrong VMK -> garbage here).
@@ -434,7 +434,14 @@ mod tests {
         header.vendor_reserved = [0xC7; VENDOR_RESERVED_SIZE];
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         header
-            .encode(&sample_secrets(), 1, VolumeState::Encrypt, &TEST_SALT, vmk, &mut block)
+            .encode(
+                &sample_secrets(),
+                1,
+                VolumeState::Encrypt,
+                &TEST_SALT,
+                vmk,
+                &mut block,
+            )
             .unwrap();
         let parsed = JvckHeader::parse(&block).unwrap();
         assert_eq!(parsed.vendor_reserved, [0xC7; VENDOR_RESERVED_SIZE]);
@@ -497,9 +504,7 @@ mod tests {
             sector_size: 512,
             header_replica_count: 0,
             footer_replica_count: 2,
-            volume_id: [
-                1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-            ],
+            volume_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             vendor_reserved: [0u8; VENDOR_RESERVED_SIZE],
         };
         let secrets = JvckSecrets {
@@ -508,7 +513,14 @@ mod tests {
         };
         let mut block = [0u8; METADATA_BLOCK_SIZE];
         header
-            .encode(&secrets, 12345, VolumeState::Encrypt, &TEST_SALT, vmk, &mut block)
+            .encode(
+                &secrets,
+                12345,
+                VolumeState::Encrypt,
+                &TEST_SALT,
+                vmk,
+                &mut block,
+            )
             .unwrap();
         block
     }

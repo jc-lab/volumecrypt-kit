@@ -26,13 +26,13 @@ pub trait HandoverPayload: Serialize + DeserializeOwned {
 }
 
 pub fn encode_payload<P: HandoverPayload>(payload: &P) -> VckResult<Vec<u8>> {
-    Ok(messagepack_serde::to_vec(payload)
-        .map_err(|err| crate::VckError::MsgpackEncode(err.to_string()))?)
+    messagepack_serde::to_vec(payload)
+        .map_err(|err| crate::VckError::MsgpackEncode(err.to_string()))
 }
 
 pub fn decode_payload<P: HandoverPayload>(bytes: &[u8]) -> VckResult<P> {
-    Ok(messagepack_serde::from_slice(bytes)
-        .map_err(|err| crate::VckError::MsgpackDecode(err.to_string()))?)
+    messagepack_serde::from_slice(bytes)
+        .map_err(|err| crate::VckError::MsgpackDecode(err.to_string()))
 }
 
 #[cfg(test)]

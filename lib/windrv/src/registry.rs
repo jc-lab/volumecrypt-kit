@@ -122,7 +122,8 @@ impl VolumeAttachRegistry {
     /// Store the boot ACPI handover essentials (called once at DriverEntry).
     pub fn set_handover(&self, info: HandoverInfo) {
         crate::vck_log!(
-            "registry: handover set partition_guid={}", info.partition_guid
+            "registry: handover set partition_guid={}",
+            info.partition_guid
         );
         *self.handover.lock() = Some(info);
     }
@@ -141,7 +142,12 @@ impl VolumeAttachRegistry {
         pdo_name: alloc::string::String,
     ) {
         crate::vck_log!("add_pdo_filter: name={} filter={:p}", pdo_name, filter_do);
-        self.pdo_filters.lock().push(PdoFilterEntry { pdo, filter_do, lower_do, pdo_name });
+        self.pdo_filters.lock().push(PdoFilterEntry {
+            pdo,
+            filter_do,
+            lower_do,
+            pdo_name,
+        });
     }
 
     /// Return the recorded PDO object name for the given filter device object
@@ -157,7 +163,10 @@ impl VolumeAttachRegistry {
     }
 
     /// Look up the filter by device pointer address (fallback).
-    pub fn find_pdo_filter(&self, dev: *mut DEVICE_OBJECT) -> Option<(*mut DEVICE_OBJECT, *mut DEVICE_OBJECT)> {
+    pub fn find_pdo_filter(
+        &self,
+        dev: *mut DEVICE_OBJECT,
+    ) -> Option<(*mut DEVICE_OBJECT, *mut DEVICE_OBJECT)> {
         let map = self.pdo_filters.lock();
         for e in map.iter() {
             if e.pdo == dev || e.lower_do == dev {
@@ -170,7 +179,10 @@ impl VolumeAttachRegistry {
     /// Look up the filter by PDO name (e.g. `\Device\HarddiskVolume5`).
     /// This is the primary lookup since Volume class PDOs may not match
     /// the device object returned by IoGetDeviceObjectPointer.
-    pub fn find_pdo_filter_by_name(&self, nt_path: &str) -> Option<(*mut DEVICE_OBJECT, *mut DEVICE_OBJECT)> {
+    pub fn find_pdo_filter_by_name(
+        &self,
+        nt_path: &str,
+    ) -> Option<(*mut DEVICE_OBJECT, *mut DEVICE_OBJECT)> {
         // Normalize: trim trailing slashes and case-fold.
         let query = nt_path.trim_end_matches('\\').to_ascii_lowercase();
         let map = self.pdo_filters.lock();
@@ -271,7 +283,9 @@ impl AttachedVolume {
     /// provisional (not-yet-keyed) attach.
     pub fn cipher(&self) -> Option<&dyn VolumeCipher> {
         match &self.io_config {
-            IoConfig::Encrypted { cipher: Some(c), .. } => Some(&**c),
+            IoConfig::Encrypted {
+                cipher: Some(c), ..
+            } => Some(&**c),
             _ => None,
         }
     }
@@ -293,7 +307,12 @@ impl AttachedVolume {
         let io = self.sweep_io.lock().clone();
         let result = {
             let mut engine = self.encryption.lock();
-            engine.progress_step(io.as_ref(), cipher, self.offset_store.as_ref(), batch_sectors)
+            engine.progress_step(
+                io.as_ref(),
+                cipher,
+                self.offset_store.as_ref(),
+                batch_sectors,
+            )
         }; // lock released here before sync_boundary
         if result.is_ok() {
             self.sync_boundary();

@@ -28,7 +28,7 @@ fn get_timestamp() -> (u64, u32) {
 pub fn debug_print(args: fmt::Arguments<'_>) {
     let (secs, millis) = get_timestamp();
     let mut line = String::new();
-    let _ = write!(&mut line, "{secs}.{millis:03} vck-driver: ");
+    let _ = write!(&mut line, "{secs}.{millis:03} vck-windrv: ");
     if line.write_fmt(args).is_err() {
         return;
     }
@@ -73,7 +73,7 @@ pub fn remaining_stack() -> u64 {
 pub fn panic_print(info: &PanicInfo<'_>) -> ! {
     let mut writer = PanicWriter::new();
     let (secs, millis) = get_timestamp();
-    let _ = write!(&mut writer, "{secs}.{millis:03} vck-driver: panic: ");
+    let _ = write!(&mut writer, "{secs}.{millis:03} vck-windrv: panic: ");
     if let Some(location) = info.location() {
         let _ = write!(
             &mut writer,
@@ -86,13 +86,7 @@ pub fn panic_print(info: &PanicInfo<'_>) -> ! {
         let _ = writer.write_str("<unknown location>");
     }
     let _ = writer.write_str(" ");
-    if let Some(message) = info.payload().downcast_ref::<&str>() {
-        let _ = writer.write_str(message);
-    } else if let Some(message) = info.payload().downcast_ref::<alloc::string::String>() {
-        let _ = writer.write_str(message.as_str());
-    } else {
-        let _ = writer.write_str("<unknown panic payload>");
-    }
+    let _ = write!(&mut writer, "{}", info.message());
     if !writer.ends_with_newline() {
         let _ = writer.write_char('\n');
     }
@@ -171,7 +165,7 @@ fn write_debugcon(bytes: &[u8]) {
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 fn write_debugcon(_bytes: &[u8]) {}
 
-/// Print a timestamped, `vck-driver:`-prefixed line to the kernel debugger
+/// Print a timestamped, `vck-windrv:`-prefixed line to the kernel debugger
 /// (`DbgPrint`) and, with the `debugcon` feature, the 0xE9 debug console.
 ///
 /// This is the driver-side counterpart of the loader's `vck_log!`

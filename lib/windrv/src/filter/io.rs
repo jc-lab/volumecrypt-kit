@@ -22,38 +22,37 @@ use core::ffi::c_void;
 use wdk_sys::{
     ntddk::{ExFreePool, IofCallDriver, IofCompleteRequest},
     CCHAR, IO_NO_INCREMENT, IRP_MJ_DEVICE_CONTROL, IRP_MJ_PNP, IRP_MJ_READ, IRP_MJ_WRITE,
-    IRP_MN_START_DEVICE, NTSTATUS,
-    PDEVICE_OBJECT, PIO_STACK_LOCATION, PIRP,
-    SL_INVOKE_ON_CANCEL, SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS, SL_PENDING_RETURNED,
+    IRP_MN_START_DEVICE, NTSTATUS, PDEVICE_OBJECT, PIO_STACK_LOCATION, PIRP, SL_INVOKE_ON_CANCEL,
+    SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS, SL_PENDING_RETURNED,
 };
 
-use core::sync::atomic::Ordering;
-
 use crate::{
-    device::DeviceExtension,
-    filter::pass_through,
-    nt::nt_success,
-    registry::AttachedVolume,
+    device::DeviceExtension, filter::pass_through, nt::nt_success, registry::AttachedVolume,
 };
 
 const STATUS_CONTINUE_COMPLETION: NTSTATUS = 0;
 const STATUS_ACCESS_DENIED: NTSTATUS = 0xC000_0022u32 as i32;
 
-const IOCTL_DISK_GET_LENGTH_INFO: u32     = 0x0007_405C;
-const IOCTL_DISK_GET_PARTITION_INFO: u32   = 0x0007_4004;
+const IOCTL_DISK_GET_LENGTH_INFO: u32 = 0x0007_405C;
+const IOCTL_DISK_GET_PARTITION_INFO: u32 = 0x0007_4004;
 const IOCTL_DISK_GET_PARTITION_INFO_EX: u32 = 0x0007_0048;
 
 fn size_field_offset(code: u32) -> Option<usize> {
     match code {
-        IOCTL_DISK_GET_LENGTH_INFO      => Some(0),
-        IOCTL_DISK_GET_PARTITION_INFO   => Some(8),
+        IOCTL_DISK_GET_LENGTH_INFO => Some(0),
+        IOCTL_DISK_GET_PARTITION_INFO => Some(8),
         IOCTL_DISK_GET_PARTITION_INFO_EX => Some(16),
         _ => None,
     }
 }
 
 unsafe fn current_sl(irp: PIRP) -> PIO_STACK_LOCATION {
-    (*irp).Tail.Overlay.__bindgen_anon_2.__bindgen_anon_1.CurrentStackLocation
+    (*irp)
+        .Tail
+        .Overlay
+        .__bindgen_anon_2
+        .__bindgen_anon_1
+        .CurrentStackLocation
 }
 
 unsafe fn next_sl(irp: PIRP) -> PIO_STACK_LOCATION {
@@ -84,9 +83,11 @@ unsafe fn intercept_size_ioctl(
     if ctx.is_null() {
         return pass_through(lower, irp);
     }
-    (*ctx).data_bytes = volume.data_sectors().saturating_mul(volume.sector_size as u64);
+    (*ctx).data_bytes = volume
+        .data_sectors()
+        .saturating_mul(volume.sector_size as u64);
 
-    let cur  = current_sl(irp);
+    let cur = current_sl(irp);
     let next = next_sl(irp);
     core::ptr::copy_nonoverlapping(cur, next, 1);
     (*next).CompletionRoutine = Some(size_ioctl_completion);
@@ -102,7 +103,7 @@ unsafe extern "C" fn size_ioctl_completion(
 ) -> NTSTATUS {
     let ctx = &*(context as *const SizeCtx);
     let stack = current_sl(irp);
-    let code  = (*stack).Parameters.DeviceIoControl.IoControlCode;
+    let code = (*stack).Parameters.DeviceIoControl.IoControlCode;
     let status = (*irp).IoStatus.__bindgen_anon_1.Status;
 
     if nt_success(status) {
@@ -117,7 +118,8 @@ unsafe extern "C" fn size_ioctl_completion(
                 );
                 crate::vck_log!(
                     "filter: size ioctl 0x{:08x} reported as {} bytes",
-                    code, ctx.data_bytes
+                    code,
+                    ctx.data_bytes
                 );
             }
         }
@@ -149,11 +151,10 @@ unsafe fn handle_filter_pnp(
     }
     // Equivalent to IoCopyCurrentIrpStackLocationToNext: the completion routine
     // needs our stack location preserved (we do NOT skip it here).
-    let cur  = current_sl(irp);
+    let cur = current_sl(irp);
     let next = next_sl(irp);
     core::ptr::copy_nonoverlapping(cur, next, 1);
-    (*next).CompletionRoutine =
-        Some(crate::filter::handover_mount::on_start_device_completed);
+    (*next).CompletionRoutine = Some(crate::filter::handover_mount::on_start_device_completed);
     (*next).Context = filter_do.cast();
     (*next).Control = (SL_INVOKE_ON_SUCCESS | SL_INVOKE_ON_ERROR | SL_INVOKE_ON_CANCEL) as u8;
     IofCallDriver(lower, irp)
@@ -170,20 +171,26 @@ unsafe fn block_irp(irp: PIRP, status: NTSTATUS) {
 }
 
 fn is_metadata_sector(volume: &AttachedVolume, byte_offset: u64, sector_size: u64) -> bool {
-    if sector_size == 0 { return false; }
+    if sector_size == 0 {
+        return false;
+    }
     let lba = byte_offset / sector_size;
     data_relative(volume, lba).is_none()
 }
 
 fn data_relative(volume: &AttachedVolume, abs_lba: u64) -> Option<u64> {
     let offset = volume.offset_sector();
-    let total  = volume.data_sectors();
+    let total = volume.data_sectors();
     abs_lba.checked_sub(offset).filter(|rel| *rel < total)
 }
 
 unsafe fn shift_offset(volume: &AttachedVolume, stack: PIO_STACK_LOCATION) {
-    let shift = volume.offset_sector().saturating_mul(volume.sector_size as u64);
-    if shift == 0 { return; }
+    let shift = volume
+        .offset_sector()
+        .saturating_mul(volume.sector_size as u64);
+    if shift == 0 {
+        return;
+    }
     let byte_offset = &mut (*stack).Parameters.Read.ByteOffset;
     byte_offset.QuadPart += shift as i64;
 }
@@ -198,7 +205,7 @@ unsafe fn shift_offset(volume: &AttachedVolume, stack: PIO_STACK_LOCATION) {
 /// `filter_do` must be one of this driver's filter device objects and `irp`
 /// a valid IRP it currently owns.
 pub unsafe fn handle_filter_irp(filter_do: PDEVICE_OBJECT, irp: PIRP) -> NTSTATUS {
-    let ext   = DeviceExtension::of(filter_do);
+    let ext = DeviceExtension::of(filter_do);
     let lower = ext.lower_device;
 
     let stack = current_sl(irp);

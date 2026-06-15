@@ -16,6 +16,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
+version = "0.0.1"
 license = "Apache-2.0"
 repository = "https://github.com/jc-lab/volumecrypt-kit"
 
@@ -30,21 +31,23 @@ panic = "abort"
 panic = "abort"
 
 [workspace.dependencies]
-aes = { version = "0.8", default-features = false }
-cbc = { version = "0.1", default-features = false }
-cipher = { version = "0.4", default-features = false, features = ["block-padding"] }
+aes = { version = "0.9", default-features = false }
+cbc = { version = "0.2", default-features = false }
+cipher = { version = "0.5", default-features = false, features = ["block-padding"] }
 crc = { version = "3", default-features = false }
-hkdf = { version = "0.12", default-features = false }
-hmac = { version = "0.12", default-features = false }
+hkdf = { version = "0.13", default-features = false }
+hmac = { version = "0.13", default-features = false }
 irql = { version = "0.1.6" }
 messagepack-serde = { version = "0.2", default-features = false, features = ["alloc"] }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_bytes = { version = "0.11", default-features = false, features = ["alloc"] }
-sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
-spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
-thiserror = { version = "1", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+spin = { version = "0.12", default-features = false, features = ["mutex", "spin_mutex"] }
+thiserror = { version = "2", default-features = false }
 uuid = { version = "1", default-features = false, features = ["serde"] }
-xts-mode = { version = "0.5.1", default-features = false }
+xts-mode = { version = "0.6.0", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc", "derive"] }
 wdk-alloc = "0.4.1"
 wdk-build = "0.5.1"
+
+vck-common = { version = "0.0.1", path = "lib/common", default-features = false }

@@ -103,9 +103,9 @@ impl VckConfig {
         // Device path of the partition (device) our loader image came from.
         let li = open_protocol_exclusive::<LoadedImage>(image_handle())
             .map_err(|e| VckError::Io(format!("open LoadedImage failed: {e:?}")))?;
-        let dev_handle = li
-            .device()
-            .ok_or(VckError::Io(String::from("loaded image has no device handle")))?;
+        let dev_handle = li.device().ok_or(VckError::Io(String::from(
+            "loaded image has no device handle",
+        )))?;
         let dev_path = open_protocol_exclusive::<DevicePath>(dev_handle)
             .map_err(|e| VckError::Io(format!("open device DevicePath failed: {e:?}")))?;
 
@@ -177,7 +177,9 @@ impl JsonObject {
             }
             i = skip_ws(bytes, i + 1);
             if bytes.get(i) != Some(&b'"') {
-                return Err(VckError::InvalidData("vck.json: only string values supported"));
+                return Err(VckError::InvalidData(
+                    "vck.json: only string values supported",
+                ));
             }
             let (value, next) = parse_string(bytes, i)?;
             entries.push((key, value));

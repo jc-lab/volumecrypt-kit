@@ -49,6 +49,6 @@ fn check_encrypted_metadata_roundtrip() -> bool {
 
 /// AES-XTS encrypt then decrypt a sector returns the original plaintext.
 fn check_aes_xts_sector_roundtrip() -> bool {
-    // TODO(crypto-test): vck_driver::crypto::AesXtsCipher encrypt/decrypt.
+    // TODO(crypto-test): vck_windrv::crypto::AesXtsCipher encrypt/decrypt.
     false
 }

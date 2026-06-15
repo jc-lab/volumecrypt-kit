@@ -22,13 +22,13 @@ impl KernelExecutor {
 
     /// Spawn a detached task driven by completion-callback wakers.
     pub fn spawn<F: Future<Output = ()> + Send + 'static>(&self, fut: F) {
-        let _ = fut;
+        drop(fut);
         todo!("enqueue future, poll on waker from IRP completion")
     }
 
     /// Block the current (PASSIVE_LEVEL) thread until `fut` resolves.
     pub fn block_on<F: Future>(&self, fut: F) -> F::Output {
-        let _ = fut;
+        drop(fut);
         todo!("poll loop with KeWaitForSingleObject on a waker event")
     }
 }

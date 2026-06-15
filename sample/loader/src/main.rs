@@ -14,6 +14,7 @@
 //!   4. install the transparent Block IO decrypt hook (handing it the cipher);
 //!   5. publish the ACPI/UEFI-variable handover for the driver;
 //!   6. chainload the next OS loader.
+//!
 //! See docs/architecture.md "sample/loader" and "시스템 볼륨 부팅 흐름".
 
 #![no_std]

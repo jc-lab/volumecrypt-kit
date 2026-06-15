@@ -30,12 +30,13 @@ pub fn chainload_next(next_loader: &DevicePath) -> VckResult<()> {
         LoadImageSource::FromDevicePath {
             // `next_loader` is our owned `Box<DevicePath>`; deref to the borrowed
             // `&uefi::proto::device_path::DevicePath` the FFI source expects.
-            device_path: &**next_loader,
+            device_path: next_loader,
             boot_policy: BootPolicy::ExactMatch,
         },
     )
     .map_err(|e| VckError::Io(format!("LoadImage(next loader) failed: {e:?}")))?;
 
-    start_image(image).map_err(|e| VckError::Io(format!("StartImage(next loader) failed: {e:?}")))?;
+    start_image(image)
+        .map_err(|e| VckError::Io(format!("StartImage(next loader) failed: {e:?}")))?;
     Ok(())
 }

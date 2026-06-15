@@ -81,6 +81,7 @@ impl BlockIoHook {
     /// # Safety
     /// `protocol` must be a live `EFI_BLOCK_IO_PROTOCOL` instance and `engine` a
     /// pointer that outlives the hook (the loader leaks the engine to `'static`).
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn install(
         protocol: *mut BlockIoProtocol,
         engine: *const BlockIoHookEngine,
@@ -111,7 +112,7 @@ impl BlockIoHook {
                 (*self.protocol).read_blocks = entry.original;
                 let entries = &mut *HOOK_TABLE.entries.get();
                 for slot in entries.iter_mut() {
-                    if matches!(slot, Some(e) if e.protocol == self.protocol as *const BlockIoProtocol) {
+                    if matches!(slot, Some(e) if core::ptr::eq(e.protocol, self.protocol)) {
                         *slot = None;
                     }
                 }
@@ -125,6 +126,11 @@ impl BlockIoHook {
 ///
 /// Calls the saved original read to fill `buffer`, then runs the engine's
 /// per-sector AES-XTS decryption decision over the bytes just read.
+///
+/// # Safety
+/// Called by UEFI firmware as an `EFI_BLOCK_IO_PROTOCOL.ReadBlocks` callback.
+/// `this` must be a valid `BlockIoProtocol` registered in `HOOK_TABLE`.
+/// `buffer` must point to at least `buffer_size` writable bytes.
 pub unsafe extern "efiapi" fn hooked_read_blocks(
     this: *const BlockIoProtocol,
     media_id: u32,

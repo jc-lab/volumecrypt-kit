@@ -10,16 +10,14 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicPtr, Ordering};
 
 use wdk_sys::{
-    ntddk::MmMapLockedPagesSpecifyCache,
-    DRIVER_CANCEL, LARGE_INTEGER, PIO_STACK_LOCATION, PIRP, PMDL,
+    ntddk::MmMapLockedPagesSpecifyCache, DRIVER_CANCEL, LARGE_INTEGER, PIO_STACK_LOCATION, PIRP,
+    PMDL,
 };
 
 extern "C" {
     /// Query the performance counter. When `performance_frequency` is non-null
     /// the counter frequency (ticks/second) is written there. Callable at any IRQL.
-    pub fn KeQueryPerformanceCounter(
-        performance_frequency: *mut LARGE_INTEGER,
-    ) -> LARGE_INTEGER;
+    pub fn KeQueryPerformanceCounter(performance_frequency: *mut LARGE_INTEGER) -> LARGE_INTEGER;
 }
 
 /// Read the system clock as a Windows FILETIME (100-ns ticks since 1601-01-01).
@@ -56,6 +54,11 @@ const NORMAL_PAGE_PRIORITY: u32 = 16;
 /// Returns a pointer to the caller's I/O stack location in the specified IRP.
 ///
 /// Equivalent to the `IoGetCurrentIrpStackLocation` macro in ntddk.h.
+///
+/// # Safety
+/// `irp` must be a valid, fully-initialised IRP. Caller must hold the IRP
+/// from a dispatch routine or completion callback and must not use the
+/// returned pointer after the IRP has been completed or freed.
 #[allow(non_snake_case)]
 pub unsafe fn IoGetCurrentIrpStackLocation(irp: PIRP) -> PIO_STACK_LOCATION {
     (*irp)
@@ -69,6 +72,11 @@ pub unsafe fn IoGetCurrentIrpStackLocation(irp: PIRP) -> PIO_STACK_LOCATION {
 /// Returns a pointer to the next-lower driver's I/O stack location.
 ///
 /// Equivalent to `IoGetNextIrpStackLocation` in ntddk.h.
+///
+/// # Safety
+/// `irp` must be a valid IRP with at least one additional stack location
+/// allocated below the current location (i.e. the IRP stack size must be
+/// greater than the current stack index).
 #[allow(non_snake_case)]
 pub unsafe fn IoGetNextIrpStackLocation(irp: PIRP) -> PIO_STACK_LOCATION {
     (*irp)
@@ -122,13 +130,16 @@ pub unsafe fn MmGetSystemAddressForMdlSafe(mdl: PMDL) -> *mut c_void {
 pub unsafe fn IoSetCancelRoutine(irp: PIRP, routine: DRIVER_CANCEL) -> DRIVER_CANCEL {
     let new_ptr = match routine {
         Some(r) => r as *mut c_void,
-        None    => core::ptr::null_mut(),
+        None => core::ptr::null_mut(),
     };
     let slot = &raw mut (*irp).CancelRoutine as *mut _ as *mut AtomicPtr<c_void>;
     let old_ptr = (*slot).swap(new_ptr, Ordering::SeqCst);
     if old_ptr.is_null() {
         None
     } else {
-        Some(core::mem::transmute(old_ptr))
+        Some(core::mem::transmute::<
+            *mut c_void,
+            unsafe extern "C" fn(*mut wdk_sys::_DEVICE_OBJECT, *mut wdk_sys::_IRP),
+        >(old_ptr))
     }
 }

@@ -3,11 +3,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 [package]
-name = "vck-driver"
-version = "0.1.0"
+name = "vck-windrv"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Windows kernel-mode driver framework for VolumeCrypt-Kit"
 
 [build-dependencies]
 wdk-build.workspace = true
@@ -18,6 +19,8 @@ std = []
 debugcon = []
 
 [dependencies]
+vck-common = { workspace = true, default-features = false }
+
 aes.workspace = true
 irql.workspace = true
 messagepack-serde = { workspace = true, default-features = false }
@@ -25,5 +28,4 @@ serde = { workspace = true, default-features = false }
 serde_bytes = { workspace = true }
 spin = { version = "0.9", default-features = false, features = ["mutex", "spin_mutex"] }
 xts-mode.workspace = true
-vck-common = { path = "../common", default-features = false }
 wdk-sys = "0.5.1"

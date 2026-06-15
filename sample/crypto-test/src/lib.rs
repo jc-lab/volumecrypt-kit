@@ -33,7 +33,7 @@ pub unsafe extern "system" fn DriverEntry(
 ) -> NTSTATUS {
     let _ = (driver, registry_path);
     let report = tests::run_all();
-    vck_driver::vck_log!(
+    vck_windrv::vck_log!(
         "crypto-test: {} passed, {} failed",
         report.passed,
         report.failed
@@ -45,5 +45,5 @@ pub unsafe extern "system" fn DriverEntry(
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    vck_driver::debug::panic_print(info)
+    vck_windrv::debug::panic_print(info)
 }

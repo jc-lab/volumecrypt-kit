@@ -33,7 +33,7 @@ SPDX-License-Identifier: Apache-2.0
 | `make test-vm-os-encrypt` | OS 볼륨 암호화→로더 경유 부팅→런타임 복호화 E2E | win11 VM |
 
 드라이버 빌드 검증은 반드시 드라이버 바이너리 크레이트(`vck-sample-driver`)를 통해 합니다
-(`cargo build -p vck-driver` 단독은 `wdk-sys` 바인딩이 비어 빌드되지 않음).
+(`cargo build -p vck-windrv` 단독은 `wdk-sys` 바인딩이 비어 빌드되지 않음).
 
 예시(msys2 셸):
 
@@ -66,7 +66,7 @@ qemu:
     - "isa-debugcon,iobase=0xe9,chardev=debugout"
 ```
 
-드라이버와 로더는 동일한 `vck_log!` 매크로로 `{timestamp} vck-driver: …` / `{timestamp} vck-loader: …`
+드라이버와 로더는 동일한 `vck_log!` 매크로로 `{timestamp} vck-windrv: …` / `{timestamp} vck-loader: …`
 형식의 줄을 이 포트에 출력합니다(`lib/windrv/src/debug.rs`, `lib/loader/src/debug.rs`).
 
 ### 크래시 덤프 분석 (cdb)

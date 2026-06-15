@@ -73,7 +73,7 @@ impl KernelVolumeIo {
     /// Open `volume_id.device_path` (an NT path such as `\??\D:`) for raw
     /// synchronous I/O and enable extended-DASD access on the handle.
     pub fn open(volume_id: &VolumeId, sector_size: u32, total_sectors: u64) -> VckResult<Self> {
-        let name = UnicodeString::from_str(&volume_id.device_path);
+        let name = UnicodeString::new(&volume_id.device_path);
 
         let mut oa: OBJECT_ATTRIBUTES = unsafe { core::mem::zeroed() };
         oa.Length = size_of::<OBJECT_ATTRIBUTES>() as u32;
@@ -92,7 +92,9 @@ impl KernelVolumeIo {
                 FILE_ATTRIBUTE_NORMAL,
                 FILE_SHARE_READ | FILE_SHARE_WRITE,
                 FILE_OPEN,
-                FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE | FILE_NO_INTERMEDIATE_BUFFERING,
+                FILE_SYNCHRONOUS_IO_NONALERT
+                    | FILE_NON_DIRECTORY_FILE
+                    | FILE_NO_INTERMEDIATE_BUFFERING,
                 null_mut(),
                 0,
             )
@@ -130,7 +132,11 @@ impl KernelVolumeIo {
     /// as a KernelVolumeIo, querying geometry from it. The handle ownership is
     /// transferred — `Drop` will call `ZwClose` on it.
     pub fn from_handle_query(handle: wdk_sys::HANDLE) -> VckResult<Self> {
-        let mut me = Self { handle, sector_size: 0, total_sectors: 0 };
+        let mut me = Self {
+            handle,
+            sector_size: 0,
+            total_sectors: 0,
+        };
         me.allow_extended_dasd_io();
         me.query_geometry()?;
         Ok(me)
@@ -153,10 +159,10 @@ impl KernelVolumeIo {
             ObOpenObjectByPointer(
                 device_object.cast::<c_void>(),
                 OBJ_KERNEL_HANDLE,
-                null_mut(),         // PassedAccessState
+                null_mut(), // PassedAccessState
                 FILE_READ_DATA | FILE_WRITE_DATA,
-                null_mut(),         // ObjectType — null = any
-                0,                  // KernelMode
+                null_mut(), // ObjectType — null = any
+                0,          // KernelMode
                 &mut handle,
             )
         };
@@ -304,8 +310,7 @@ impl KernelVolumeIo {
         let byte_offset = lba
             .checked_mul(self.sector_size as u64)
             .ok_or_else(|| VckError::Io("sector offset overflow".into()))?;
-        let length =
-            u32::try_from(len).map_err(|_| VckError::Io("I/O length too large".into()))?;
+        let length = u32::try_from(len).map_err(|_| VckError::Io("I/O length too large".into()))?;
 
         let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
         let mut offset = LARGE_INTEGER {
@@ -389,15 +394,17 @@ impl SectorIo for KernelVolumeIo {
 // acquire the same lock in a filter completion routine.
 // ---------------------------------------------------------------------------
 
+use crate::nt::STATUS_PENDING;
 use wdk_sys::{
     ntddk::{
         IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IofCallDriver,
         KeInitializeEvent, KeWaitForSingleObject,
     },
-    KEVENT, IRP_MJ_READ, IRP_MJ_WRITE, _EVENT_TYPE::NotificationEvent, _KWAIT_REASON::Executive,
+    _EVENT_TYPE::NotificationEvent,
+    _KWAIT_REASON::Executive,
     _MODE::KernelMode,
+    IRP_MJ_READ, IRP_MJ_WRITE, KEVENT,
 };
-use crate::nt::STATUS_PENDING;
 
 /// IRP-based sector I/O routed directly to `device_object`, bypassing any
 /// filter sitting above it. The caller guarantees the device outlives this
@@ -415,7 +422,11 @@ impl LowerDeviceIo {
     /// Wrap a lower device object. Does NOT take a reference; the caller must
     /// ensure the device outlives this value.
     pub fn new(device_object: PDEVICE_OBJECT, sector_size: u32, total_sectors: u64) -> Self {
-        Self { device_object, sector_size, total_sectors }
+        Self {
+            device_object,
+            sector_size,
+            total_sectors,
+        }
     }
 
     /// Send a METHOD_BUFFERED disk IOCTL (no input) directly to the device via an
@@ -442,7 +453,9 @@ impl LowerDeviceIo {
             )
         };
         if irp.is_null() {
-            return Err(VckError::Io("IoBuildDeviceIoControlRequest(lower) failed".into()));
+            return Err(VckError::Io(
+                "IoBuildDeviceIoControlRequest(lower) failed".into(),
+            ));
         }
         let mut status = unsafe { IofCallDriver(self.device_object, irp) };
         if status == STATUS_PENDING {
@@ -471,7 +484,9 @@ impl LowerDeviceIo {
         let off = DISK_GEOMETRY_BYTES_PER_SECTOR_OFFSET;
         let bps = u32::from_le_bytes(geom[off..off + 4].try_into().unwrap());
         if bps == 0 {
-            return Err(VckError::Io("lower device reported zero sector size".into()));
+            return Err(VckError::Io(
+                "lower device reported zero sector size".into(),
+            ));
         }
         let mut len = [0u8; 8];
         self.device_ioctl(IOCTL_DISK_GET_LENGTH_INFO, &mut len)?;
@@ -508,7 +523,9 @@ impl LowerDeviceIo {
 
         let mut event: KEVENT = unsafe { core::mem::zeroed() };
         let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
-        let mut offset = LARGE_INTEGER { QuadPart: byte_offset as i64 };
+        let mut offset = LARGE_INTEGER {
+            QuadPart: byte_offset as i64,
+        };
 
         unsafe { KeInitializeEvent(&mut event, NotificationEvent, 0) };
 
@@ -524,7 +541,9 @@ impl LowerDeviceIo {
             )
         };
         if irp.is_null() {
-            return Err(VckError::Io("IoBuildSynchronousFsdRequest(lower) failed".into()));
+            return Err(VckError::Io(
+                "IoBuildSynchronousFsdRequest(lower) failed".into(),
+            ));
         }
 
         let mut status = unsafe { IofCallDriver(self.device_object, irp) };
@@ -548,8 +567,12 @@ impl LowerDeviceIo {
 }
 
 impl SectorIo for LowerDeviceIo {
-    fn sector_size(&self) -> u32 { self.sector_size }
-    fn total_sectors(&self) -> u64 { self.total_sectors }
+    fn sector_size(&self) -> u32 {
+        self.sector_size
+    }
+    fn total_sectors(&self) -> u64 {
+        self.total_sectors
+    }
 
     fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> VckResult<()> {
         self.run_sync(IRP_MJ_READ, lba, buf.as_mut_ptr(), buf.len())
@@ -568,7 +591,7 @@ impl SectorIo for LowerDeviceIo {
 /// Open a synchronous kernel handle to `nt_path`. Returns `None` if the open
 /// fails (caller decides whether that is fatal).
 pub fn open_volume_handle_raw(nt_path: &str) -> Option<wdk_sys::HANDLE> {
-    let name = UnicodeString::from_str(nt_path);
+    let name = UnicodeString::new(nt_path);
     let mut oa: OBJECT_ATTRIBUTES = unsafe { core::mem::zeroed() };
     oa.Length = size_of::<OBJECT_ATTRIBUTES>() as u32;
     oa.ObjectName = name.as_ptr();
@@ -591,7 +614,11 @@ pub fn open_volume_handle_raw(nt_path: &str) -> Option<wdk_sys::HANDLE> {
             0,
         )
     };
-    if nt_success(status) { Some(handle) } else { None }
+    if nt_success(status) {
+        Some(handle)
+    } else {
+        None
+    }
 }
 
 /// Send a no-in/no-out FSCTL to `handle`. Returns the NTSTATUS.
@@ -611,27 +638,44 @@ impl OffsetSectorIo {
         inner: alloc::sync::Arc<dyn vck_common::SectorIo>,
         partition_start_lba: u64,
     ) -> Self {
-        Self { inner, partition_start_lba }
+        Self {
+            inner,
+            partition_start_lba,
+        }
     }
 }
 
 impl vck_common::SectorIo for OffsetSectorIo {
-    fn sector_size(&self) -> u32 { self.inner.sector_size() }
-    fn total_sectors(&self) -> u64 { self.inner.total_sectors() }
+    fn sector_size(&self) -> u32 {
+        self.inner.sector_size()
+    }
+    fn total_sectors(&self) -> u64 {
+        self.inner.total_sectors()
+    }
     fn read_sectors(&self, lba: u64, buf: &mut [u8]) -> VckResult<()> {
         self.inner.read_sectors(self.partition_start_lba + lba, buf)
     }
     fn write_sectors(&self, lba: u64, buf: &[u8]) -> VckResult<()> {
-        self.inner.write_sectors(self.partition_start_lba + lba, buf)
+        self.inner
+            .write_sectors(self.partition_start_lba + lba, buf)
     }
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn send_fsctl(handle: wdk_sys::HANDLE, code: u32) -> i32 {
     let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
     unsafe {
         ZwFsControlFile(
-            handle, null_mut(), None, null_mut(), &mut iosb,
-            code, null_mut(), 0, null_mut(), 0,
+            handle,
+            null_mut(),
+            None,
+            null_mut(),
+            &mut iosb,
+            code,
+            null_mut(),
+            0,
+            null_mut(),
+            0,
         )
     }
 }

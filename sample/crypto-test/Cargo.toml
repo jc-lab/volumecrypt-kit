@@ -4,7 +4,7 @@
 
 [package]
 name = "vck-crypto-test-driver"
-version = "0.1.0"
+version = "0.0.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -20,6 +20,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 vck-common = { path = "../../lib/common", default-features = false }
-vck-driver = { path = "../../lib/windrv" }
+vck-windrv = { path = "../../lib/windrv" }
 wdk-alloc.workspace = true
 wdk-sys = "0.5.1"

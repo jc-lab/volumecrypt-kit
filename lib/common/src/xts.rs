@@ -37,7 +37,7 @@
 //! with a caller's frame. (A prior build with `+aes` inlined the unrolled AES
 //! into the IOCTL path and double-faulted on stack overflow.)
 
-use aes::cipher::{BlockDecrypt, BlockEncrypt, KeyInit};
+use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::{Aes256, Block};
 
 use crate::{VckError, VckResult};
@@ -101,10 +101,10 @@ fn gf128_mul(t: Block) -> Block {
 
 impl XtsVolumeCipher {
     pub fn new(key1: &[u8; 32], key2: &[u8; 32]) -> VckResult<Self> {
-        let cipher_1 = Aes256::new_from_slice(key1)
-            .map_err(|_| VckError::CryptoFailed("invalid XTS key1"))?;
-        let cipher_2 = Aes256::new_from_slice(key2)
-            .map_err(|_| VckError::CryptoFailed("invalid XTS key2"))?;
+        let cipher_1 =
+            Aes256::new_from_slice(key1).map_err(|_| VckError::CryptoFailed("invalid XTS key1"))?;
+        let cipher_2 =
+            Aes256::new_from_slice(key2).map_err(|_| VckError::CryptoFailed("invalid XTS key2"))?;
         Ok(Self { cipher_1, cipher_2 })
     }
 
@@ -138,7 +138,7 @@ impl XtsVolumeCipher {
     #[inline(never)]
     fn encrypt_sector_inner(&self, rel_sector: u64, sector: &mut [u8]) {
         // T_0 = AES_K2(sector_number as 128-bit little-endian)
-        let mut tw = *Block::from_slice(&(rel_sector as u128).to_le_bytes());
+        let mut tw: Block = (rel_sector as u128).to_le_bytes().into();
         self.cipher_2.encrypt_block(&mut tw);
 
         let n = sector.len() / 16;
@@ -149,18 +149,24 @@ impl XtsVolumeCipher {
         while off + BATCH <= n {
             let mut ts = [Block::default(); BATCH];
             ts[0] = tw;
-            for i in 1..BATCH { ts[i] = gf128_mul(ts[i - 1]); }
+            for i in 1..BATCH {
+                ts[i] = gf128_mul(ts[i - 1]);
+            }
             tw = gf128_mul(ts[BATCH - 1]);
 
             let mut batch = [Block::default(); BATCH];
             for i in 0..BATCH {
                 let src = &sector[(off + i) * 16..(off + i + 1) * 16];
-                for j in 0..16 { batch[i][j] = src[j] ^ ts[i][j]; }
+                for j in 0..16 {
+                    batch[i][j] = src[j] ^ ts[i][j];
+                }
             }
             self.cipher_1.encrypt_blocks(&mut batch);
             for i in 0..BATCH {
                 let dst = &mut sector[(off + i) * 16..(off + i + 1) * 16];
-                for j in 0..16 { dst[j] = batch[i][j] ^ ts[i][j]; }
+                for j in 0..16 {
+                    dst[j] = batch[i][j] ^ ts[i][j];
+                }
             }
             off += BATCH;
         }
@@ -168,11 +174,15 @@ impl XtsVolumeCipher {
         // Scalar tail for sectors whose block count is not a multiple of BATCH.
         while off < n {
             let block = &mut sector[off * 16..(off + 1) * 16];
-            for j in 0..16 { block[j] ^= tw[j]; }
-            let mut ga = *Block::from_slice(block);
+            for j in 0..16 {
+                block[j] ^= tw[j];
+            }
+            let mut ga: Block = Block::try_from(&block[..]).unwrap();
             self.cipher_1.encrypt_block(&mut ga);
             block.copy_from_slice(&ga);
-            for j in 0..16 { block[j] ^= tw[j]; }
+            for j in 0..16 {
+                block[j] ^= tw[j];
+            }
             tw = gf128_mul(tw);
             off += 1;
         }
@@ -181,7 +191,7 @@ impl XtsVolumeCipher {
     #[inline(never)]
     fn decrypt_sector_inner(&self, rel_sector: u64, sector: &mut [u8]) {
         // Tweak is always encrypted with K2 (even during decryption).
-        let mut tw = *Block::from_slice(&(rel_sector as u128).to_le_bytes());
+        let mut tw: Block = (rel_sector as u128).to_le_bytes().into();
         self.cipher_2.encrypt_block(&mut tw);
 
         let n = sector.len() / 16;
@@ -190,29 +200,39 @@ impl XtsVolumeCipher {
         while off + BATCH <= n {
             let mut ts = [Block::default(); BATCH];
             ts[0] = tw;
-            for i in 1..BATCH { ts[i] = gf128_mul(ts[i - 1]); }
+            for i in 1..BATCH {
+                ts[i] = gf128_mul(ts[i - 1]);
+            }
             tw = gf128_mul(ts[BATCH - 1]);
 
             let mut batch = [Block::default(); BATCH];
             for i in 0..BATCH {
                 let src = &sector[(off + i) * 16..(off + i + 1) * 16];
-                for j in 0..16 { batch[i][j] = src[j] ^ ts[i][j]; }
+                for j in 0..16 {
+                    batch[i][j] = src[j] ^ ts[i][j];
+                }
             }
             self.cipher_1.decrypt_blocks(&mut batch);
             for i in 0..BATCH {
                 let dst = &mut sector[(off + i) * 16..(off + i + 1) * 16];
-                for j in 0..16 { dst[j] = batch[i][j] ^ ts[i][j]; }
+                for j in 0..16 {
+                    dst[j] = batch[i][j] ^ ts[i][j];
+                }
             }
             off += BATCH;
         }
 
         while off < n {
             let block = &mut sector[off * 16..(off + 1) * 16];
-            for j in 0..16 { block[j] ^= tw[j]; }
-            let mut ga = *Block::from_slice(block);
+            for j in 0..16 {
+                block[j] ^= tw[j];
+            }
+            let mut ga: Block = Block::try_from(&block[..]).unwrap();
             self.cipher_1.decrypt_block(&mut ga);
             block.copy_from_slice(&ga);
-            for j in 0..16 { block[j] ^= tw[j]; }
+            for j in 0..16 {
+                block[j] ^= tw[j];
+            }
             tw = gf128_mul(tw);
             off += 1;
         }
