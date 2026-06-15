@@ -8,6 +8,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "UEFI pre-boot loader framework for VolumeCrypt-Kit"
 
 [dependencies]
 vck-common = { path = "../common", default-features = false, features = ["uefi"] }
