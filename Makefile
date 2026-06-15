@@ -38,6 +38,10 @@ UEFI_RUSTFLAGS = -C target-feature=-soft-float
 # Built in release: unoptimized debug frames overflow the small (~12 KiB)
 # kernel stack on the metadata/crypto path.
 
+clippy-driver:
+	$(LOAD_ENV)
+	cargo clippy -p vck-driver -p vck-sample-driver -p vck-crypto-test-driver -- -D warnings
+
 build-driver: testing/signing/MyTestDriverCert.cer
 	$(LOAD_ENV)
 	RUSTFLAGS="$(DRIVER_RUSTFLAGS)" cargo build -p vck-sample-driver --target x86_64-pc-windows-msvc --release

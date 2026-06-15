@@ -33,11 +33,11 @@ use wdk_sys::{
         IofCompleteRequest, KeInitializeEvent, KeSetEvent, KeWaitForSingleObject,
         ObReferenceObjectByHandle, ObfDereferenceObject, PsCreateSystemThread, ZwClose,
     },
-    CCHAR, HANDLE, IO_NO_INCREMENT, KEVENT, LARGE_INTEGER, NTSTATUS, PDEVICE_OBJECT,
-    PIO_STACK_LOCATION, PIRP, SL_PENDING_RETURNED,
     _EVENT_TYPE::SynchronizationEvent,
     _KWAIT_REASON::Executive,
     _MODE::KernelMode,
+    CCHAR, HANDLE, IO_NO_INCREMENT, KEVENT, LARGE_INTEGER, NTSTATUS, PDEVICE_OBJECT,
+    PIO_STACK_LOCATION, PIRP, SL_PENDING_RETURNED,
 };
 
 use crate::{
@@ -94,6 +94,10 @@ unsafe impl Sync for VolumeThread {}
 impl VolumeThread {
     /// Create and start the thread for `volume`. Returns a heap box whose raw
     /// pointer is stored in the filter's DeviceExtension.
+    ///
+    /// # Safety
+    /// Must be called at IRQL PASSIVE_LEVEL. The returned `Box` must outlive the
+    /// system thread it spawns; call [`VolumeThread::stop`] before dropping.
     pub unsafe fn start(volume: Arc<AttachedVolume>) -> Box<VolumeThread> {
         let mut vt = Box::new(VolumeThread {
             queue: Mutex::new(VecDeque::new()),
@@ -145,11 +149,16 @@ impl VolumeThread {
 
     /// Stop the thread, wait for it to exit, and complete any queued IRPs as
     /// cancelled. Safe to call once; consumes via Box drop afterwards.
+    ///
+    /// # Safety
+    /// Must be called at IRQL PASSIVE_LEVEL. Must not be called more than once
+    /// on the same `VolumeThread`; the caller must drop the owning `Box`
+    /// immediately after.
     pub unsafe fn stop(&self) {
         self.shutdown.store(true, Ordering::Release);
         self.signal();
         if !self.thread.is_null() {
-            KeWaitForSingleObject(self.thread, Executive, KernelMode as i8, 0, null_mut());
+            let _ = KeWaitForSingleObject(self.thread, Executive, KernelMode as i8, 0, null_mut());
             ObfDereferenceObject(self.thread);
         }
     }
@@ -232,6 +241,11 @@ unsafe fn claim_cancelled(irp: PIRP) -> bool {
 
 /// Wake the thread bound to `volume` (e.g. after start_encrypt transitions the
 /// engine state) so the sweep resumes promptly.
+///
+/// # Safety
+/// `volume.filter_device` must be a valid filter device object or null.
+/// Caller must ensure the filter device and its extension are not concurrently
+/// freed.
 pub unsafe fn wake_for(volume: &AttachedVolume) {
     let filter_do = volume.filter_device.load(Ordering::Acquire);
     if filter_do.is_null() {
@@ -286,7 +300,7 @@ unsafe extern "C" fn thread_main(context: *mut c_void) {
             let mut timeout = LARGE_INTEGER {
                 QuadPart: IDLE_TIMEOUT_100NS,
             };
-            KeWaitForSingleObject(
+            let _ = KeWaitForSingleObject(
                 &vt.wake as *const KEVENT as *mut c_void,
                 Executive,
                 KernelMode as i8,

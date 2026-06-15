@@ -231,7 +231,7 @@ fn handle_jvck_prepare_adddevice_path(
     registry: &VolumeAttachRegistry,
     req: JvckVolumePrepareReq,
     nt_path: String,
-    driver: *mut wdk_sys::DRIVER_OBJECT,
+    _driver: *mut wdk_sys::DRIVER_OBJECT,
     filter_do: wdk_sys::PDEVICE_OBJECT,
     lower_do: wdk_sys::PDEVICE_OBJECT,
 ) -> VckResult<IoctlResponse> {
@@ -354,7 +354,7 @@ fn handle_jvck_prepare_adddevice_path(
         if let Some(h) = open_volume_handle_raw(&nt_path) {
             let mut iosb: wdk_sys::IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
             unsafe {
-                ZwDeviceIoControlFile(
+                let _ = ZwDeviceIoControlFile(
                     h,
                     null_mut(),
                     None,
@@ -366,7 +366,7 @@ fn handle_jvck_prepare_adddevice_path(
                     sdn.as_mut_ptr().cast(),
                     12,
                 );
-                ZwDeviceIoControlFile(
+                let _ = ZwDeviceIoControlFile(
                     h,
                     null_mut(),
                     None,
@@ -408,10 +408,9 @@ fn handle_jvck_prepare_adddevice_path(
         // owns one clone while we keep none here.
         let probe_io: Arc<dyn SectorIo> =
             Arc::new(LowerDeviceIo::new(lower_do, sector_size, total_sectors));
-        let io_config = on_attach_volume(&req.vmk, None, probe_io).map_err(|e| {
+        let io_config = on_attach_volume(&req.vmk, None, probe_io).inspect_err(|_| {
             registry.remove(&req.volume_path);
             crate::filter::detach_filter(filter_do);
-            e
         })?;
         let (store_offset, encrypted_offset, offset_store) = io_config.geometry().ok_or(
             VckError::ValidationFailed("on_attach returned passthrough for a VMK-provided volume"),
@@ -980,11 +979,11 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
                 raw_disk_path,
                 partition_start_lba
             );
-            let disk_io = KernelVolumeIo::open(&disk_id, store_bps, disk_total).map_err(|e| {
-                registry.remove(&req.volume_path);
-                crate::filter::detach_filter(filter_do);
-                e
-            })?;
+            let disk_io =
+                KernelVolumeIo::open(&disk_id, store_bps, disk_total).inspect_err(|_| {
+                    registry.remove(&req.volume_path);
+                    crate::filter::detach_filter(filter_do);
+                })?;
             Arc::new(OffsetSectorIo::new(
                 Arc::new(disk_io) as Arc<dyn SectorIo>,
                 partition_start_lba,
@@ -999,18 +998,16 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
                 raw_partition_path
             );
             Arc::new(
-                KernelVolumeIo::open(&part_id, store_bps, store_data).map_err(|e| {
+                KernelVolumeIo::open(&part_id, store_bps, store_data).inspect_err(|_| {
                     registry.remove(&req.volume_path);
                     crate::filter::detach_filter(filter_do);
-                    e
                 })?,
             )
         } else {
             Arc::new(
-                KernelVolumeIo::open(&io_volume_id, store_bps, store_data).map_err(|e| {
+                KernelVolumeIo::open(&io_volume_id, store_bps, store_data).inspect_err(|_| {
                     registry.remove(&req.volume_path);
                     crate::filter::detach_filter(filter_do);
-                    e
                 })?,
             )
         };
@@ -1285,7 +1282,11 @@ pub fn detach_volume_with_dismount(
                     QuadPart: DELAY_100MS,
                 };
                 unsafe {
-                    KeDelayExecutionThread(0 /*KernelMode*/, 0 /*FALSE*/, &mut interval);
+                    let _ = KeDelayExecutionThread(
+                        0, /*KernelMode*/
+                        0, /*FALSE*/
+                        &mut interval,
+                    );
                 }
             }
         }
@@ -1316,7 +1317,7 @@ pub fn detach_volume_with_dismount(
             QuadPart: -5_000_000,
         }; // 500 ms
         unsafe {
-            KeDelayExecutionThread(0, 0, &mut interval);
+            let _ = KeDelayExecutionThread(0, 0, &mut interval);
         }
     }
 
@@ -1444,7 +1445,7 @@ fn handle_bench_aes(input: &[u8]) -> VckResult<IoctlResponse> {
     }
     unsafe { core::ptr::write_bytes(buf, 0u8, CHUNK_BYTES) };
 
-    let chunks = ((size_bytes as usize + CHUNK_BYTES - 1) / CHUNK_BYTES) as u64;
+    let chunks = (size_bytes as usize).div_ceil(CHUNK_BYTES) as u64;
     let actual_bytes = chunks * CHUNK_BYTES as u64;
     let actual_mib = actual_bytes / (1024 * 1024);
 
@@ -1475,16 +1476,8 @@ fn handle_bench_aes(input: &[u8]) -> VckResult<IoctlResponse> {
     let enc_ticks = unsafe { enc_end.QuadPart - enc_start.QuadPart } as u64;
     let dec_ticks = unsafe { dec_end.QuadPart - dec_start.QuadPart } as u64;
 
-    let encrypt_mib_s = if enc_ticks == 0 {
-        0
-    } else {
-        actual_mib * freq_val / enc_ticks
-    };
-    let decrypt_mib_s = if dec_ticks == 0 {
-        0
-    } else {
-        actual_mib * freq_val / dec_ticks
-    };
+    let encrypt_mib_s = (actual_mib * freq_val).checked_div(enc_ticks).unwrap_or(0);
+    let decrypt_mib_s = (actual_mib * freq_val).checked_div(dec_ticks).unwrap_or(0);
 
     crate::vck_log!(
         "bench_aes: size={}MiB enc={}MiB/s dec={}MiB/s",

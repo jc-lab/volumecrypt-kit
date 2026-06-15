@@ -82,18 +82,18 @@ jobs:
       - name: install x86_64-unknown-uefi
         run: rustup target add x86_64-unknown-uefi
 
-      - name: fmt
+      - name: fmt (host)
         run: cargo fmt --check
         
       - name: clippy (vck-common, host)
         run: cargo clippy -p vck-common -- -D warnings
 
-      - name: clippy (vck-driver, kernel target)
+      - name: clippy (vck-driver)
         shell: msys2 {0}
-        run: cargo clippy -p vck-driver -p vck-sample-driver -p vck-crypto-test-driver -- -D warnings
+        run: |
+          make clippy-driver
 
       - name: clippy (vck-loader, UEFI target)
-        shell: msys2 {0}
         run: cargo clippy -p vck-loader -p vck-sample-loader --target x86_64-unknown-uefi -- -D warnings
 
       - name: cargo test (host)

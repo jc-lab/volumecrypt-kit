@@ -41,7 +41,7 @@ pub struct UnicodeString {
 }
 
 impl UnicodeString {
-    pub fn from_str(value: &str) -> Self {
+    pub fn new(value: &str) -> Self {
         let mut buffer: Vec<u16> = value.encode_utf16().collect();
         buffer.push(0);
 

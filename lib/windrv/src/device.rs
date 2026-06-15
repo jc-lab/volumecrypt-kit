@@ -110,13 +110,14 @@ impl ControlDevice {
     /// `security` (supplied by the driver binary) controls the device's SDDL so
     /// the OS gates who may open it and with what access. Non-exclusive so the
     /// management app and the driver's own shutdown self-IOCTL can both reach it.
+    #[allow(clippy::not_unsafe_ptr_arg_deref)]
     pub fn create(
         driver_object: *mut DRIVER_OBJECT,
         security: &ControlDeviceSecurity<'_>,
     ) -> VckResult<Self> {
-        let device_name = UnicodeString::from_str(DEVICE_NAME);
-        let symlink_name = UnicodeString::from_str(SYMLINK_NAME);
-        let sddl = UnicodeString::from_str(security.sddl);
+        let device_name = UnicodeString::new(DEVICE_NAME);
+        let symlink_name = UnicodeString::new(SYMLINK_NAME);
+        let sddl = UnicodeString::new(security.sddl);
         let mut device_object = null_mut();
 
         ntstatus_to_result(
@@ -173,7 +174,7 @@ impl ControlDevice {
 
     /// Delete the symbolic link and device object.
     pub fn destroy(self) -> VckResult<()> {
-        let symlink_name = UnicodeString::from_str(SYMLINK_NAME);
+        let symlink_name = UnicodeString::new(SYMLINK_NAME);
         unsafe {
             IoUnregisterShutdownNotification(self.device_object);
         }

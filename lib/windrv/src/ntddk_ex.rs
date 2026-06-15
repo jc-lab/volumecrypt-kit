@@ -54,6 +54,11 @@ const NORMAL_PAGE_PRIORITY: u32 = 16;
 /// Returns a pointer to the caller's I/O stack location in the specified IRP.
 ///
 /// Equivalent to the `IoGetCurrentIrpStackLocation` macro in ntddk.h.
+///
+/// # Safety
+/// `irp` must be a valid, fully-initialised IRP. Caller must hold the IRP
+/// from a dispatch routine or completion callback and must not use the
+/// returned pointer after the IRP has been completed or freed.
 #[allow(non_snake_case)]
 pub unsafe fn IoGetCurrentIrpStackLocation(irp: PIRP) -> PIO_STACK_LOCATION {
     (*irp)
@@ -67,6 +72,11 @@ pub unsafe fn IoGetCurrentIrpStackLocation(irp: PIRP) -> PIO_STACK_LOCATION {
 /// Returns a pointer to the next-lower driver's I/O stack location.
 ///
 /// Equivalent to `IoGetNextIrpStackLocation` in ntddk.h.
+///
+/// # Safety
+/// `irp` must be a valid IRP with at least one additional stack location
+/// allocated below the current location (i.e. the IRP stack size must be
+/// greater than the current stack index).
 #[allow(non_snake_case)]
 pub unsafe fn IoGetNextIrpStackLocation(irp: PIRP) -> PIO_STACK_LOCATION {
     (*irp)
@@ -127,6 +137,9 @@ pub unsafe fn IoSetCancelRoutine(irp: PIRP, routine: DRIVER_CANCEL) -> DRIVER_CA
     if old_ptr.is_null() {
         None
     } else {
-        Some(core::mem::transmute(old_ptr))
+        Some(core::mem::transmute::<
+            *mut c_void,
+            unsafe extern "C" fn(*mut wdk_sys::_DEVICE_OBJECT, *mut wdk_sys::_IRP),
+        >(old_ptr))
     }
 }

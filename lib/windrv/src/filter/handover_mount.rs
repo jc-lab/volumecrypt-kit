@@ -35,11 +35,11 @@ use wdk_sys::{
         ExAllocatePool2, ExFreePool, IoAllocateWorkItem, IoFreeWorkItem, IoQueueWorkItem,
         KeGetCurrentIrql, KeInitializeEvent, KeSetEvent, KeWaitForSingleObject,
     },
-    KEVENT, NTSTATUS, PDEVICE_OBJECT, PIO_WORKITEM, PIRP, SL_PENDING_RETURNED,
     _EVENT_TYPE::NotificationEvent,
     _KWAIT_REASON::Executive,
     _MODE::KernelMode,
     _WORK_QUEUE_TYPE::DelayedWorkQueue,
+    KEVENT, NTSTATUS, PDEVICE_OBJECT, PIO_WORKITEM, PIRP, SL_PENDING_RETURNED,
 };
 
 use crate::{

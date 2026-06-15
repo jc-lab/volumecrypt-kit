@@ -73,7 +73,7 @@ impl KernelVolumeIo {
     /// Open `volume_id.device_path` (an NT path such as `\??\D:`) for raw
     /// synchronous I/O and enable extended-DASD access on the handle.
     pub fn open(volume_id: &VolumeId, sector_size: u32, total_sectors: u64) -> VckResult<Self> {
-        let name = UnicodeString::from_str(&volume_id.device_path);
+        let name = UnicodeString::new(&volume_id.device_path);
 
         let mut oa: OBJECT_ATTRIBUTES = unsafe { core::mem::zeroed() };
         oa.Length = size_of::<OBJECT_ATTRIBUTES>() as u32;
@@ -400,10 +400,10 @@ use wdk_sys::{
         IoBuildDeviceIoControlRequest, IoBuildSynchronousFsdRequest, IofCallDriver,
         KeInitializeEvent, KeWaitForSingleObject,
     },
-    IRP_MJ_READ, IRP_MJ_WRITE, KEVENT,
     _EVENT_TYPE::NotificationEvent,
     _KWAIT_REASON::Executive,
     _MODE::KernelMode,
+    IRP_MJ_READ, IRP_MJ_WRITE, KEVENT,
 };
 
 /// IRP-based sector I/O routed directly to `device_object`, bypassing any
@@ -591,7 +591,7 @@ impl SectorIo for LowerDeviceIo {
 /// Open a synchronous kernel handle to `nt_path`. Returns `None` if the open
 /// fails (caller decides whether that is fatal).
 pub fn open_volume_handle_raw(nt_path: &str) -> Option<wdk_sys::HANDLE> {
-    let name = UnicodeString::from_str(nt_path);
+    let name = UnicodeString::new(nt_path);
     let mut oa: OBJECT_ATTRIBUTES = unsafe { core::mem::zeroed() };
     oa.Length = size_of::<OBJECT_ATTRIBUTES>() as u32;
     oa.ObjectName = name.as_ptr();
@@ -661,6 +661,7 @@ impl vck_common::SectorIo for OffsetSectorIo {
     }
 }
 
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn send_fsctl(handle: wdk_sys::HANDLE, code: u32) -> i32 {
     let mut iosb: IO_STATUS_BLOCK = unsafe { core::mem::zeroed() };
     unsafe {

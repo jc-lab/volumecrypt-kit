@@ -52,6 +52,7 @@ use crate::{
 /// the FSD. For correct transparent encryption the caller should ensure the
 /// filter is attached below the FSD (via the `IoRegisterFsRegistrationChange`
 /// path) or accept size-interception-only semantics.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn attach_filter(
     driver: *mut DRIVER_OBJECT,
     target_nt_path: &str,
@@ -74,7 +75,7 @@ pub fn attach_filter(
     }
 
     // Resolve the target volume device (top of its stack right now).
-    let name = UnicodeString::from_str(target_nt_path);
+    let name = UnicodeString::new(target_nt_path);
     let mut file_obj: PFILE_OBJECT = null_mut();
     let mut target_do: PDEVICE_OBJECT = null_mut();
     let status = unsafe {
@@ -132,6 +133,7 @@ pub fn attach_filter(
 /// `IoAttachDeviceToDeviceStackSafe` still works via `IoGetDeviceObjectPointer`).
 /// Caller must call [`filter_bind_volume`] to complete setup once the
 /// `AttachedVolume` is built. If setup fails, call [`detach_filter`] to clean up.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn attach_filter_unbound(
     driver: *mut DRIVER_OBJECT,
     target_nt_path: &str,
@@ -152,7 +154,7 @@ pub fn attach_filter_unbound(
         return Err(VckError::Io("IoCreateDevice(filter) failed".into()));
     }
 
-    let name = UnicodeString::from_str(target_nt_path);
+    let name = UnicodeString::new(target_nt_path);
     let mut file_obj: PFILE_OBJECT = null_mut();
     let mut target_do: PDEVICE_OBJECT = null_mut();
     let status = unsafe {
@@ -200,6 +202,7 @@ pub fn attach_filter_unbound(
 /// instead of resolving one via `IoGetDeviceObjectPointer`. Use this when the
 /// device object is already known (e.g. obtained from an open file handle) and
 /// `IoGetDeviceObjectPointer` would fail (e.g. after the filesystem dismounts).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn attach_filter_to_raw_device(
     driver: *mut DRIVER_OBJECT,
     target_do: PDEVICE_OBJECT,
@@ -278,6 +281,7 @@ pub unsafe fn filter_bind_volume(filter_do: PDEVICE_OBJECT, volume: Arc<Attached
 /// Attach our filter to a specific device object (called from the
 /// `IoRegisterFsRegistrationChange` notification path where we know the raw
 /// partition device and can insert BELOW the FSD before it mounts).
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn attach_filter_to_device(
     driver: *mut DRIVER_OBJECT,
     target_do: PDEVICE_OBJECT,
@@ -337,6 +341,7 @@ pub fn attach_filter_to_device(
 ///
 /// # Safety
 /// `filter_do` must be a filter device object owned by this driver.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn unbind_filter(filter_do: PDEVICE_OBJECT) {
     if filter_do.is_null() {
         return;
@@ -363,6 +368,7 @@ pub fn unbind_filter(filter_do: PDEVICE_OBJECT) {
 
 /// Detach and delete a filter device, releasing the `Arc<AttachedVolume>` held
 /// in its extension.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub fn detach_filter(filter_do: PDEVICE_OBJECT) {
     if filter_do.is_null() {
         return;
@@ -412,7 +418,7 @@ where
     use wdk_sys::ntddk::{IoGetDeviceAttachmentBaseRef, ObfDereferenceObject};
     use wdk_sys::{FILE_READ_DATA, PFILE_OBJECT};
 
-    let name = UnicodeString::from_str(nt_path);
+    let name = UnicodeString::new(nt_path);
     let mut file_obj: PFILE_OBJECT = null_mut();
     let mut vol_do: PDEVICE_OBJECT = null_mut();
     let status = unsafe {
@@ -447,7 +453,7 @@ where
                 let chars = core::slice::from_raw_parts(name_ptr as *const u16, name_len.min(64));
                 let mut s = alloc::string::String::new();
                 for &c in chars {
-                    if c >= 0x20 && c < 0x7F {
+                    if (0x20..0x7F).contains(&c) {
                         s.push(c as u8 as char);
                     } else {
                         s.push('?');
@@ -533,7 +539,7 @@ pub fn find_our_filter_in_stack(nt_path: &str) -> Option<(PDEVICE_OBJECT, PDEVIC
 
     use wdk_sys::ntddk::IoGetAttachedDeviceReference;
 
-    let name = UnicodeString::from_str(nt_path);
+    let name = UnicodeString::new(nt_path);
     let mut file_obj: PFILE_OBJECT = null_mut();
     let mut vol_do: PDEVICE_OBJECT = null_mut();
     let status = unsafe {

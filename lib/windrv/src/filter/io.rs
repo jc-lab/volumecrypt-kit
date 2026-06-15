@@ -26,8 +26,6 @@ use wdk_sys::{
     SL_INVOKE_ON_ERROR, SL_INVOKE_ON_SUCCESS, SL_PENDING_RETURNED,
 };
 
-use core::sync::atomic::Ordering;
-
 use crate::{
     device::DeviceExtension, filter::pass_through, nt::nt_success, registry::AttachedVolume,
 };

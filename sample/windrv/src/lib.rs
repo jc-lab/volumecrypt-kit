@@ -33,12 +33,11 @@ use wdk_sys::{
         IoBuildDeviceIoControlRequest, IoGetRequestorProcess, IofCallDriver, IofCompleteRequest,
         KeExpandKernelStackAndCallout, KeInitializeEvent, KeWaitForSingleObject,
     },
-    CCHAR, DRIVER_OBJECT, IO_NO_INCREMENT, IO_STATUS_BLOCK, IRP_MJ_CLEANUP, IRP_MJ_CLOSE,
-    IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, IRP_MJ_SHUTDOWN, KEVENT, NTSTATUS, PCUNICODE_STRING,
-    PDEVICE_OBJECT, PDRIVER_OBJECT, PIO_STACK_LOCATION, PIRP,
     _EVENT_TYPE::NotificationEvent,
     _KWAIT_REASON::Executive,
-    _MODE,
+    _MODE, CCHAR, DRIVER_OBJECT, IO_NO_INCREMENT, IO_STATUS_BLOCK, IRP_MJ_CLEANUP, IRP_MJ_CLOSE,
+    IRP_MJ_CREATE, IRP_MJ_DEVICE_CONTROL, IRP_MJ_SHUTDOWN, KEVENT, NTSTATUS, PCUNICODE_STRING,
+    PDEVICE_OBJECT, PDRIVER_OBJECT, PIO_STACK_LOCATION, PIRP,
 };
 
 #[global_allocator]
@@ -140,7 +139,7 @@ pub unsafe extern "system" fn DriverEntry(
 
     // Publish the registry so the filter's PnP work item (a C callback that only
     // receives a device object) can reach it to auto-attach the OS volume.
-    vck_driver::set_global_registry(&*REGISTRY);
+    vck_driver::set_global_registry(&REGISTRY);
 
     // Best-effort: read the boot ACPI handover (`VCKD` table) published by the
     // UEFI loader. Absent (NotFound) when booting without the loader — the OS
@@ -204,7 +203,7 @@ unsafe extern "C" fn add_device(driver: PDRIVER_OBJECT, pdo: PDEVICE_OBJECT) -> 
                 let chars = core::slice::from_raw_parts(name_ptr as *const u16, name_len.min(64));
                 let mut s = alloc::string::String::new();
                 for &c in chars {
-                    if c >= 0x20 && c < 0x7F {
+                    if (0x20..0x7F).contains(&c) {
                         s.push(c as u8 as char);
                     } else {
                         s.push('?');

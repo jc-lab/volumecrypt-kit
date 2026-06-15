@@ -59,7 +59,7 @@ pub fn read_handover<P: HandoverPayload>() -> VckResult<P> {
 
 /// Read the raw value of the handover UEFI variable into an owned buffer.
 fn read_handover_variable(var_name: &str, var_guid: [u8; 16]) -> VckResult<Vec<u8>> {
-    let name = UnicodeString::from_str(var_name);
+    let name = UnicodeString::new(var_name);
     let mut guid = handover_guid(var_guid);
 
     // First call: discover the value length (pass a zero-length buffer).

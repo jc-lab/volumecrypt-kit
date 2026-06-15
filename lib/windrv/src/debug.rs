@@ -86,13 +86,7 @@ pub fn panic_print(info: &PanicInfo<'_>) -> ! {
         let _ = writer.write_str("<unknown location>");
     }
     let _ = writer.write_str(" ");
-    if let Some(message) = info.payload().downcast_ref::<&str>() {
-        let _ = writer.write_str(message);
-    } else if let Some(message) = info.payload().downcast_ref::<alloc::string::String>() {
-        let _ = writer.write_str(message.as_str());
-    } else {
-        let _ = writer.write_str("<unknown panic payload>");
-    }
+    let _ = write!(&mut writer, "{}", info.message());
     if !writer.ends_with_newline() {
         let _ = writer.write_char('\n');
     }

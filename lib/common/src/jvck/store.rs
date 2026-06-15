@@ -398,7 +398,7 @@ impl<S: SectorIo> JvckMetadataStore<S> {
         len: usize,
     ) -> VckResult<u64> {
         let ss = self.geometry.sector_size as usize;
-        if ss == 0 || len == 0 || len % ss != 0 {
+        if ss == 0 || len == 0 || !len.is_multiple_of(ss) {
             return Err(VckError::InvalidData(
                 "vendor data buffer must be a non-zero multiple of the sector size",
             ));
@@ -408,7 +408,7 @@ impl<S: SectorIo> JvckMetadataStore<S> {
             .vendor_data_base_lba(replica_index)
             .ok_or(VckError::NotFound("vendor data replica index out of range"))?;
         let count = self.vendor_data_sector_count();
-        if rel_sector.checked_add(nsec).map_or(true, |end| end > count) {
+        if rel_sector.checked_add(nsec).is_none_or(|end| end > count) {
             return Err(VckError::ValidationFailed(
                 "vendor data range exceeds the replica region",
             ));
@@ -632,7 +632,7 @@ impl<S: SectorIo> JvckMetadataReader<S> {
     ) -> VckResult<()> {
         let sector_size = self.geometry.sector_size;
         let ss = sector_size as usize;
-        if ss == 0 || buf.is_empty() || buf.len() % ss != 0 {
+        if ss == 0 || buf.is_empty() || !buf.len().is_multiple_of(ss) {
             return Err(VckError::InvalidData(
                 "vendor data buffer must be a non-zero multiple of the sector size",
             ));
@@ -649,7 +649,7 @@ impl<S: SectorIo> JvckMetadataReader<S> {
         let nsec = (buf.len() / ss) as u64;
         if rel_sector
             .checked_add(nsec)
-            .map_or(true, |end| end > rs.saturating_sub(1))
+            .is_none_or(|end| end > rs.saturating_sub(1))
         {
             return Err(VckError::ValidationFailed(
                 "vendor data range exceeds the replica region",
