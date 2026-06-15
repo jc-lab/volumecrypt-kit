@@ -6,7 +6,7 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test $(TEST_VM_DIR) test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-data-volume-decrypt test-vm-crypto-test test-vm-os-handover test-vm-os-encrypt clean
+.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test test-vm-setup test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-data-volume-decrypt test-vm-crypto-test test-vm-os-handover test-vm-os-encrypt clean
 
 TEST_VM_DIR = .testfoundry/win11
 LOAD_ENV := source ./.ci/scripts/load-wdk-env.sh
@@ -71,6 +71,8 @@ test:
 
 $(TEST_VM_DIR): testing/signing/MyTestDriverCert.cer
 	test-foundry.exe --vm-name="win11" vm-setup --image ./testing/images/windows-11.yaml
+
+test-vm-setup: $(TEST_VM_DIR)
 
 build-driver-package: testing/signing/MyTestDriverCert.cer testing/artifacts/vck-sample-driver.sys testing/artifacts/vck-sample-driver.inf build-driver
 	$(LOAD_ENV)

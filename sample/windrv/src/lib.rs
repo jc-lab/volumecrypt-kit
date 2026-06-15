@@ -18,7 +18,7 @@ use core::ffi::c_void;
 use core::panic::PanicInfo;
 
 use spin::{Lazy, Mutex};
-use vck_driver::{
+use vck_windrv::{
     device::{ControlDevice, DeviceExtension, DEVICE_KIND_FILTER},
     filter::handle_filter_irp,
     ioctl::codes::{IOCTL_VCK_DETACH_ALL_VOLUMES, IOCTL_VCK_PAUSE_OS_VOLUME},
@@ -67,7 +67,7 @@ struct ExpandCtx {
     requestor_token: *const AccessToken,
     input_ptr: *const u8,
     input_len: usize,
-    result: Option<vck_driver::VckResult<alloc::vec::Vec<u8>>>,
+    result: Option<vck_windrv::VckResult<alloc::vec::Vec<u8>>>,
 }
 
 /// Runs the actual IOCTL dispatch on the expanded stack.
@@ -96,8 +96,8 @@ pub unsafe extern "system" fn DriverEntry(
     registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
     let _ = registry_path;
-    vck_driver::vck_log!("DriverEntry: vck-sample-driver loading");
-    vck_driver::vck_log!(
+    vck_windrv::vck_log!("DriverEntry: vck-sample-driver loading");
+    vck_windrv::vck_log!(
         "DriverEntry: AES-NI {}",
         if vck_common::cpu::has_aes_ni() {
             "supported"
@@ -107,11 +107,11 @@ pub unsafe extern "system" fn DriverEntry(
     );
     // Install the kernel RNG so the JVCK metadata store can generate a fresh
     // per-write salt when persisting encrypted_offset.
-    vck_common::set_random_source(&vck_driver::rng::KERNEL_RNG);
+    vck_common::set_random_source(&vck_windrv::rng::KERNEL_RNG);
     // Install the sample's volume bind policy. on_attach opens + decrypts the
     // metadata and builds the cipher; the framework owns no crypto policy. Reached
     // from both the boot OS-volume mount (PnP callback) and IOCTL attach.
-    vck_driver::set_volume_provider(&PROVIDER);
+    vck_windrv::set_volume_provider(&PROVIDER);
     let driver = match driver.as_mut() {
         Some(driver) => driver,
         None => return STATUS_INVALID_PARAMETER,
@@ -125,7 +125,7 @@ pub unsafe extern "system" fn DriverEntry(
             *CONTROL_DEVICE.lock() = Some(control_device);
         }
         Err(err) => {
-            vck_driver::vck_log!("sample-driver: control device create failed: {}", err);
+            vck_windrv::vck_log!("sample-driver: control device create failed: {}", err);
             return STATUS_UNSUCCESSFUL;
         }
     }
@@ -139,24 +139,24 @@ pub unsafe extern "system" fn DriverEntry(
 
     // Publish the registry so the filter's PnP work item (a C callback that only
     // receives a device object) can reach it to auto-attach the OS volume.
-    vck_driver::set_global_registry(&REGISTRY);
+    vck_windrv::set_global_registry(&REGISTRY);
 
     // Best-effort: read the boot ACPI handover (`VCKD` table) published by the
     // UEFI loader. Absent (NotFound) when booting without the loader — the OS
     // volume auto-attach path then stays dormant and data volumes are unaffected.
-    match vck_driver::handover::read_handover::<VckHandoverPayload>() {
+    match vck_windrv::handover::read_handover::<VckHandoverPayload>() {
         Ok(payload) => {
-            vck_driver::vck_log!(
+            vck_windrv::vck_log!(
                 "DriverEntry: loader handover present, OS partition {}",
                 payload.partition_guid
             );
-            REGISTRY.set_handover(vck_driver::HandoverInfo {
+            REGISTRY.set_handover(vck_windrv::HandoverInfo {
                 partition_guid: payload.partition_guid,
                 vmk: payload.vmk,
             });
         }
         Err(err) => {
-            vck_driver::vck_log!("DriverEntry: no ACPI handover ({})", err);
+            vck_windrv::vck_log!("DriverEntry: no ACPI handover ({})", err);
         }
     }
 
@@ -217,14 +217,14 @@ unsafe extern "C" fn add_device(driver: PDRIVER_OBJECT, pdo: PDEVICE_OBJECT) -> 
             alloc::string::String::new()
         }
     };
-    vck_driver::vck_log!("add_device: pdo={:p} name={}", pdo, pdo_name);
+    vck_windrv::vck_log!("add_device: pdo={:p} name={}", pdo, pdo_name);
 
     // Attach an UNBOUND filter to the physical device object before any FSD mounts.
     // The filter has volume=NULL → all IRPs pass through transparently.
     // IOCTL_JVCK_PREPARE will later find this filter by name in the PDO map.
-    match vck_driver::filter::attach_filter_to_raw_device(driver, pdo) {
+    match vck_windrv::filter::attach_filter_to_raw_device(driver, pdo) {
         Ok((filter_do, lower_do)) => {
-            vck_driver::vck_log!(
+            vck_windrv::vck_log!(
                 "add_device: filter attached filter={:p} lower={:p}",
                 filter_do,
                 lower_do
@@ -233,7 +233,7 @@ unsafe extern "C" fn add_device(driver: PDRIVER_OBJECT, pdo: PDEVICE_OBJECT) -> 
             STATUS_SUCCESS
         }
         Err(err) => {
-            vck_driver::vck_log!("add_device: attach failed: {}", err);
+            vck_windrv::vck_log!("add_device: attach failed: {}", err);
             STATUS_SUCCESS // Non-fatal: device still works without filter
         }
     }
@@ -241,7 +241,7 @@ unsafe extern "C" fn add_device(driver: PDRIVER_OBJECT, pdo: PDEVICE_OBJECT) -> 
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
-    vck_driver::debug::panic_print(info)
+    vck_windrv::debug::panic_print(info)
 }
 
 /// Send a no-input/no-output IOCTL to our own control device synchronously
@@ -293,7 +293,7 @@ unsafe fn driver_shutdown() {
     let device = CONTROL_DEVICE.lock().as_ref().map(|cd| cd.device_object());
     if let Some(device) = device {
         let st = send_self_ioctl(device, IOCTL_VCK_DETACH_ALL_VOLUMES);
-        vck_driver::vck_log!("driver_shutdown: detach-all status=0x{:08x}", st);
+        vck_windrv::vck_log!("driver_shutdown: detach-all status=0x{:08x}", st);
     }
 }
 
@@ -305,7 +305,7 @@ unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
     // Unloading would leave C: reading raw ciphertext → guaranteed corruption.
     // Refuse by bugchecking with STATUS_INVALID_DEVICE_STATE as a parameter.
     if REGISTRY.has_encrypted_os_volume() {
-        vck_driver::vck_log!("sample-driver: unload refused — OS volume encrypted; bugchecking");
+        vck_windrv::vck_log!("sample-driver: unload refused — OS volume encrypted; bugchecking");
         const STATUS_INVALID_DEVICE_STATE: u64 = 0xC000_0184;
         // Custom bug check code "VCK\0" — identifiable in the crash dump. P1 is
         // STATUS_INVALID_DEVICE_STATE indicating why the unload was refused.
@@ -316,7 +316,7 @@ unsafe extern "C" fn driver_unload(_driver: PDRIVER_OBJECT) {
     // Cleanup: tear down the control device.
     if let Some(control_device) = CONTROL_DEVICE.lock().take() {
         if let Err(err) = control_device.destroy() {
-            vck_driver::vck_log!("sample-driver: control device destroy failed: {}", err);
+            vck_windrv::vck_log!("sample-driver: control device destroy failed: {}", err);
         }
     }
 }
@@ -353,7 +353,7 @@ unsafe extern "C" fn dispatch_any(device_object: PDEVICE_OBJECT, irp: PIRP) -> N
             STATUS_SUCCESS
         }
         IRP_MJ_SHUTDOWN => {
-            vck_driver::vck_log!("sample-driver: IRP_MJ_SHUTDOWN");
+            vck_windrv::vck_log!("sample-driver: IRP_MJ_SHUTDOWN");
             // 1. Pause the OS volume sweep (stops the boundary advancing; waits
             //    for any in-flight batch). The OS volume filter stays bound so
             //    live shutdown writes remain encrypted.
@@ -435,7 +435,7 @@ unsafe extern "C" fn dispatch_device_control(
     };
     let dispatch_result = if callout_status >= 0 {
         ex.result.take().unwrap_or_else(|| {
-            Err(vck_driver::VckError::Io(
+            Err(vck_windrv::VckError::Io(
                 "dispatch callout did not run".into(),
             ))
         })
@@ -472,7 +472,7 @@ unsafe extern "C" fn dispatch_device_control(
             }
         }
         Err(err) => {
-            vck_driver::vck_log!("sample-driver: ioctl 0x{:08x} failed: {}", ioctl_code, err);
+            vck_windrv::vck_log!("sample-driver: ioctl 0x{:08x} failed: {}", ioctl_code, err);
             complete_irp(irp, STATUS_UNSUCCESSFUL, 0);
             STATUS_UNSUCCESSFUL
         }
