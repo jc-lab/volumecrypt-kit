@@ -40,6 +40,8 @@ use wdk_sys::{
     PIO_STACK_LOCATION, PIRP, SL_PENDING_RETURNED,
 };
 
+use vck_common::VolumeCipher;
+
 use crate::{
     crypto::pipeline::CryptoPipeline,
     device::DeviceExtension,
@@ -270,6 +272,9 @@ unsafe extern "C" fn thread_main(context: *mut c_void) {
         let vol = vt.current.lock().clone();
 
         // (1) Service user IRPs first (bounded burst).
+        // One cipher covers the whole burst: acquired lazily on the first IRP
+        // that actually needs crypto, then destroyed + dropped at burst end.
+        let mut burst_cipher: Option<Box<dyn VolumeCipher>> = None;
         let mut did = false;
         let mut n = 0u32;
         while n < MAX_IRP_BURST {
@@ -279,13 +284,16 @@ unsafe extern "C" fn thread_main(context: *mut c_void) {
                     if claim_cancelled(ep.irp) {
                         complete_irp(ep.irp, STATUS_CANCELLED, 0);
                     } else {
-                        process_irp(&vol, ep);
+                        process_irp(&vol, ep, &mut burst_cipher);
                     }
                     did = true;
                     n += 1;
                 }
                 None => break,
             }
+        }
+        if let Some(mut c) = burst_cipher.take() {
+            c.destroy();
         }
 
         // (2) One sweep batch (no-op unless engine is Encrypting/Decrypting).
@@ -321,11 +329,15 @@ unsafe extern "C" fn thread_main(context: *mut c_void) {
     let _ = wdk_sys::ntddk::PsTerminateSystemThread(STATUS_SUCCESS);
 }
 
-unsafe fn process_irp(vol: &AttachedVolume, ep: IrpEntry) {
+unsafe fn process_irp(
+    vol: &AttachedVolume,
+    ep: IrpEntry,
+    burst_cipher: &mut Option<Box<dyn VolumeCipher>>,
+) {
     if ep.is_write {
-        process_write(ep.irp, vol);
+        process_write(ep.irp, vol, burst_cipher);
     } else {
-        process_read(ep.irp, vol);
+        process_read(ep.irp, vol, burst_cipher);
     }
 }
 
@@ -350,8 +362,31 @@ fn data_relative(volume: &AttachedVolume, abs_lba: u64) -> Option<u64> {
     abs_lba.checked_sub(offset).filter(|rel| *rel < total)
 }
 
-fn pipeline_for(volume: &AttachedVolume) -> Option<CryptoPipeline<'_>> {
-    volume.cipher().map(CryptoPipeline::new)
+/// Returns `(first_rel, boundary)` when the sector range starting at `first_lba`
+/// has at least one sector that needs crypto, `None` otherwise (plaintext region,
+/// metadata region, or not-yet-encrypted).
+fn crypto_range(volume: &AttachedVolume, first_lba: u64) -> Option<(u64, u64)> {
+    let first_rel = data_relative(volume, first_lba)?;
+    let boundary = volume.encrypted_boundary.load(Ordering::Acquire);
+    if boundary > 0 && first_rel < boundary {
+        Some((first_rel, boundary))
+    } else {
+        None
+    }
+}
+
+/// Lazily acquire the burst cipher and return a [`CryptoPipeline`] over it.
+/// Returns `None` if the volume has no supplier (passthrough / provisional).
+unsafe fn get_pipeline<'a>(
+    burst_cipher: &'a mut Option<Box<dyn VolumeCipher>>,
+    vol: &AttachedVolume,
+) -> Option<CryptoPipeline<'a>> {
+    if burst_cipher.is_none() {
+        if let Some(supplier) = vol.cipher_supplier() {
+            *burst_cipher = supplier.get_cipher();
+        }
+    }
+    burst_cipher.as_deref().map(CryptoPipeline::new)
 }
 
 unsafe fn map_mdl(irp: PIRP) -> *mut u8 {
@@ -373,7 +408,11 @@ unsafe fn complete_irp(irp: PIRP, status: NTSTATUS, information: usize) {
 // and MmProbeAndLockPages over the buffer, and locking the system-VA mapping of
 // an already-locked MDL faults (PAGE_FAULT_IN_NONPAGED_AREA).
 
-unsafe fn process_read(irp: PIRP, volume: &AttachedVolume) {
+unsafe fn process_read(
+    irp: PIRP,
+    volume: &AttachedVolume,
+    burst_cipher: &mut Option<Box<dyn VolumeCipher>>,
+) {
     let stack = current_sl(irp);
     let byte_offset = (*stack).Parameters.Read.ByteOffset.QuadPart as u64;
     let length = (*stack).Parameters.Read.Length as usize;
@@ -412,9 +451,8 @@ unsafe fn process_read(irp: PIRP, volume: &AttachedVolume) {
             complete_irp(irp, STATUS_UNSUCCESSFUL, 0);
         }
         Ok(()) => {
-            if let Some(pipeline) = pipeline_for(volume) {
-                if let Some(first_rel) = data_relative(volume, first_lba) {
-                    let boundary = volume.encrypted_boundary.load(Ordering::Acquire);
+            if let Some((first_rel, boundary)) = crypto_range(volume, first_lba) {
+                if let Some(pipeline) = get_pipeline(burst_cipher, volume) {
                     pipeline.decrypt_read(first_rel, boundary, frag_slice, sector_size);
                 }
             }
@@ -429,7 +467,11 @@ unsafe fn process_read(irp: PIRP, volume: &AttachedVolume) {
 // WRITE: copy original → OWN buffer → encrypt → lower write → complete
 // ---------------------------------------------------------------------------
 
-unsafe fn process_write(irp: PIRP, volume: &AttachedVolume) {
+unsafe fn process_write(
+    irp: PIRP,
+    volume: &AttachedVolume,
+    burst_cipher: &mut Option<Box<dyn VolumeCipher>>,
+) {
     let stack = current_sl(irp);
     let byte_offset = (*stack).Parameters.Write.ByteOffset.QuadPart as u64;
     let length = (*stack).Parameters.Write.Length as usize;
@@ -459,20 +501,10 @@ unsafe fn process_write(irp: PIRP, volume: &AttachedVolume) {
     }
     core::ptr::copy_nonoverlapping(src, frag, io_len);
 
-    let needs_crypto = match data_relative(volume, first_lba) {
-        Some(first_rel) => {
-            let boundary = volume.encrypted_boundary.load(Ordering::Acquire);
-            boundary > 0 && first_rel < boundary
-        }
-        None => false,
-    };
-    if needs_crypto {
-        if let Some(pipeline) = pipeline_for(volume) {
-            if let Some(first_rel) = data_relative(volume, first_lba) {
-                let boundary = volume.encrypted_boundary.load(Ordering::Acquire);
-                let buf = core::slice::from_raw_parts_mut(frag, io_len);
-                pipeline.encrypt_write(first_rel, boundary, buf, sector_size);
-            }
+    if let Some((first_rel, boundary)) = crypto_range(volume, first_lba) {
+        if let Some(pipeline) = get_pipeline(burst_cipher, volume) {
+            let buf = core::slice::from_raw_parts_mut(frag, io_len);
+            pipeline.encrypt_write(first_rel, boundary, buf, sector_size);
         }
     }
 

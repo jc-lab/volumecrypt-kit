@@ -25,5 +25,5 @@ pub mod xts;
 pub use error::{VckError, VckResult};
 pub use rng::{set_random_source, RandomSource};
 pub use store::{EncryptedOffsetStore, SectorIo};
-pub use types::{EncryptedOffset, Guid, SectorRange, VolumeId};
-pub use xts::{VolumeCipher, XtsVolumeCipher};
+pub use types::{EncryptedOffset, Guid, SectorRange, VolumeId, VolumeCipher, VolumeCipherSupplier};
+pub use xts::{StaticCipherSupplier, XtsVolumeCipher};

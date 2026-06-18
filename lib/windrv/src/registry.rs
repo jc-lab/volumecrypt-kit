@@ -10,7 +10,7 @@ use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
 use spin::Mutex;
-use vck_common::{types::Guid, EncryptedOffsetStore, SectorIo, VckResult, VolumeCipher};
+use vck_common::{types::Guid, EncryptedOffsetStore, SectorIo, VckResult, VolumeCipherSupplier};
 use wdk_sys::{DEVICE_OBJECT, DRIVER_OBJECT};
 
 use crate::{offset::engine::EncryptionEngine, provider::IoConfig};
@@ -278,14 +278,15 @@ impl AttachedVolume {
         }
     }
 
-    /// The volume cipher for the high-level path, if any. Lives inside
+    /// The cipher supplier for the high-level path, if any. Lives inside
     /// `io_config` (`IoConfig::Encrypted`); `None` for passthrough/custom or a
     /// provisional (not-yet-keyed) attach.
-    pub fn cipher(&self) -> Option<&dyn VolumeCipher> {
+    pub fn cipher_supplier(&self) -> Option<&Arc<dyn VolumeCipherSupplier>> {
         match &self.io_config {
             IoConfig::Encrypted {
-                cipher: Some(c), ..
-            } => Some(&**c),
+                cipher_supplier: Some(s),
+                ..
+            } => Some(s),
             _ => None,
         }
     }
@@ -300,8 +301,12 @@ impl AttachedVolume {
     /// Run one batch of the encrypt/decrypt sweep. Returns `Ok(true)` if this
     /// volume still has work pending, `Ok(false)` when idle (or not high-level).
     pub fn sweep_step(&self, batch_sectors: u64) -> VckResult<bool> {
-        let cipher = match self.cipher() {
-            Some(cipher) => cipher,
+        let supplier = match self.cipher_supplier() {
+            Some(s) => s.clone(),
+            None => return Ok(false),
+        };
+        let mut cipher = match supplier.get_cipher() {
+            Some(c) => c,
             None => return Ok(false),
         };
         let io = self.sweep_io.lock().clone();
@@ -309,11 +314,13 @@ impl AttachedVolume {
             let mut engine = self.encryption.lock();
             engine.progress_step(
                 io.as_ref(),
-                cipher,
+                cipher.as_ref(),
                 self.offset_store.as_ref(),
                 batch_sectors,
             )
         }; // lock released here before sync_boundary
+        cipher.destroy();
+        // cipher dropped here
         if result.is_ok() {
             self.sync_boundary();
         }

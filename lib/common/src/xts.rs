@@ -40,29 +40,14 @@
 use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::{Aes256, Block};
 
-use crate::{VckError, VckResult};
+use crate::{
+    types::{VolumeCipher, VolumeCipherSupplier},
+    VckError, VckResult,
+};
 
 /// Number of AES-XTS blocks processed in one parallel batch.
 /// Matches the AES-NI backend's `ParBlocks = 8`, filling the 7-cycle pipeline.
 const BATCH: usize = 8;
-
-/// A full-volume sector cipher.
-///
-/// The default JVCK suite uses [`XtsVolumeCipher`] (AES-256-XTS), but a vendor
-/// can supply a different full-volume-encryption algorithm by implementing this
-/// trait and selecting it from the volume metadata (see the driver's cipher
-/// factory). All sector numbers are **data-region relative** (`rel = lba -
-/// offset_sector`); see the module docs for the tweak convention.
-pub trait VolumeCipher: Send + Sync {
-    /// Encrypt one sector in place.
-    fn encrypt_sector(&self, rel_sector: u64, sector: &mut [u8]);
-    /// Decrypt one sector in place.
-    fn decrypt_sector(&self, rel_sector: u64, sector: &mut [u8]);
-    /// Encrypt a contiguous buffer of `sector_size`-byte sectors.
-    fn encrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64);
-    /// Decrypt a contiguous buffer (inverse of [`encrypt_area`](Self::encrypt_area)).
-    fn decrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64);
-}
 
 pub struct XtsVolumeCipher {
     /// Data cipher for the AES-XTS payload blocks.
@@ -83,6 +68,40 @@ impl VolumeCipher for XtsVolumeCipher {
     }
     fn decrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64) {
         XtsVolumeCipher::decrypt_area(self, buf, sector_size, first_rel_sector)
+    }
+    // `destroy` uses the default no-op: `Aes256` does not expose its key-schedule
+    // bytes for manual zeroization without the `zeroize` feature. Callers that
+    // need guaranteed zeroization should use a custom `VolumeCipherSupplier` that
+    // wraps key material in a `Zeroizing<[u8; 32]>` and re-derives per burst.
+}
+
+/// Default [`VolumeCipherSupplier`] for volumes that store AES-256-XTS key
+/// material in ordinary (non-protected) memory.
+///
+/// Reconstructs the AES key schedule on each
+/// [`get_cipher`](VolumeCipherSupplier::get_cipher) call.  The cost is one AES
+/// key expansion (~480 bytes of computation) per I/O burst — negligible
+/// compared with the I/O itself and bounded to once per [`MAX_IRP_BURST`] IRPs.
+///
+/// For RAM-encryption, implement [`VolumeCipherSupplier`] directly: derive the
+/// key from protected storage on each call and override [`VolumeCipher::destroy`]
+/// to zeroize it.
+pub struct StaticCipherSupplier {
+    key1: [u8; 32],
+    key2: [u8; 32],
+}
+
+impl StaticCipherSupplier {
+    pub fn new(key1: [u8; 32], key2: [u8; 32]) -> Self {
+        Self { key1, key2 }
+    }
+}
+
+impl VolumeCipherSupplier for StaticCipherSupplier {
+    fn get_cipher(&self) -> Option<Box<dyn VolumeCipher>> {
+        XtsVolumeCipher::new(&self.key1, &self.key2)
+            .ok()
+            .map(|c| Box::new(c) as Box<dyn VolumeCipher>)
     }
 }
 

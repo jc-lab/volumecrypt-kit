@@ -5,17 +5,18 @@
 
 //! Sample `VolumeProvider` + IOCTL authorization policy.
 
-use alloc::boxed::Box;
+use alloc::sync::Arc;
+
 use alloc::sync::Arc;
 
 use vck_common::{
     jvck::{JvckCbcCodec, JvckMetadataReader, MetadataCodec},
-    EncryptedOffset, EncryptedOffsetStore, VckError, VckResult, VolumeCipher,
+    EncryptedOffset, EncryptedOffsetStore, StaticCipherSupplier, VckError, VckResult,
+    VolumeCipherSupplier,
 };
 use vck_windrv::{
-    crypto::AesXtsCipher, device::ControlDeviceSecurity, ioctl::codes::IOCTL_VCK_GET_PROGRESS,
-    AttachContext, DetachContext, IoConfig, IoctlAuthContext, IoctlAuthorization, RequestorMode,
-    VolumeProvider,
+    device::ControlDeviceSecurity, ioctl::codes::IOCTL_VCK_GET_PROGRESS, AttachContext,
+    DetachContext, IoConfig, IoctlAuthContext, IoctlAuthorization, RequestorMode, VolumeProvider,
 };
 use wdk_sys::GUID;
 
@@ -78,14 +79,17 @@ impl VolumeProvider for VckVolumeProvider {
         };
         let offset_sector = store.offset_sector();
 
-        // Sample's volume-cipher choice: AES-256-XTS keyed by the recovered FVEK.
-        // A vendor returns any other `Box<dyn VolumeCipher>` here instead.
+        // Sample's volume-cipher choice: AES-256-XTS via StaticCipherSupplier.
+        // The supplier reconstructs the key schedule once per I/O burst; a
+        // vendor replaces this with a custom VolumeCipherSupplier that derives
+        // the key from hardware-protected storage for RAM encryption.
         let (key1, key2) = store.fvek_keys();
-        let cipher: Box<dyn VolumeCipher> = Box::new(AesXtsCipher::new(*key1, *key2)?);
+        let cipher_supplier: Arc<dyn VolumeCipherSupplier> =
+            Arc::new(StaticCipherSupplier::new(*key1, *key2));
 
         let offset_store: Arc<dyn EncryptedOffsetStore> = Arc::new(store);
         Ok(IoConfig::Encrypted {
-            cipher: Some(cipher),
+            cipher_supplier: Some(cipher_supplier),
             offset_sector,
             encrypted_offset,
             offset_store,

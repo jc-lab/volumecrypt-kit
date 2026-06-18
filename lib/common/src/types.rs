@@ -145,6 +145,48 @@ mod tests {
     }
 }
 
+/// A full-volume sector cipher.
+///
+/// All sector numbers are **data-region relative** (`rel = lba - offset_sector`);
+/// callers MUST map absolute LBAs before invoking these methods and MUST NOT
+/// call them for sectors inside header/footer metadata regions.
+pub trait VolumeCipher: Send + Sync {
+    /// Encrypt one sector in place.
+    fn encrypt_sector(&self, rel_sector: u64, sector: &mut [u8]);
+    /// Decrypt one sector in place.
+    fn decrypt_sector(&self, rel_sector: u64, sector: &mut [u8]);
+    /// Encrypt a contiguous buffer of `sector_size`-byte sectors starting at
+    /// data-region-relative sector `first_rel_sector`.
+    fn encrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64);
+    /// Decrypt a contiguous buffer (inverse of
+    /// [`encrypt_area`](Self::encrypt_area)).
+    fn decrypt_area(&self, buf: &mut [u8], sector_size: usize, first_rel_sector: u64);
+    /// Explicitly zeroize key material before the cipher is dropped.
+    ///
+    /// Called by the framework at the end of each I/O burst and sweep batch
+    /// immediately before `drop`. The default no-op is safe for ciphers that
+    /// hold key schedules in ordinary memory; override to release/zeroize
+    /// protected key material (RAM-encryption use case).
+    fn destroy(&mut self) {}
+}
+
+/// A factory that produces a short-lived [`VolumeCipher`] for each I/O burst
+/// or sweep batch and lets the cipher be destroyed promptly afterward.
+///
+/// This indirection lets implementors manage key-material lifetime
+/// independently of the volume lifetime.  A RAM-encryption implementation
+/// derives the actual AES key from a hardware-protected secret on each
+/// [`get_cipher`](Self::get_cipher) call and zeroizes it (via
+/// [`VolumeCipher::destroy`]) as soon as the burst completes.
+pub trait VolumeCipherSupplier: Send + Sync {
+    /// Acquire a cipher for one I/O burst or sweep batch.
+    ///
+    /// Returns `None` for a provisional (not-yet-keyed) volume.
+    /// The caller MUST invoke [`VolumeCipher::destroy`] and then `drop` the
+    /// returned value promptly after the burst completes.
+    fn get_cipher(&self) -> Option<Box<dyn VolumeCipher>>;
+}
+
 /// Identifies an attached volume and how to reach its raw sectors.
 #[derive(Debug, Clone)]
 pub struct VolumeId {

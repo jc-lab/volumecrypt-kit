@@ -311,7 +311,7 @@ fn handle_jvck_prepare_adddevice_path(
         volume_path: req.volume_path.clone(),
         sector_size,
         io_config: IoConfig::Encrypted {
-            cipher: None,
+            cipher_supplier: None,
             offset_sector,
             encrypted_offset: vck_common::types::EncryptedOffset {
                 sector: 0,
@@ -738,7 +738,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         volume_path: req.volume_path.clone(),
         sector_size,
         io_config: IoConfig::Encrypted {
-            cipher: None,
+            cipher_supplier: None,
             offset_sector,
             encrypted_offset: vck_common::types::EncryptedOffset {
                 sector: 0,
@@ -1082,7 +1082,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         "volume not prepared; call IOCTL_JVCK_PREPARE first",
     ))?;
 
-    if provisional.cipher().is_some() {
+    if provisional.cipher_supplier().is_some() {
         return Err(VckError::Unsupported("volume already fully attached"));
     }
 

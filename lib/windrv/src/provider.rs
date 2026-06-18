@@ -20,7 +20,8 @@ use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use vck_common::{
-    types::Guid, EncryptedOffset, EncryptedOffsetStore, SectorIo, VckResult, VolumeCipher, VolumeId,
+    types::Guid, EncryptedOffset, EncryptedOffsetStore, SectorIo, VckResult, VolumeCipherSupplier,
+    VolumeId,
 };
 use wdk_sys::{
     ntddk::{PsDereferencePrimaryToken, PsReferencePrimaryToken, SeTokenIsAdmin},
@@ -53,11 +54,13 @@ pub trait VolumeProvider: Send + Sync + 'static {
 pub enum IoConfig {
     /// Do not attach a filter to this volume.
     Passthrough,
-    /// High-level: the framework runs the sample-supplied [`VolumeCipher`] on the
-    /// data path and background sweep. `cipher` is `None` for a provisional
-    /// (size-hiding, not-yet-keyed) attach, in which case the sweep is idle.
+    /// High-level: the framework calls the sample-supplied
+    /// [`VolumeCipherSupplier`] once per I/O burst and sweep batch to obtain a
+    /// short-lived cipher, then destroys it immediately after.
+    /// `cipher_supplier` is `None` for a provisional (size-hiding, not-yet-keyed)
+    /// attach, in which case the sweep is idle.
     Encrypted {
-        cipher: Option<Box<dyn VolumeCipher>>,
+        cipher_supplier: Option<Arc<dyn VolumeCipherSupplier>>,
         offset_sector: u64,
         encrypted_offset: EncryptedOffset,
         offset_store: Arc<dyn EncryptedOffsetStore>,
