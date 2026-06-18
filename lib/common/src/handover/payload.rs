@@ -4,7 +4,7 @@
 
 use alloc::{string::ToString, vec::Vec};
 
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
 use crate::VckResult;
 
@@ -33,6 +33,80 @@ pub fn encode_payload<P: HandoverPayload>(payload: &P) -> VckResult<Vec<u8>> {
 pub fn decode_payload<P: HandoverPayload>(bytes: &[u8]) -> VckResult<P> {
     messagepack_serde::from_slice(bytes)
         .map_err(|err| crate::VckError::MsgpackDecode(err.to_string()))
+}
+
+/// Magic stamped into a [`HandoverLocator`] for sanity validation
+/// (`b"VCKL"` interpreted little-endian).
+pub const HANDOVER_LOCATOR_MAGIC: u32 = u32::from_le_bytes(*b"VCKL");
+
+/// Current [`HandoverLocator`] layout version.
+pub const HANDOVER_LOCATOR_VERSION: u16 = 1;
+
+/// Pointer to the handover payload, stored in the UEFI variable.
+///
+/// Rather than carrying the (potentially large, VMK-bearing) msgpack payload in
+/// the UEFI variable value directly, the loader serializes the payload into a
+/// buffer it allocates as `EfiRuntimeServicesData` and publishes only this
+/// small locator — itself msgpack — in the variable. The driver reads the
+/// locator, then maps the physical buffer to recover the payload.
+///
+/// `address` is the **physical** address of the payload buffer. In the loader's
+/// pre-`ExitBootServices` environment memory is identity-mapped, so the pointer
+/// returned by `allocate_pool` equals the physical address; the firmware keeps
+/// `EfiRuntimeServicesData` pages reserved across the handoff to the OS, so the
+/// driver can map that same physical address at runtime (`MmMapIoSpace`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandoverLocator {
+    /// [`HANDOVER_LOCATOR_MAGIC`].
+    pub magic: u32,
+    /// [`HANDOVER_LOCATOR_VERSION`].
+    pub version: u16,
+    /// Physical address of the `EfiRuntimeServicesData` payload buffer.
+    pub address: u64,
+    /// Byte length of the msgpack payload at `address`.
+    pub length: u64,
+}
+
+impl HandoverLocator {
+    /// Build a current-version locator for a payload buffer.
+    pub fn new(address: u64, length: u64) -> Self {
+        Self {
+            magic: HANDOVER_LOCATOR_MAGIC,
+            version: HANDOVER_LOCATOR_VERSION,
+            address,
+            length,
+        }
+    }
+
+    /// Validate the magic/version and a non-empty, plausibly-addressed buffer.
+    pub fn validate(&self) -> VckResult<()> {
+        if self.magic != HANDOVER_LOCATOR_MAGIC {
+            return Err(crate::VckError::InvalidData("handover locator: bad magic"));
+        }
+        if self.version != HANDOVER_LOCATOR_VERSION {
+            return Err(crate::VckError::InvalidData(
+                "handover locator: unsupported version",
+            ));
+        }
+        if self.address == 0 || self.length == 0 {
+            return Err(crate::VckError::InvalidData(
+                "handover locator: empty address/length",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub fn encode_locator(locator: &HandoverLocator) -> VckResult<Vec<u8>> {
+    messagepack_serde::to_vec(locator)
+        .map_err(|err| crate::VckError::MsgpackEncode(err.to_string()))
+}
+
+pub fn decode_locator(bytes: &[u8]) -> VckResult<HandoverLocator> {
+    let locator: HandoverLocator = messagepack_serde::from_slice(bytes)
+        .map_err(|err| crate::VckError::MsgpackDecode(err.to_string()))?;
+    locator.validate()?;
+    Ok(locator)
 }
 
 #[cfg(test)]
@@ -68,5 +142,28 @@ mod tests {
     #[test]
     fn decode_rejects_garbage() {
         assert!(decode_payload::<TestPayload>(&[0xff, 0x00, 0x12, 0x34]).is_err());
+    }
+
+    #[test]
+    fn locator_round_trip() {
+        let locator = HandoverLocator::new(0x1_2345_6000, 4096);
+        let bytes = encode_locator(&locator).expect("encode locator");
+        let decoded = decode_locator(&bytes).expect("decode locator");
+        assert_eq!(decoded, locator);
+    }
+
+    #[test]
+    fn locator_rejects_bad_magic() {
+        let mut locator = HandoverLocator::new(0x1000, 16);
+        locator.magic ^= 0xFFFF_FFFF;
+        let bytes = encode_locator(&locator).expect("encode locator");
+        assert!(decode_locator(&bytes).is_err());
+    }
+
+    #[test]
+    fn locator_rejects_empty() {
+        let locator = HandoverLocator::new(0, 0);
+        let bytes = encode_locator(&locator).expect("encode locator");
+        assert!(decode_locator(&bytes).is_err());
     }
 }

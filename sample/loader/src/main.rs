@@ -76,7 +76,7 @@ fn run() -> VckResult<()> {
     }
 
     vck_loader::handover::install_handover(&payload)?;
-    vck_loader::vck_log!("handover published (UEFI variable)");
+    vck_loader::vck_log!("handover published (EfiRuntimeServicesData + locator variable)");
     vck_loader::chainload::chainload_next(&next_loader)
 }
 

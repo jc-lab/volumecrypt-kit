@@ -45,7 +45,8 @@ sample/*     위 트레이트의 참조 구현 + Go CLI
 - `store.rs` — `SectorIo`, `EncryptedOffsetStore` 트레이트
 - `xts.rs` — `XtsVolumeCipher`: 공유 AES-256-XTS. 8블록 병렬 경로로 처리량을 높입니다.
 - `jvck/` — 기본 JVCK 메타데이터 포맷(키 파생, CRC/HMAC, store). 자세히는 [jvck-format.md](jvck-format.md).
-- `handover/payload.rs` — `HandoverPayload` 트레이트 + msgpack `encode/decode_payload`.
+- `handover/payload.rs` — `HandoverPayload` 트레이트 + msgpack `encode/decode_payload`,
+  그리고 페이로드 버퍼 위치(물리 주소·길이)를 담는 `HandoverLocator` + `encode/decode_locator`.
 
 **tweak 규약**: 모든 섹터 번호는 **데이터 영역 상대 섹터**(`rel = lba - offset_sector`)입니다.
 `rel == 0`이 암호화 대상의 첫 섹터이며, header/footer 메타데이터 영역은 포함하지 않습니다.
@@ -137,7 +138,8 @@ IOCTL을 재사용할 수 있습니다.
   `chainload_next`. sample이 메타데이터를 **스스로 복호화**하고 cipher를 만들어 hook에 넘깁니다.
 - `hook/block_io.rs` — `EFI_BLOCK_IO_PROTOCOL.ReadBlocks`를 후킹해 대상 파티션 데이터 영역을 투명 복호화.
   (`block_io2.rs`의 `EFI_BLOCK_IO2` async 경로는 미후킹 — Windows 부팅은 동기 BlockIo 경로 사용.)
-- `handover.rs::install_handover` — 페이로드를 `P::VAR_NAME`/`P::VAR_GUID` UEFI 런타임 변수로
+- `handover.rs::install_handover` — 페이로드를 `EfiRuntimeServicesData` 버퍼에 직렬화하고,
+  그 버퍼의 물리 주소·길이를 담은 `HandoverLocator`를 `P::VAR_NAME`/`P::VAR_GUID` UEFI 런타임 변수로
   `SetVariable`(`BOOTSERVICE_ACCESS|RUNTIME_ACCESS`) 발행.
 - `cpu.rs` — 시작 시 AES-NI 지원 로깅 + (지원 시) SSE/XMM 제어비트(`CR0.MP/EM`, `CR4.OSFXSR/OSXMMEXCPT`) 설정.
 - `chainload.rs` — 다음 OS 로더(`bootmgfw.os.efi`) 체인로드.
@@ -145,14 +147,20 @@ IOCTL을 재사용할 수 있습니다.
 ## 핸드오버 (UEFI → 드라이버)
 
 OS 볼륨은 메타데이터가 볼륨 footer에 있으므로, 로더는 드라이버에 **VMK와 대상 partition_guid만**
-전달합니다. 전송은 **UEFI 런타임 변수**입니다.
+전달합니다. 전송은 **`EfiRuntimeServicesData` 메모리 + UEFI 런타임 변수(locator)**입니다.
+민감 페이로드를 변수 값에 직접 싣지 않고, 펌웨어가 OS까지 예약 유지하는 런타임 메모리에 두며
+변수에는 그 위치만 담습니다(변수 크기 제한 회피 + 변수 덤프에 평문 VMK 미노출).
 
-1. 로더: `SetVariable(VAR_NAME, VAR_GUID, msgpack(payload))`.
-2. 드라이버: `ExGetFirmwareEnvironmentVariable`로 읽어 `decode_payload` → VMK를 보호 메모리로 복사 후
-   변수 버퍼 zeroize.
+1. 로더: 페이로드를 `EfiRuntimeServicesData` 버퍼에 `msgpack` 직렬화(ExitBootServices 이후
+   OS까지 살아남도록 의도적으로 leak) → 버퍼 물리 주소·길이를 담은 `HandoverLocator`를
+   `SetVariable(VAR_NAME, VAR_GUID, msgpack(locator))`. 부트 서비스 단계는 identity-map이라
+   `allocate_pool` 포인터가 곧 물리 주소.
+2. 드라이버: `ExGetFirmwareEnvironmentVariable`로 locator 변수 읽기 → `decode_locator` →
+   `MmMapIoSpace`로 물리 버퍼 매핑 → `decode_payload` → VMK를 보호 메모리로 복사 후
+   매핑 버퍼(평문 VMK) zeroize·`MmUnmapIoSpace`.
 
 변수 이름/GUID와 페이로드 구조는 **sample**(`vck-sample-common`의 `VckHandoverPayload`)이 지정합니다
-(`HANDOVER_VAR_NAME = "VckHandover"`). 키트는 직렬화·변수 발행/읽기 헬퍼만 제공합니다.
+(`HANDOVER_VAR_NAME = "VckHandover"`). 키트는 직렬화·메모리 staging·변수 발행/읽기 헬퍼만 제공합니다.
 
 > 과거 ACPI 커스텀 테이블/XSDT 주입 방식은 제거되었습니다. 커널
 > `ZwQuerySystemInformation(SystemFirmwareTableInformation,"ACPI")`가 `STATUS_NOT_IMPLEMENTED`라
