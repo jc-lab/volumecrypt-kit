@@ -28,7 +28,7 @@ use uefi::prelude::*;
 use vck_common::jvck::store::locate_block_io_volume;
 use vck_common::jvck::{JvckCbcCodec, JvckMetadataReader, MetadataCodec};
 use vck_common::types::{EncryptedOffset, Guid};
-use vck_common::{VckResult, VolumeCipher, XtsVolumeCipher};
+use vck_common::{StaticCipherSupplier, VckResult, VolumeCipherSupplier};
 use vck_loader::{BlockIoHookEngine, HookGeometry};
 use vck_sample_common::{VckConfig, VckHandoverPayload};
 
@@ -81,12 +81,12 @@ fn run() -> VckResult<()> {
 }
 
 /// Open the OS volume Block IO, decrypt the JVCK footer metadata with the VMK,
-/// build the AES-256-XTS volume cipher, and install the Block IO read hook.
+/// build a cipher supplier, and install the Block IO read/write hooks.
 ///
 /// This is the sample's crypto policy: choosing `JvckMetadataStore` (AES-256-CBC
-/// EncryptedMetadata) and `XtsVolumeCipher` here is a sample decision — a vendor
-/// reads/decrypts `locate_block_io_volume`'s `SectorIo` with its own format and
-/// returns a different `VolumeCipher`.
+/// EncryptedMetadata) and `StaticCipherSupplier` (AES-256-XTS) here is a sample
+/// decision — a vendor reads/decrypts `locate_block_io_volume`'s `SectorIo` with
+/// its own format and supplies a different `VolumeCipherSupplier`.
 fn install_decrypt_hook(partition_guid: Guid, vmk: &[u8]) -> VckResult<()> {
     let io = locate_block_io_volume(partition_guid)?;
     // Phase A: parse the header without decrypting; Phase B: the codec unseals
@@ -111,19 +111,21 @@ fn install_decrypt_hook(partition_guid: Guid, vmk: &[u8]) -> VckResult<()> {
         },
     };
     let (key1, key2) = store.fvek_keys();
-    let cipher: Box<dyn VolumeCipher> = Box::new(XtsVolumeCipher::new(key1, key2)?);
+    let cipher_supplier: Box<dyn VolumeCipherSupplier> =
+        Box::new(StaticCipherSupplier::new(*key1, *key2));
 
     // Release the store NOW: it holds the OS volume's `BlockIO` protocol open
     // exclusively (via `locate_block_io_volume`). The hook engine re-opens the
     // SAME handle `open_protocol_exclusive` in `install()`, which fails with
-    // ACCESS_DENIED while the store still holds it. The cipher already owns its
-    // key schedule and `geometry` is owned, so the store is no longer needed.
+    // ACCESS_DENIED while the store still holds it. The supplier owns only the
+    // raw key bytes and `geometry` is owned, so the store is no longer needed.
     drop(store);
 
-    // Leak the engine to a stable 'static address: the hooked read routine
-    // recovers it via a side table keyed by protocol pointer, and the hooks must
-    // outlive the chainload (the OS loader keeps reading through them).
-    let engine = Box::leak(Box::new(BlockIoHookEngine::new(geometry, cipher)?));
+    // Leak the engine to a stable 'static address: the hooked read/write
+    // routines recover it via a side table keyed by protocol pointer, and the
+    // hooks must outlive the chainload (the OS loader keeps reading/writing
+    // through them).
+    let engine = Box::leak(Box::new(BlockIoHookEngine::new(geometry, cipher_supplier)?));
     engine.install()?;
     vck_loader::vck_log!("block io decrypt hook installed");
     Ok(())

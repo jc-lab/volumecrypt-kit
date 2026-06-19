@@ -8,9 +8,10 @@
 //!
 //! 1. enumerates Block IO devices via `LocateHandleBuffer(EFI_BLOCK_IO_PROTOCOL)`,
 //! 2. matches the target partition by GPT partition GUID,
-//! 3. saves the original `ReadBlocks` / `ReadBlocksEx` function pointers and
+//! 3. saves the original `ReadBlocks` / `WriteBlocks` function pointers and
 //!    replaces the protocol vtable entries with our hooks,
-//! 4. on a hooked read, applies the following decision logic.
+//! 4. on a hooked read, decrypts after the original fills the buffer;
+//!    on a hooked write, encrypts a copy of the plaintext before forwarding.
 //!
 //! Hooked-read decision (all comparisons are in data-region relative sectors):
 //!
@@ -20,30 +21,41 @@
 //! rel <  encrypted_offset.sector -> original read, then AES-XTS decrypt
 //! rel >= encrypted_offset.sector -> original read, passthrough (plaintext)
 //! ```
+//!
+//! Hooked-write decision (symmetric):
+//!
+//! ```text
+//! lba in metadata region        -> passthrough to original write (plaintext)
+//! rel = lba - offset_sector
+//! rel <  encrypted_offset.sector -> encrypt a copy, then original write
+//! rel >= encrypted_offset.sector -> passthrough to original write (plaintext)
+//! ```
 
 pub mod block_io;
 pub mod block_io2;
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
-use vck_common::{VckResult, VolumeCipher};
+use vck_common::{VckResult, VolumeCipherSupplier};
 
 use crate::provider::HookGeometry;
 
-/// Installs and removes Block IO read hooks for the target volume, and holds the
-/// crypto state used by the hooked read path.
+/// Installs and removes Block IO read/write hooks for the target volume, and
+/// holds the cipher supplier used by the hooked paths.
 ///
 /// The engine owns the saved original function pointers so [`uninstall`] can
 /// restore the protocol vtables to their pristine state before chainloading.
 ///
 /// [`uninstall`]: BlockIoHookEngine::uninstall
 pub struct BlockIoHookEngine {
-    /// Region geometry for transparent decryption.
+    /// Region geometry for transparent encryption/decryption.
     geometry: HookGeometry,
-    /// Volume cipher selected by the sample (data-region relative). The default
-    /// JVCK suite is AES-256-XTS; a vendor may supply a different cipher.
-    cipher: Box<dyn VolumeCipher>,
-    /// Saved `EFI_BLOCK_IO_PROTOCOL` hook state (original `ReadBlocks`, vtable ptr).
+    /// Cipher supplier: produces a short-lived cipher per read/write call.
+    /// The default JVCK suite uses [`StaticCipherSupplier`](vck_common::StaticCipherSupplier)
+    /// (AES-256-XTS); a RAM-encryption vendor supplies a custom implementation.
+    cipher_supplier: Box<dyn VolumeCipherSupplier>,
+    /// Saved `EFI_BLOCK_IO_PROTOCOL` hook state (original `ReadBlocks`/`WriteBlocks`, vtable ptr).
     block_io: Option<block_io::BlockIoHook>,
     /// Saved `EFI_BLOCK_IO2_PROTOCOL` hook state (original `ReadBlocksEx`, vtable ptr).
     block_io2: Option<block_io2::BlockIo2Hook>,
@@ -51,22 +63,25 @@ pub struct BlockIoHookEngine {
 
 impl BlockIoHookEngine {
     /// Creates an engine bound to the given geometry and the sample-selected
-    /// volume cipher.
-    pub fn new(geometry: HookGeometry, cipher: Box<dyn VolumeCipher>) -> VckResult<Self> {
+    /// cipher supplier.
+    pub fn new(
+        geometry: HookGeometry,
+        cipher_supplier: Box<dyn VolumeCipherSupplier>,
+    ) -> VckResult<Self> {
         Ok(Self {
             geometry,
-            cipher,
+            cipher_supplier,
             block_io: None,
             block_io2: None,
         })
     }
 
     /// Locates the target volume's Block IO protocol(s), saves the original
-    /// read function pointers, and replaces the vtable entries with our hooks.
+    /// `ReadBlocks` / `WriteBlocks` function pointers, and replaces the vtable
+    /// entries with our hooks.
     ///
     /// Matching is done by GPT partition GUID (carried by the handover payload /
-    /// loader config). Both `EFI_BLOCK_IO_PROTOCOL` and (when present)
-    /// `EFI_BLOCK_IO2_PROTOCOL` are hooked.
+    /// loader config). Both `EFI_BLOCK_IO_PROTOCOL` read and write are hooked.
     pub fn install(&mut self) -> VckResult<()> {
         use alloc::format;
         use uefi::boot::{self, open_protocol_exclusive, SearchType};
@@ -97,7 +112,7 @@ impl BlockIoHookEngine {
             }
 
             // Obtain the raw `BlockIoProtocol` instance pointer and patch its
-            // `read_blocks` field. `BlockIO` is `#[repr(transparent)]` over it.
+            // `read_blocks` and `write_blocks` fields.
             let mut scoped = open_protocol_exclusive::<BlockIO>(handle)
                 .map_err(|e| VckError::Io(format!("open BlockIO for hook failed: {e:?}")))?;
             let proto = scoped
@@ -115,7 +130,7 @@ impl BlockIoHookEngine {
             return Ok(());
         }
 
-        Err(VckError::NotFound(
+        Err(vck_common::VckError::NotFound(
             "no Block IO partition matched the target GUID for hooking",
         ))
     }
@@ -123,8 +138,8 @@ impl BlockIoHookEngine {
     /// Restores all hooked vtables to their original function pointers.
     ///
     /// NOTE: in the normal boot flow the hooks intentionally remain installed
-    /// across the chainload (the OS loader keeps reading through them), so this
-    /// is only used for error-path cleanup.
+    /// across the chainload (the OS loader keeps reading/writing through them),
+    /// so this is only used for error-path cleanup.
     pub fn uninstall(&mut self) -> VckResult<()> {
         if let Some(hook) = self.block_io.take() {
             hook.uninstall()?;
@@ -140,12 +155,8 @@ impl BlockIoHookEngine {
     /// bytes.
     ///
     /// `lba` is the absolute starting LBA of the request. `buf` length must be a
-    /// multiple of the sector size. Sectors are processed individually:
-    ///
-    /// - LBA inside a metadata region -> left as-is (passthrough).
-    /// - `rel = lba - offset_sector`, `rel < encrypted_offset.sector` -> AES-XTS
-    ///   decrypted in place.
-    /// - otherwise -> left as-is (plaintext beyond the progress boundary).
+    /// multiple of the sector size. A short-lived cipher is acquired once for the
+    /// whole call and destroyed immediately after.
     pub(crate) fn decrypt_after_read(
         &self,
         lba: u64,
@@ -155,24 +166,63 @@ impl BlockIoHookEngine {
         if sector_size == 0 {
             return Ok(());
         }
+        let mut cipher = match self.cipher_supplier.get_cipher() {
+            Some(c) => c,
+            None => return Ok(()),
+        };
         let offset_sector = self.geometry.offset_sector;
         let total = self.geometry.encrypted_offset.total_sectors;
         for (i, sector) in buf.chunks_mut(sector_size).enumerate() {
             let abs = lba + i as u64;
-            // (1) header / metadata region before the data region -> plaintext.
             let Some(rel) = abs.checked_sub(offset_sector) else {
                 continue;
             };
-            // (3) footer metadata beyond the data region -> plaintext.
             if rel >= total {
                 continue;
             }
-            // (4) only sectors below the progress boundary are ciphertext.
             if self.geometry.encrypted_offset.is_encrypted(rel) {
-                self.cipher.decrypt_sector(rel, sector);
+                cipher.decrypt_sector(rel, sector);
             }
-            // (5) else: not yet encrypted -> plaintext, leave as-is.
         }
+        cipher.destroy();
         Ok(())
+    }
+
+    /// Shared hooked-write logic: returns an encrypted copy of `buf` to pass to
+    /// the original `WriteBlocks`. The caller's buffer is never modified.
+    ///
+    /// Sectors outside the encrypted region are copied verbatim (plaintext
+    /// passthrough). A short-lived cipher is acquired once for the whole call and
+    /// destroyed immediately after.
+    pub(crate) fn encrypt_before_write(
+        &self,
+        lba: u64,
+        sector_size: usize,
+        buf: &[u8],
+    ) -> VckResult<Vec<u8>> {
+        let mut out = Vec::from(buf);
+        if sector_size == 0 {
+            return Ok(out);
+        }
+        let mut cipher = match self.cipher_supplier.get_cipher() {
+            Some(c) => c,
+            None => return Ok(out),
+        };
+        let offset_sector = self.geometry.offset_sector;
+        let total = self.geometry.encrypted_offset.total_sectors;
+        for (i, sector) in out.chunks_mut(sector_size).enumerate() {
+            let abs = lba + i as u64;
+            let Some(rel) = abs.checked_sub(offset_sector) else {
+                continue;
+            };
+            if rel >= total {
+                continue;
+            }
+            if self.geometry.encrypted_offset.is_encrypted(rel) {
+                cipher.encrypt_sector(rel, sector);
+            }
+        }
+        cipher.destroy();
+        Ok(out)
     }
 }

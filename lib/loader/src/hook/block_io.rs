@@ -2,16 +2,21 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-//! `EFI_BLOCK_IO_PROTOCOL` hooking (`ReadBlocks`).
+//! `EFI_BLOCK_IO_PROTOCOL` hooking (`ReadBlocks` + `WriteBlocks`).
 //!
-//! Saves the original `ReadBlocks` function pointer, patches the protocol
-//! instance's `read_blocks` field with [`hooked_read_blocks`], and restores it
-//! on uninstall. The hook delegates the actual decryption decision to
-//! [`BlockIoHookEngine::decrypt_after_read`](crate::hook::BlockIoHookEngine::decrypt_after_read).
+//! Saves the original `ReadBlocks` and `WriteBlocks` function pointers, patches
+//! the protocol instance's vtable fields with [`hooked_read_blocks`] /
+//! [`hooked_write_blocks`], and restores them on uninstall.
+//!
+//! - Read hook: calls the original read to fill the buffer, then decrypts in
+//!   place via [`BlockIoHookEngine::decrypt_after_read`].
+//! - Write hook: encrypts a copy of the caller's buffer via
+//!   [`BlockIoHookEngine::encrypt_before_write`], then forwards the encrypted
+//!   copy to the original write (the caller's buffer is left unchanged).
 //!
 //! `EFI_BLOCK_IO_PROTOCOL` keeps its function pointers inline in the protocol
 //! struct (there is no separate vtable), so "patching the vtable" means writing
-//! the `read_blocks` field of the firmware's protocol instance.
+//! the `read_blocks` / `write_blocks` fields of the firmware's protocol instance.
 //!
 //! UNTESTED: the patch + `efiapi` callback path must be validated by an actual
 //! VM boot (Stage 3h). The crypto decision it calls is covered by host logic.
@@ -33,19 +38,28 @@ type ReadBlocksFn = unsafe extern "efiapi" fn(
     buffer: *mut c_void,
 ) -> Status;
 
+type WriteBlocksFn = unsafe extern "efiapi" fn(
+    this: *const BlockIoProtocol,
+    media_id: u32,
+    lba: Lba,
+    buffer_size: usize,
+    buffer: *mut c_void,
+) -> Status;
+
 /// One hooked protocol instance: its pointer (lookup key), the saved original
-/// `read_blocks`, and the engine that owns the crypto state.
+/// `read_blocks` and `write_blocks`, and the engine that owns the crypto state.
 #[derive(Clone, Copy)]
 struct HookEntry {
     protocol: *const BlockIoProtocol,
-    original: ReadBlocksFn,
+    original_read: ReadBlocksFn,
+    original_write: WriteBlocksFn,
     engine: *const BlockIoHookEngine,
 }
 
 const MAX_HOOKS: usize = 8;
 
-/// Global side table keyed by protocol pointer. The hooked read callback (a
-/// plain `efiapi` function) recovers the original read fn + engine from here.
+/// Global side table keyed by protocol pointer. The hooked callbacks (plain
+/// `efiapi` functions) recover the original fn pointers + engine from here.
 ///
 /// The loader is single-threaded (before `ExitBootServices`), so access is
 /// serialized by control flow; `UnsafeCell` + manual `Sync` documents that.
@@ -74,9 +88,9 @@ pub struct BlockIoHook {
 }
 
 impl BlockIoHook {
-    /// Saves the original `ReadBlocks` pointer for `protocol`, records the
-    /// (protocol, original, engine) entry, and patches the instance's
-    /// `read_blocks` field to [`hooked_read_blocks`].
+    /// Saves the original `ReadBlocks` and `WriteBlocks` pointers for
+    /// `protocol`, records the entry, and patches the instance's vtable fields
+    /// to [`hooked_read_blocks`] / [`hooked_write_blocks`].
     ///
     /// # Safety
     /// `protocol` must be a live `EFI_BLOCK_IO_PROTOCOL` instance and `engine` a
@@ -87,7 +101,8 @@ impl BlockIoHook {
         engine: *const BlockIoHookEngine,
     ) -> VckResult<Self> {
         unsafe {
-            let original = (*protocol).read_blocks;
+            let original_read = (*protocol).read_blocks;
+            let original_write = (*protocol).write_blocks;
             let entries = &mut *HOOK_TABLE.entries.get();
             let slot = entries
                 .iter_mut()
@@ -97,19 +112,23 @@ impl BlockIoHook {
                 )))?;
             *slot = Some(HookEntry {
                 protocol: protocol as *const BlockIoProtocol,
-                original,
+                original_read,
+                original_write,
                 engine,
             });
             (*protocol).read_blocks = hooked_read_blocks;
+            (*protocol).write_blocks = hooked_write_blocks;
         }
         Ok(Self { protocol })
     }
 
-    /// Restores the original `ReadBlocks` pointer and clears the table entry.
+    /// Restores the original `ReadBlocks` and `WriteBlocks` pointers and
+    /// clears the table entry.
     pub fn uninstall(self) -> VckResult<()> {
         unsafe {
             if let Some(entry) = find_entry(self.protocol as *const BlockIoProtocol) {
-                (*self.protocol).read_blocks = entry.original;
+                (*self.protocol).read_blocks = entry.original_read;
+                (*self.protocol).write_blocks = entry.original_write;
                 let entries = &mut *HOOK_TABLE.entries.get();
                 for slot in entries.iter_mut() {
                     if matches!(slot, Some(e) if core::ptr::eq(e.protocol, self.protocol)) {
@@ -139,12 +158,11 @@ pub unsafe extern "efiapi" fn hooked_read_blocks(
     buffer: *mut c_void,
 ) -> Status {
     let Some(entry) = find_entry(this) else {
-        // Not in the table (should not happen) — fail safe with device error.
         return Status::DEVICE_ERROR;
     };
 
     // 1. Original firmware read fills the buffer with on-disk bytes.
-    let status = (entry.original)(this, media_id, lba, buffer_size, buffer);
+    let status = (entry.original_read)(this, media_id, lba, buffer_size, buffer);
     if status != Status::SUCCESS {
         return status;
     }
@@ -163,4 +181,50 @@ pub unsafe extern "efiapi" fn hooked_read_blocks(
         }
     }
     status
+}
+
+/// Replacement `WriteBlocks` (`EFI_BLOCK_IO_PROTOCOL.WriteBlocks`).
+///
+/// Encrypts a copy of the caller's plaintext buffer (per-sector decision), then
+/// forwards the encrypted copy to the original `WriteBlocks`. The caller's
+/// buffer is never modified.
+///
+/// # Safety
+/// Called by UEFI firmware as an `EFI_BLOCK_IO_PROTOCOL.WriteBlocks` callback.
+/// `this` must be a valid `BlockIoProtocol` registered in `HOOK_TABLE`.
+/// `buffer` must point to at least `buffer_size` readable bytes.
+pub unsafe extern "efiapi" fn hooked_write_blocks(
+    this: *const BlockIoProtocol,
+    media_id: u32,
+    lba: Lba,
+    buffer_size: usize,
+    buffer: *mut c_void,
+) -> Status {
+    let Some(entry) = find_entry(this) else {
+        return Status::DEVICE_ERROR;
+    };
+
+    let media = (*this).media;
+    if media.is_null() || buffer.is_null() || buffer_size == 0 {
+        return (entry.original_write)(this, media_id, lba, buffer_size, buffer);
+    }
+    let block_size = (*media).block_size as usize;
+    if block_size == 0 || entry.engine.is_null() {
+        return (entry.original_write)(this, media_id, lba, buffer_size, buffer);
+    }
+
+    // Encrypt a copy so the caller's buffer is left as plaintext.
+    let src = core::slice::from_raw_parts(buffer as *const u8, buffer_size);
+    let engine = &*entry.engine;
+    match engine.encrypt_before_write(lba, block_size, src) {
+        Err(_) => Status::DEVICE_ERROR,
+        Ok(mut encrypted) => (entry.original_write)(
+            this,
+            media_id,
+            lba,
+            encrypted.len(),
+            encrypted.as_mut_ptr() as *mut c_void,
+        ),
+        // `encrypted` dropped here; cipher was already destroyed inside encrypt_before_write.
+    }
 }
