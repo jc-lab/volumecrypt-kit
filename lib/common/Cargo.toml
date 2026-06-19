@@ -32,3 +32,6 @@ uuid = { workspace = true, default-features = false }
 xts-mode.workspace = true
 zeroize.workspace = true
 uefi = { version = "0.37", default-features = false, optional = true }
+
+[dev-dependencies]
+rusty-hook = { workspace = true }

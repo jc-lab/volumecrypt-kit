@@ -31,6 +31,8 @@ panic = "abort"
 panic = "abort"
 
 [workspace.dependencies]
+rusty-hook = "^0.11"
+
 aes = { version = "0.9", default-features = false }
 cbc = { version = "0.2", default-features = false }
 cipher = { version = "0.5", default-features = false, features = ["block-padding"] }
