@@ -5,8 +5,7 @@
 
 //! Sample `VolumeProvider` + IOCTL authorization policy.
 
-use alloc::sync::Arc;
-
+use alloc::boxed::Box;
 use alloc::sync::Arc;
 
 use vck_common::{

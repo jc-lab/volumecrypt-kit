@@ -195,7 +195,7 @@ pub unsafe fn bind(filter_do: PDEVICE_OBJECT, volume: Arc<AttachedVolume>) {
         (*(*ext).vthread).set_current(volume);
         return;
     }
-    if volume.cipher().is_some() {
+    if volume.cipher_supplier().is_some() {
         let vt = VolumeThread::start(volume);
         (*ext).vthread = Box::into_raw(vt);
     }

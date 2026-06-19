@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use alloc::boxed::Box;
 use alloc::string::String;
 
 use serde::{Deserialize, Serialize};

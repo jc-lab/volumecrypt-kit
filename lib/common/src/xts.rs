@@ -37,6 +37,8 @@
 //! with a caller's frame. (A prior build with `+aes` inlined the unrolled AES
 //! into the IOCTL path and double-faulted on stack overflow.)
 
+use alloc::boxed::Box;
+
 use aes::cipher::{BlockCipherDecrypt, BlockCipherEncrypt, KeyInit};
 use aes::{Aes256, Block};
 
