@@ -39,11 +39,11 @@ type ReadBlocksFn = unsafe extern "efiapi" fn(
 ) -> Status;
 
 type WriteBlocksFn = unsafe extern "efiapi" fn(
-    this: *const BlockIoProtocol,
+    this: *mut BlockIoProtocol,
     media_id: u32,
     lba: Lba,
     buffer_size: usize,
-    buffer: *mut c_void,
+    buffer: *const c_void,
 ) -> Status;
 
 /// One hooked protocol instance: its pointer (lookup key), the saved original
@@ -194,13 +194,13 @@ pub unsafe extern "efiapi" fn hooked_read_blocks(
 /// `this` must be a valid `BlockIoProtocol` registered in `HOOK_TABLE`.
 /// `buffer` must point to at least `buffer_size` readable bytes.
 pub unsafe extern "efiapi" fn hooked_write_blocks(
-    this: *const BlockIoProtocol,
+    this: *mut BlockIoProtocol,
     media_id: u32,
     lba: Lba,
     buffer_size: usize,
-    buffer: *mut c_void,
+    buffer: *const c_void,
 ) -> Status {
-    let Some(entry) = find_entry(this) else {
+    let Some(entry) = find_entry(this as *const BlockIoProtocol) else {
         return Status::DEVICE_ERROR;
     };
 
@@ -218,12 +218,12 @@ pub unsafe extern "efiapi" fn hooked_write_blocks(
     let engine = &*entry.engine;
     match engine.encrypt_before_write(lba, block_size, src) {
         Err(_) => Status::DEVICE_ERROR,
-        Ok(mut encrypted) => (entry.original_write)(
+        Ok(encrypted) => (entry.original_write)(
             this,
             media_id,
             lba,
             encrypted.len(),
-            encrypted.as_mut_ptr() as *mut c_void,
+            encrypted.as_ptr() as *const c_void,
         ),
         // `encrypted` dropped here; cipher was already destroyed inside encrypt_before_write.
     }
