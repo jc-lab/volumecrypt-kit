@@ -26,32 +26,6 @@ fn get_timestamp() -> (u64, u32) {
     (secs, millis)
 }
 
-pub fn debug_print(args: fmt::Arguments<'_>) {
-    let (secs, millis) = get_timestamp();
-    let mut line = String::new();
-    let _ = write!(&mut line, "{secs}.{millis:03} vck-windrv: ");
-    if line.write_fmt(args).is_err() {
-        return;
-    }
-
-    if !line.ends_with('\n') {
-        line.push('\n');
-    }
-
-    let message = match CString::new(line) {
-        Ok(message) => message,
-        Err(_) => return,
-    };
-
-    unsafe {
-        DbgPrint(c"%s".as_ptr().cast(), message.as_ptr());
-    }
-
-    if cfg!(feature = "debugcon") {
-        write_debugcon(message.as_bytes_with_nul());
-    }
-}
-
 // `IoGetRemainingStackSize` is a header inline (not an ntoskrnl export), so we
 // compute the same thing from the current RSP and the thread's stack limit.
 // `PsGetCurrentThreadStackLimit` IS a real export; declare it like the rest of
@@ -194,7 +168,7 @@ impl log::Log for WinDrvLogger {
             DbgPrint(c"%s".as_ptr().cast(), message.as_ptr());
         }
 
-        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        #[cfg(all(any(target_arch = "x86", target_arch = "x86_64"), feature = "debugcon"))]
         write_debugcon(message.as_bytes_with_nul());
     }
 
