@@ -6,7 +6,7 @@
 SHELL := /bin/bash
 .SHELLFLAGS := -eu -o pipefail -c
 
-.PHONY: build-common build-driver build-driver-package build-crypto-test-driver build-loader build-app test test-vm-setup test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-data-volume-decrypt test-vm-crypto-test test-vm-os-handover test-vm-os-encrypt clean
+.PHONY: build-common build-driver build-driver-package build-loader build-app test test-vm-setup test-vm-smoke test-vm-driver-load test-vm-os-volume-prepare test-vm-data-volume test-vm-data-volume-decrypt test-vm-crypto-test test-vm-os-handover test-vm-os-encrypt clean
 
 TEST_VM_DIR = .testfoundry/win11
 LOAD_ENV := source ./.ci/scripts/load-wdk-env.sh
@@ -40,7 +40,7 @@ UEFI_RUSTFLAGS = -C target-feature=-soft-float
 
 clippy-driver:
 	$(LOAD_ENV)
-	RUSTFLAGS="$(DRIVER_RUSTFLAGS)" cargo clippy -p vck-windrv -p vck-sample-driver -p vck-crypto-test-driver -- -D warnings
+	RUSTFLAGS="$(DRIVER_RUSTFLAGS)" cargo clippy -p vck-windrv -p vck-sample-driver -- -D warnings
 
 build-driver: testing/signing/MyTestDriverCert.cer
 	$(LOAD_ENV)
@@ -51,11 +51,6 @@ build-driver: testing/signing/MyTestDriverCert.cer
 	  -DriverSys ./testing/artifacts/vck-sample-driver.sys \
 	  -DriverInf ./testing/artifacts/vck-sample-driver.inf \
 	  -OutputDir ./testing/artifacts/vck-windrv-pkg
-
-build-crypto-test-driver: testing/signing/MyTestDriverCert.cer
-	$(LOAD_ENV)
-	RUSTFLAGS="$(DRIVER_RUSTFLAGS)" cargo build -p vck-crypto-test-driver --target x86_64-pc-windows-msvc
-	powershell -NoProfile -ExecutionPolicy Bypass -File ./testing/signing/sign-driver.ps1 -InputPath ./target/x86_64-pc-windows-msvc/debug/vck_crypto_test_driver.dll -OutputPath ./testing/artifacts/vck-crypto-test-driver.sys
 
 build-loader:
 	RUSTFLAGS="$(UEFI_RUSTFLAGS)" cargo build -p vck-sample-loader --target x86_64-unknown-uefi
@@ -68,6 +63,12 @@ build-app:
 
 test:
 	cargo test -p vck-common
+
+test-publish:
+	$(LOAD_ENV)
+	cargo publish -p vck-common --dry-run --locked
+	cargo publish -p vck-loader --dry-run --locked
+	cargo publish -p vck-windrv --dry-run --locked
 
 $(TEST_VM_DIR): testing/signing/MyTestDriverCert.cer
 	test-foundry.exe --vm-name="win11" vm-setup --image ./testing/images/windows-11.yaml
@@ -99,9 +100,6 @@ test-vm-data-volume: $(TEST_VM_DIR) build-driver-package build-app
 test-vm-data-volume-decrypt: $(TEST_VM_DIR) build-driver-package build-app
 	rm -rf ./testing/results/data-volume-decrypt
 	test-foundry.exe --vm-name=win11 test --headless --output ./testing/results/data-volume-decrypt --test ./testing/recipes/data-volume-decrypt/data-volume-decrypt.yaml
-
-test-vm-crypto-test: $(TEST_VM_DIR) build-crypto-test-driver
-	test-foundry.exe  --vm-name=win11 test --headless --output ./testing/results/crypto-test --test ./testing/recipes/crypto-test/crypto-test.yaml
 
 # Stage 3h: validate the UEFI loader -> driver ACPI handover end-to-end.
 # Prepares the OS volume (shrink/efi/vck.json), installs the loader as

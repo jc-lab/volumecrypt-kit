@@ -9,14 +9,13 @@ members = [
     "lib/windrv",
     "lib/loader",
     "sample/common",
-    "sample/crypto-test",
     "sample/windrv",
     "sample/loader",
 ]
 
 [workspace.package]
 edition = "2021"
-version = "0.0.4"
+version = "0.0.5"
 license = "Apache-2.0"
 repository = "https://github.com/jc-lab/volumecrypt-kit"
 
@@ -51,5 +50,6 @@ xts-mode = { version = "0.6.0", default-features = false }
 zeroize = { version = "1", default-features = false, features = ["alloc", "derive"] }
 wdk-alloc = "0.4.1"
 wdk-build = "0.5.1"
+wdk-sys = "0.5.1"
 
-vck-common = { version = "0.0.4", path = "lib/common", default-features = false }
+vck-common = { version = "0.0.5", path = "lib/common", default-features = false }
