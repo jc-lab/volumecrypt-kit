@@ -184,8 +184,7 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
             if guid != handover.partition_guid {
                 info!(
                     "handover_mount: partition {} != target {}, skipping",
-                    guid,
-                    handover.partition_guid
+                    guid, handover.partition_guid
                 );
                 return;
             }
@@ -266,10 +265,7 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     crate::filter::filter_bind_volume(filter_do, volume.clone());
     info!(
         "handover_mount: OS volume bound path={} offset_sector={} data_sectors={} boundary={}",
-        volume_path,
-        offset_sector,
-        data_sectors,
-        initial_boundary
+        volume_path, offset_sector, data_sectors, initial_boundary
     );
     unsafe { crate::filter::volume_thread::wake_for(&volume) };
 }

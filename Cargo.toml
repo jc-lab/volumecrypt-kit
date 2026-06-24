@@ -15,7 +15,7 @@ members = [
 
 [workspace.package]
 edition = "2021"
-version = "0.0.5"
+version = "0.0.6"
 license = "Apache-2.0"
 repository = "https://github.com/jc-lab/volumecrypt-kit"
 
@@ -53,4 +53,4 @@ wdk-build = "0.5.1"
 wdk-sys = "0.5.1"
 log = { version = "0.4", default-features = false }
 
-vck-common = { version = "0.0.5", path = "lib/common", default-features = false }
+vck-common = { version = "0.0.6", path = "lib/common", default-features = false }

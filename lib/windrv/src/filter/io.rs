@@ -119,8 +119,7 @@ unsafe extern "C" fn size_ioctl_completion(
                 );
                 info!(
                     "filter: size ioctl 0x{:08x} reported as {} bytes",
-                    code,
-                    ctx.data_bytes
+                    code, ctx.data_bytes
                 );
             }
         }

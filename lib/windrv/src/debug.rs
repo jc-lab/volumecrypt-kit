@@ -8,7 +8,7 @@ use alloc::ffi::CString;
 use alloc::string::String;
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
-use log::{Level, Metadata, Record};
+use log::{Metadata, Record};
 use wdk_sys::ntddk::DbgPrint;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -150,9 +150,9 @@ impl log::Log for WinDrvLogger {
     fn log(&self, record: &Record) {
         let (secs, millis) = get_timestamp();
         let mut line = String::new();
-        let _ = write!(
+        let _ = writeln!(
             &mut line,
-            "{}.{:03} vck-windrv: [{}] {}\n",
+            "{}.{:03} vck-windrv: [{}] {}",
             secs,
             millis,
             record.level(),

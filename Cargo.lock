@@ -1096,7 +1096,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vck-common"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "aes",
  "cbc",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "vck-loader"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "aes",
  "log",
@@ -1166,7 +1166,7 @@ dependencies = [
 
 [[package]]
 name = "vck-windrv"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "aes",
  "irql",

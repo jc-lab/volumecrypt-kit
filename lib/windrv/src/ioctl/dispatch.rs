@@ -260,8 +260,7 @@ fn handle_jvck_prepare_adddevice_path(
     let total_sectors = geom_io.total_sectors();
     info!(
         "jvck_prepare(add): bps={} total={}",
-        sector_size,
-        total_sectors
+        sector_size, total_sectors
     );
     drop(geom_io);
 
@@ -438,8 +437,7 @@ fn handle_jvck_prepare_adddevice_path(
         unsafe { crate::filter::filter_rebind_volume(filter_do, complete) };
         info!(
             "jvck_prepare(add): fully attached offset={} data={}",
-            store_offset,
-            store_data
+            store_offset, store_data
         );
         return encode_resp(&JvckVolumePrepareResp {
             offset_sector: store_offset,
@@ -569,8 +567,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
     ) {
         info!(
             "jvck_prepare: AddDevice filter found filter={:p} lower={:p}",
-            filter_do,
-            lower_do
+            filter_do, lower_do
         );
         return handle_jvck_prepare_adddevice_path(
             registry, req, nt_path, driver, filter_do, lower_do,
@@ -670,9 +667,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
     let offset_sector = header_sectors;
     info!(
         "jvck_prepare: data_sectors={} offset_sector={} rs={}",
-        data_sectors,
-        offset_sector,
-        rs
+        data_sectors, offset_sector, rs
     );
 
     // Compute replica LBAs for metadata write (done AFTER unlock below).
@@ -897,9 +892,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
             }
             info!(
                 "jvck_prepare: disk={} part={} start_offset={}",
-                disk_num,
-                part_num,
-                start_offset_bytes
+                disk_num, part_num, start_offset_bytes
             );
             unsafe {
                 let _ = ZwClose(h);
@@ -922,9 +915,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
     };
     info!(
         "jvck_prepare: raw_partition={} raw_disk={} start_lba={}",
-        raw_partition_path,
-        raw_disk_path,
-        partition_start_lba
+        raw_partition_path, raw_disk_path, partition_start_lba
     );
 
     // If VMK was provided, complete the full attach now: read metadata, build
@@ -977,8 +968,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
             let disk_total = partition_start_lba + store_data + 1024;
             info!(
                 "jvck_prepare: sweep via raw disk {} lba={}",
-                raw_disk_path,
-                partition_start_lba
+                raw_disk_path, partition_start_lba
             );
             let disk_io =
                 KernelVolumeIo::open(&disk_id, store_bps, disk_total).inspect_err(|_| {
@@ -1030,8 +1020,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         unsafe { crate::filter::filter_rebind_volume(filter_do, complete_volume) };
         info!(
             "jvck_prepare: fully attached offset={} data={}",
-            store_offset,
-            store_data
+            store_offset, store_data
         );
 
         return encode_resp(&JvckVolumePrepareResp {
@@ -1253,8 +1242,7 @@ pub fn detach_volume_with_dismount(
         let lock_st = send_fsctl(h, FSCTL_LOCK_VOLUME);
         info!(
             "detach: LOCK_VOLUME=0x{:08x} ignore={}",
-            lock_st,
-            ignore_open_files
+            lock_st, ignore_open_files
         );
         if crate::nt::nt_success(lock_st) {
             held_lock = true;
@@ -1271,8 +1259,7 @@ pub fn detach_volume_with_dismount(
             let dis_st = send_fsctl(h, FSCTL_DISMOUNT_VOLUME);
             info!(
                 "detach: DISMOUNT_VOLUME attempt={} status=0x{:08x}",
-                attempt,
-                dis_st
+                attempt, dis_st
             );
             if crate::nt::nt_success(dis_st) {
                 dismounted = true;
@@ -1334,8 +1321,7 @@ pub fn detach_volume_with_dismount(
     }
     info!(
         "detach: done for {} (keep_filter={})",
-        volume_path,
-        keep_filter
+        volume_path, keep_filter
     );
     Ok(())
 }
@@ -1482,9 +1468,7 @@ fn handle_bench_aes(input: &[u8]) -> VckResult<IoctlResponse> {
 
     info!(
         "bench_aes: size={}MiB enc={}MiB/s dec={}MiB/s",
-        actual_mib,
-        encrypt_mib_s,
-        decrypt_mib_s,
+        actual_mib, encrypt_mib_s, decrypt_mib_s,
     );
 
     encode_resp(&BenchAesResp {

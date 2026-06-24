@@ -121,8 +121,7 @@ pub fn attach_filter(
 
     info!(
         "filter: attached filter={:p} lower={:p} (NOTE: may be above FSD if FSD already mounted)",
-        filter_do,
-        lower
+        filter_do, lower
     );
     Ok((filter_do, lower))
 }
@@ -435,9 +434,7 @@ where
     let base_dev = unsafe { IoGetDeviceAttachmentBaseRef(vol_do) };
     info!(
         "find_filter: vol_do={:p} base_dev={:p} nt_path={}",
-        vol_do,
-        base_dev,
-        nt_path
+        vol_do, base_dev, nt_path
     );
     // Primary: name-based lookup using the actual device object name.
     // vol_do might be e.g. \Device\HarddiskVolume5 even if nt_path=\??\D:.
@@ -470,8 +467,7 @@ where
     };
     info!(
         "find_filter: vol_do_name='{}' nt_path='{}'",
-        dev_name,
-        nt_path
+        dev_name, nt_path
     );
     if !dev_name.is_empty() {
         if let Some(result) = name_lookup_fn(&dev_name) {
@@ -575,17 +571,14 @@ pub fn find_our_filter_in_stack(nt_path: &str) -> Option<(PDEVICE_OBJECT, PDEVIC
             };
             info!(
                 "find_filter[{}]: do={:p} ext_kind=0x{:08x}",
-                depth,
-                current,
-                kind
+                depth, current, kind
             );
             if !ext.is_null() && (*ext).kind == DEVICE_KIND_FILTER {
                 let lower = (*ext).lower_device;
                 ObfDereferenceObject(current.cast());
                 info!(
                     "find_filter: found filter_do={:p} lower={:p}",
-                    current,
-                    lower
+                    current, lower
                 );
                 return Some((current, lower));
             }

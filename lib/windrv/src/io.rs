@@ -260,8 +260,7 @@ impl KernelVolumeIo {
         self.total_sectors = total_bytes / bytes_per_sector as u64;
         info!(
             "KVIO: geometry bps={} total_sectors={}",
-            bytes_per_sector,
-            self.total_sectors
+            bytes_per_sector, self.total_sectors
         );
         Ok(())
     }

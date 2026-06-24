@@ -104,9 +104,6 @@ pub fn report_and_enable_xmm() {
     }
     info!(
         "cpu: enabled XMM CR0 {:#x}->{:#x} CR4 {:#x}->{:#x} (MP=1 EM=0 OSFXSR=1 OSXMMEXCPT=1)",
-        cr0,
-        new_cr0,
-        cr4,
-        new_cr4,
+        cr0, new_cr0, cr4, new_cr4,
     );
 }

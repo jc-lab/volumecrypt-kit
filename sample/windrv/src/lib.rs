@@ -229,8 +229,7 @@ unsafe extern "C" fn add_device(driver: PDRIVER_OBJECT, pdo: PDEVICE_OBJECT) -> 
         Ok((filter_do, lower_do)) => {
             info!(
                 "add_device: filter attached filter={:p} lower={:p}",
-                filter_do,
-                lower_do
+                filter_do, lower_do
             );
             REGISTRY.add_pdo_filter(pdo, filter_do, lower_do, pdo_name);
             STATUS_SUCCESS

@@ -98,8 +98,7 @@ fn read_handover_payload(locator: &HandoverLocator) -> VckResult<Vec<u8>> {
     if mapped.is_null() {
         info!(
             "read_handover: MmMapIoSpace(0x{:x}, {}) failed",
-            locator.address,
-            len
+            locator.address, len
         );
         return Err(VckError::Io("MmMapIoSpace(handover payload) failed".into()));
     }
