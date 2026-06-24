@@ -19,6 +19,7 @@
 
 use core::ffi::c_void;
 
+use log::info;
 use wdk_sys::{
     ntddk::{ExFreePool, IofCallDriver, IofCompleteRequest},
     CCHAR, IO_NO_INCREMENT, IRP_MJ_DEVICE_CONTROL, IRP_MJ_PNP, IRP_MJ_READ, IRP_MJ_WRITE,
@@ -116,7 +117,7 @@ unsafe extern "C" fn size_ioctl_completion(
                     sysbuf.add(field_off),
                     8,
                 );
-                crate::vck_log!(
+                info!(
                     "filter: size ioctl 0x{:08x} reported as {} bytes",
                     code,
                     ctx.data_bytes

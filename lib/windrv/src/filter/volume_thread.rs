@@ -42,6 +42,8 @@ use wdk_sys::{
 
 use vck_common::VolumeCipher;
 
+use log::info;
+
 use crate::{
     crypto::pipeline::CryptoPipeline,
     device::DeviceExtension,
@@ -122,7 +124,7 @@ impl VolumeThread {
             self_ptr.cast::<c_void>(),
         );
         if !nt_success(st) {
-            crate::vck_log!("volume_thread: create failed 0x{:08x}", st);
+            info!("volume_thread: create failed 0x{:08x}", st);
             return vt; // thread null; enqueue falls back to direct completion
         }
         let mut obj: *mut c_void = null_mut();
@@ -300,7 +302,7 @@ unsafe extern "C" fn thread_main(context: *mut c_void) {
         match vol.sweep_step(BATCH_SECTORS) {
             Ok(true) => did = true, // more sweep work remains
             Ok(false) => {}
-            Err(e) => crate::vck_log!("volume_thread: sweep err: {}", e),
+            Err(e) => info!("volume_thread: sweep err: {}", e),
         }
 
         // (3) Idle → wait for a wake (new IRP / rebind / start_encrypt) or timeout.

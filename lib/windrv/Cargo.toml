@@ -23,6 +23,7 @@ vck-common = { workspace = true, default-features = false }
 
 aes.workspace = true
 irql.workspace = true
+log.workspace = true
 messagepack-serde = { workspace = true, default-features = false }
 serde = { workspace = true, default-features = false }
 serde_bytes = { workspace = true }

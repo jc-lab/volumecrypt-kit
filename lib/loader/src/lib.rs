@@ -28,7 +28,6 @@ extern crate alloc;
 
 pub mod chainload;
 pub mod cpu;
-pub mod debug;
 pub mod handover;
 pub mod hook;
 pub mod provider;
@@ -44,6 +43,6 @@ pub use hook::BlockIoHookEngine;
 /// control bits required by AES-NI before any AES-NI code (cipher construction,
 /// the Block IO decrypt hook) runs. Call this first from the sample's entry.
 pub fn init() {
-    vck_log!("init: start");
+    log::info!("init: start");
     cpu::report_and_enable_xmm();
 }

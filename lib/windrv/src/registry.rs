@@ -9,6 +9,7 @@ use alloc::{collections::BTreeMap, string::String, sync::Arc, vec::Vec};
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
+use log::info;
 use spin::Mutex;
 use vck_common::{types::Guid, EncryptedOffsetStore, SectorIo, VckResult, VolumeCipherSupplier};
 use wdk_sys::{DEVICE_OBJECT, DRIVER_OBJECT};
@@ -121,7 +122,7 @@ impl VolumeAttachRegistry {
 
     /// Store the boot ACPI handover essentials (called once at DriverEntry).
     pub fn set_handover(&self, info: HandoverInfo) {
-        crate::vck_log!(
+        info!(
             "registry: handover set partition_guid={}",
             info.partition_guid
         );
@@ -141,7 +142,7 @@ impl VolumeAttachRegistry {
         lower_do: *mut DEVICE_OBJECT,
         pdo_name: alloc::string::String,
     ) {
-        crate::vck_log!("add_pdo_filter: name={} filter={:p}", pdo_name, filter_do);
+        info!("add_pdo_filter: name={} filter={:p}", pdo_name, filter_do);
         self.pdo_filters.lock().push(PdoFilterEntry {
             pdo,
             filter_do,

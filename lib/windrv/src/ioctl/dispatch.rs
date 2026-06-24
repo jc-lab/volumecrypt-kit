@@ -11,6 +11,7 @@ use alloc::sync::Arc;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, AtomicU64, Ordering};
 
+use log::info;
 use spin::Mutex;
 use vck_common::{types::Guid, EncryptedOffsetStore, SectorIo, VckError, VckResult, VolumeId};
 
@@ -44,7 +45,7 @@ pub fn dispatch_ioctl<A: IoctlAuthorization>(
     input: &[u8],
 ) -> VckResult<IoctlResponse> {
     auth.authorize(ctx)?;
-    crate::vck_log!(
+    info!(
         "dispatch: ioctl=0x{:08x} authorized, input_len={} stack={}",
         ctx.ioctl_code,
         input.len(),
@@ -252,12 +253,12 @@ fn handle_jvck_prepare_adddevice_path(
         device_path: nt_path.clone(),
     };
     let geom_io = KernelVolumeIo::open_query(&io_volume_id).map_err(|e| {
-        crate::vck_log!("jvck_prepare(add): geom open failed: {}", e);
+        info!("jvck_prepare(add): geom open failed: {}", e);
         e
     })?;
     let sector_size = geom_io.sector_size();
     let total_sectors = geom_io.total_sectors();
-    crate::vck_log!(
+    info!(
         "jvck_prepare(add): bps={} total={}",
         sector_size,
         total_sectors
@@ -296,10 +297,10 @@ fn handle_jvck_prepare_adddevice_path(
         sector_buf[..copy_len].copy_from_slice(&req.metadata_block[..copy_len]);
         for lba in &replica_lbas {
             lo.write_sectors(*lba, &sector_buf).map_err(|e| {
-                crate::vck_log!("jvck_prepare(add): metadata write lba={} err: {}", lba, e);
+                info!("jvck_prepare(add): metadata write lba={} err: {}", lba, e);
                 e
             })?;
-            crate::vck_log!("jvck_prepare(add): wrote metadata lba={}", lba);
+            info!("jvck_prepare(add): wrote metadata lba={}", lba);
         }
     }
 
@@ -341,7 +342,7 @@ fn handle_jvck_prepare_adddevice_path(
     });
     registry.insert(volume.clone());
     unsafe { crate::filter::filter_bind_volume(filter_do, volume.clone()) };
-    crate::vck_log!("jvck_prepare(add): provisional volume bound (AddDevice path)");
+    info!("jvck_prepare(add): provisional volume bound (AddDevice path)");
 
     // Query storage device info for sweep_io path.
     const IOCTL_STORAGE_GET_DEVICE_NUMBER: u32 = 0x002D_1080;
@@ -435,7 +436,7 @@ fn handle_jvck_prepare_adddevice_path(
         });
         registry.insert(complete.clone());
         unsafe { crate::filter::filter_rebind_volume(filter_do, complete) };
-        crate::vck_log!(
+        info!(
             "jvck_prepare(add): fully attached offset={} data={}",
             store_offset,
             store_data
@@ -520,12 +521,12 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
     };
     use wdk_sys::{PDEVICE_OBJECT as PDO, PFILE_OBJECT};
 
-    crate::vck_log!(
+    info!(
         "jvck_prepare: enter stack={}",
         crate::debug::remaining_stack()
     );
     let req: JvckVolumePrepareReq = decode_req(input)?;
-    crate::vck_log!(
+    info!(
         "jvck_prepare: path={} use_h={} use_f={} md_size={} block_len={} is_os={}",
         req.volume_path,
         req.use_header,
@@ -566,7 +567,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         |dev| registry.find_pdo_filter(dev),
         |name| registry.find_pdo_filter_by_name(name),
     ) {
-        crate::vck_log!(
+        info!(
             "jvck_prepare: AddDevice filter found filter={:p} lower={:p}",
             filter_do,
             lower_do
@@ -575,31 +576,31 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
             registry, req, nt_path, driver, filter_do, lower_do,
         );
     }
-    crate::vck_log!("jvck_prepare: no pre-attached filter, using lock/dismount fallback");
+    info!("jvck_prepare: no pre-attached filter, using lock/dismount fallback");
 
     // Open vol_handle early — used for FSCTLs, geometry, metadata write.
     let vol_handle = open_volume_handle_raw(&nt_path);
-    crate::vck_log!("jvck_prepare: vol_handle_open={}", vol_handle.is_some());
+    info!("jvck_prepare: vol_handle_open={}", vol_handle.is_some());
 
     // ── Step 1: lock → dismount → re-lock ──────────────────────────────────
     let mut held_lock = false;
     if let Some(h) = vol_handle {
         let st = send_fsctl(h, FSCTL_LOCK_VOLUME);
-        crate::vck_log!("jvck_prepare: LOCK(1)=0x{:08x}", st);
+        info!("jvck_prepare: LOCK(1)=0x{:08x}", st);
         held_lock = crate::nt::nt_success(st);
     }
     if let Some(h) = vol_handle {
         let st = send_fsctl(h, FSCTL_DISMOUNT_VOLUME);
-        crate::vck_log!("jvck_prepare: DISMOUNT=0x{:08x}", st);
+        info!("jvck_prepare: DISMOUNT=0x{:08x}", st);
     }
     if !held_lock {
         if let Some(h) = vol_handle {
             let st = send_fsctl(h, FSCTL_LOCK_VOLUME);
-            crate::vck_log!("jvck_prepare: LOCK(2)=0x{:08x}", st);
+            info!("jvck_prepare: LOCK(2)=0x{:08x}", st);
             held_lock = crate::nt::nt_success(st);
         }
     }
-    crate::vck_log!("jvck_prepare: lock_held={}", held_lock);
+    info!("jvck_prepare: lock_held={}", held_lock);
 
     // Query geometry while locked.
     let (sector_size, total_sectors): (u32, u64) = vol_handle.map_or((512, 0), |h| {
@@ -643,7 +644,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         }) {
             total = u64::from_le_bytes(len_buf) / bps as u64;
         }
-        crate::vck_log!("jvck_prepare: geom bps={} total={}", bps, total);
+        info!("jvck_prepare: geom bps={} total={}", bps, total);
         (bps, total)
     });
 
@@ -667,7 +668,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
     let header_sectors = req.use_header as u64 * rs;
     let data_sectors = total_sectors.saturating_sub(header_sectors + footer_sectors);
     let offset_sector = header_sectors;
-    crate::vck_log!(
+    info!(
         "jvck_prepare: data_sectors={} offset_sector={} rs={}",
         data_sectors,
         offset_sector,
@@ -710,7 +711,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
     } else {
         null_mut()
     };
-    crate::vck_log!("jvck_prepare: target_do={:p}", target_do);
+    info!("jvck_prepare: target_do={:p}", target_do);
 
     let (filter_do, _lower_do) = if !target_do.is_null() {
         crate::filter::attach_filter_to_raw_device(driver, target_do)
@@ -719,7 +720,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         crate::filter::attach_filter_unbound(driver, &win32_nt)
     }
     .map_err(|err| {
-        crate::vck_log!("jvck_prepare: attach failed: {}", err);
+        info!("jvck_prepare: attach failed: {}", err);
         if held_lock {
             if let Some(h) = vol_handle {
                 send_fsctl(h, FSCTL_UNLOCK_VOLUME);
@@ -768,13 +769,13 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
     });
     registry.insert(volume.clone());
     unsafe { crate::filter::filter_bind_volume(filter_do, volume.clone()) };
-    crate::vck_log!("jvck_prepare: provisional volume bound, size hiding active");
+    info!("jvck_prepare: provisional volume bound, size hiding active");
 
     // ── Step 5: unlock → FSD re-mounts above our filter ─────────────────────
     if held_lock {
         if let Some(h) = vol_handle {
             let st = send_fsctl(h, FSCTL_UNLOCK_VOLUME);
-            crate::vck_log!("jvck_prepare: UNLOCK=0x{:08x}", st);
+            info!("jvck_prepare: UNLOCK=0x{:08x}", st);
         }
     }
     if let Some(h) = vol_handle {
@@ -809,9 +810,9 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
                 sector_buf[..copy_len].copy_from_slice(&req.metadata_block[..copy_len]);
                 for lba in &replica_lbas {
                     match write_io.write_sectors(*lba, &sector_buf) {
-                        Ok(()) => crate::vck_log!("jvck_prepare: wrote metadata lba={}", lba),
+                        Ok(()) => info!("jvck_prepare: wrote metadata lba={}", lba),
                         Err(err) => {
-                            crate::vck_log!("jvck_prepare: write failed lba={}: {}", lba, err);
+                            info!("jvck_prepare: write failed lba={}: {}", lba, err);
                             registry.remove(&req.volume_path);
                             crate::filter::detach_filter(filter_do);
                             return Err(err);
@@ -820,7 +821,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
                 }
             }
             Err(err) => {
-                crate::vck_log!("jvck_prepare: write_io open failed: {}", err);
+                info!("jvck_prepare: write_io open failed: {}", err);
                 registry.remove(&req.volume_path);
                 crate::filter::detach_filter(filter_do);
                 return Err(err);
@@ -894,7 +895,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
                 start_offset_bytes =
                     u64::from_le_bytes(partition_info[4..12].try_into().unwrap_or([0; 8]));
             }
-            crate::vck_log!(
+            info!(
                 "jvck_prepare: disk={} part={} start_offset={}",
                 disk_num,
                 part_num,
@@ -919,7 +920,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
 
         (partition_path, disk_path, start_lba)
     };
-    crate::vck_log!(
+    info!(
         "jvck_prepare: raw_partition={} raw_disk={} start_lba={}",
         raw_partition_path,
         raw_disk_path,
@@ -944,20 +945,20 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
 
         // Read metadata via KernelVolumeIo (NTFS has remounted above filter).
         let probe_io = KernelVolumeIo::open_query(&io_volume_id).map_err(|err| {
-            crate::vck_log!("jvck_prepare: probe failed: {}, detaching", err);
+            info!("jvck_prepare: probe failed: {}, detaching", err);
             registry.remove(&req.volume_path);
             crate::filter::detach_filter(filter_do);
             err
         })?;
         let partition_total = probe_io.total_sectors();
         let store_bps = probe_io.sector_size();
-        crate::vck_log!("jvck_prepare: probe ok total={}", partition_total);
+        info!("jvck_prepare: probe ok total={}", partition_total);
 
         // Let the SAMPLE open + decrypt the metadata over the probe IO and build
         // the cipher; the framework owns no crypto policy.
         let probe_arc: Arc<dyn SectorIo> = Arc::new(probe_io);
         let io_config = on_attach_volume(&req.vmk, None, probe_arc).map_err(|err| {
-            crate::vck_log!("jvck_prepare: on_attach failed: {}, detaching", err);
+            info!("jvck_prepare: on_attach failed: {}, detaching", err);
             registry.remove(&req.volume_path);
             crate::filter::detach_filter(filter_do);
             err
@@ -974,7 +975,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
                 device_path: raw_disk_path.clone(),
             };
             let disk_total = partition_start_lba + store_data + 1024;
-            crate::vck_log!(
+            info!(
                 "jvck_prepare: sweep via raw disk {} lba={}",
                 raw_disk_path,
                 partition_start_lba
@@ -993,7 +994,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
                 partition_guid: Guid::nil(),
                 device_path: raw_partition_path.clone(),
             };
-            crate::vck_log!(
+            info!(
                 "jvck_prepare: sweep via raw partition {}",
                 raw_partition_path
             );
@@ -1027,7 +1028,7 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
         });
         registry.insert(complete_volume.clone());
         unsafe { crate::filter::filter_rebind_volume(filter_do, complete_volume) };
-        crate::vck_log!(
+        info!(
             "jvck_prepare: fully attached offset={} data={}",
             store_offset,
             store_data
@@ -1062,12 +1063,12 @@ fn handle_jvck_prepare(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResu
 /// reach the protected region). This IOCTL reads the metadata, derives the
 /// FVEK, and replaces the provisional volume with the full AesXts volume.
 fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<IoctlResponse> {
-    crate::vck_log!(
+    info!(
         "jvck_attach: enter stack={}",
         crate::debug::remaining_stack()
     );
     let req: JvckVolumeAttachReq = decode_req(input)?;
-    crate::vck_log!(
+    info!(
         "jvck_attach: path={} vmk_len={}",
         req.volume_path,
         req.vmk.len()
@@ -1108,11 +1109,11 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
     // any NTFS page cache.
     let _ = (sector_size, data_sectors); // used via provisional only for context logging
     let probe_io = KernelVolumeIo::open_query(&io_volume_id).map_err(|err| {
-        crate::vck_log!("jvck_attach: probe open_query failed: {}", err);
+        info!("jvck_attach: probe open_query failed: {}", err);
         err
     })?;
     let partition_total = probe_io.total_sectors();
-    crate::vck_log!(
+    info!(
         "jvck_attach: partition_total={} sector_size={}",
         partition_total,
         probe_io.sector_size()
@@ -1123,7 +1124,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
         let footer_lba = partition_total.saturating_sub(1);
         let mut diag = alloc::vec![0u8; probe_io.sector_size() as usize];
         if probe_io.read_sectors(footer_lba, &mut diag).is_ok() {
-            crate::vck_log!(
+            info!(
                 "jvck_attach: footer_lba={} bytes=[{:02x}{:02x}{:02x}{:02x} {:02x}{:02x}{:02x}{:02x}]",
                 footer_lba,
                 diag[0], diag[1], diag[2], diag[3],
@@ -1137,17 +1138,17 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
     // cipher; the framework owns no crypto policy.
     let probe_arc: Arc<dyn SectorIo> = Arc::new(probe_io);
     let io_config = on_attach_volume(&req.vmk, None, probe_arc).map_err(|err| {
-        crate::vck_log!("jvck_attach: on_attach failed: {}", err);
+        info!("jvck_attach: on_attach failed: {}", err);
         err
     })?;
-    crate::vck_log!("jvck_attach: metadata opened");
+    info!("jvck_attach: metadata opened");
 
     let (offset_sector, encrypted_offset, offset_store) = io_config.geometry().ok_or(
         VckError::ValidationFailed("on_attach returned passthrough for a VMK-provided volume"),
     )?;
     let store_data_sectors = encrypted_offset.total_sectors;
 
-    crate::vck_log!("jvck_attach: build sweep_io");
+    info!("jvck_attach: build sweep_io");
 
     // sweep_io must bypass both NTFS and the filter so that:
     //   1. NTFS write protection for its own sectors (e.g. VBR at lba=0) doesn't block us
@@ -1169,7 +1170,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
             partition_guid: Guid::nil(),
             device_path: req.raw_partition_path.clone(),
         };
-        crate::vck_log!(
+        info!(
             "jvck_attach: sweep_io via raw partition {}",
             req.raw_partition_path
         );
@@ -1179,7 +1180,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
             store_data_sectors,
         )?)
     } else {
-        crate::vck_log!("jvck_attach: sweep_io via volume (no raw path)");
+        info!("jvck_attach: sweep_io via volume (no raw path)");
         Arc::new(KernelVolumeIo::open(
             &io_volume_id,
             store_sector_size,
@@ -1205,7 +1206,7 @@ fn handle_jvck_attach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResul
     });
     registry.insert(volume.clone());
     unsafe { crate::filter::filter_rebind_volume(filter_do, volume.clone()) };
-    crate::vck_log!("jvck_attach: volume complete and rebound, done");
+    info!("jvck_attach: volume complete and rebound, done");
 
     encode_resp(&JvckVolumeAttachResp {
         offset_sector,
@@ -1250,7 +1251,7 @@ pub fn detach_volume_with_dismount(
     if let Some(h) = vol_handle {
         // Step 1: lock (non-fatal if ignore_open_files).
         let lock_st = send_fsctl(h, FSCTL_LOCK_VOLUME);
-        crate::vck_log!(
+        info!(
             "detach: LOCK_VOLUME=0x{:08x} ignore={}",
             lock_st,
             ignore_open_files
@@ -1268,7 +1269,7 @@ pub fn detach_volume_with_dismount(
         let mut dismounted = false;
         for attempt in 0..MAX_RETRIES {
             let dis_st = send_fsctl(h, FSCTL_DISMOUNT_VOLUME);
-            crate::vck_log!(
+            info!(
                 "detach: DISMOUNT_VOLUME attempt={} status=0x{:08x}",
                 attempt,
                 dis_st
@@ -1291,7 +1292,7 @@ pub fn detach_volume_with_dismount(
             }
         }
         if !dismounted {
-            crate::vck_log!(
+            info!(
                 "detach: DISMOUNT_VOLUME failed after {} retries",
                 MAX_RETRIES
             );
@@ -1300,7 +1301,7 @@ pub fn detach_volume_with_dismount(
         // Unlock so the FSD (if any) can re-mount (or stays unmounted — we'll detach).
         if held_lock {
             let unlock_st = send_fsctl(h, FSCTL_UNLOCK_VOLUME);
-            crate::vck_log!("detach: UNLOCK_VOLUME=0x{:08x}", unlock_st);
+            info!("detach: UNLOCK_VOLUME=0x{:08x}", unlock_st);
         }
         unsafe {
             let _ = ZwClose(h);
@@ -1331,7 +1332,7 @@ pub fn detach_volume_with_dismount(
             crate::filter::detach_filter(filter_do);
         }
     }
-    crate::vck_log!(
+    info!(
         "detach: done for {} (keep_filter={})",
         volume_path,
         keep_filter
@@ -1345,7 +1346,7 @@ fn handle_detach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<Ioc
     // live system volume would then read ciphertext. Refuse the request.
     if let Some(volume) = registry.get(&req.volume_path) {
         if volume.is_os_volume() && volume.has_encrypted_data() {
-            crate::vck_log!(
+            info!(
                 "detach: refused — OS volume is encrypted ({})",
                 req.volume_path
             );
@@ -1357,7 +1358,7 @@ fn handle_detach(registry: &VolumeAttachRegistry, input: &[u8]) -> VckResult<Ioc
     // keep_filter=true: leave the filter attached as pass-through so the volume
     // can be re-attached (mounted) again without a reboot.
     detach_volume_with_dismount(registry, &req.volume_path, false, true).map_err(|e| {
-        crate::vck_log!("detach: failed: {}", e);
+        info!("detach: failed: {}", e);
         e
     })?;
     encode_resp(&EmptyResponse {})
@@ -1379,7 +1380,7 @@ fn handle_pause_os_volume(registry: &VolumeAttachRegistry) -> VckResult<IoctlRes
     for volume in registry.all() {
         if volume.is_os_volume() {
             volume.encryption.lock().pause();
-            crate::vck_log!("pause_os_volume: paused {}", volume.volume_path);
+            info!("pause_os_volume: paused {}", volume.volume_path);
         }
     }
     Ok(Vec::new())
@@ -1397,11 +1398,11 @@ fn handle_detach_all_volumes(registry: &VolumeAttachRegistry) -> VckResult<Ioctl
         .map(|v| v.volume_path.clone())
         .collect();
     for path in data_paths {
-        crate::vck_log!("detach_all_data: detaching {}", path);
+        info!("detach_all_data: detaching {}", path);
         // keep_filter=false: this runs on shutdown/unload, so fully tear down the
         // filter device (IoDetachDevice + IoDeleteDevice).
         if let Err(e) = detach_volume_with_dismount(registry, &path, true, false) {
-            crate::vck_log!("detach_all_data: {} failed: {}", path, e);
+            info!("detach_all_data: {} failed: {}", path, e);
         }
     }
     Ok(Vec::new())
@@ -1479,7 +1480,7 @@ fn handle_bench_aes(input: &[u8]) -> VckResult<IoctlResponse> {
     let encrypt_mib_s = (actual_mib * freq_val).checked_div(enc_ticks).unwrap_or(0);
     let decrypt_mib_s = (actual_mib * freq_val).checked_div(dec_ticks).unwrap_or(0);
 
-    crate::vck_log!(
+    info!(
         "bench_aes: size={}MiB enc={}MiB/s dec={}MiB/s",
         actual_mib,
         encrypt_mib_s,

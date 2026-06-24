@@ -19,6 +19,7 @@
 //! address stays valid at runtime.
 
 use alloc::vec::Vec;
+use log::info;
 use vck_common::{
     handover::payload::{decode_locator, HandoverLocator, HandoverPayload},
     VckError, VckResult,
@@ -95,7 +96,7 @@ fn read_handover_payload(locator: &HandoverLocator) -> VckResult<Vec<u8>> {
     // DriverEntry.
     let mapped = unsafe { MmMapIoSpace(phys, len as wdk_sys::SIZE_T, MM_CACHED) } as *mut u8;
     if mapped.is_null() {
-        crate::vck_log!(
+        info!(
             "read_handover: MmMapIoSpace(0x{:x}, {}) failed",
             locator.address,
             len
@@ -110,7 +111,7 @@ fn read_handover_payload(locator: &HandoverLocator) -> VckResult<Vec<u8>> {
         MmUnmapIoSpace(mapped.cast(), len as wdk_sys::SIZE_T);
         v
     };
-    crate::vck_log!("read_handover: payload mapped ({} bytes)", out.len());
+    info!("read_handover: payload mapped ({} bytes)", out.len());
     Ok(out)
 }
 
@@ -133,7 +134,7 @@ fn read_handover_variable(var_name: &str, var_guid: [u8; 16]) -> VckResult<Vec<u
         )
     };
     if st != STATUS_BUFFER_TOO_SMALL || len == 0 {
-        crate::vck_log!("read_handover: size probe status=0x{:08x} len={}", st, len);
+        info!("read_handover: size probe status=0x{:08x} len={}", st, len);
         return Err(VckError::NotFound("handover variable not present"));
     }
 
@@ -159,7 +160,7 @@ fn read_handover_variable(var_name: &str, var_guid: [u8; 16]) -> VckResult<Vec<u
             core::ptr::write_bytes(buf, 0, total);
             ExFreePool(buf.cast());
         }
-        crate::vck_log!("read_handover: get status=0x{:08x}", st);
+        info!("read_handover: get status=0x{:08x}", st);
         return Err(VckError::Io(
             "ExGetFirmwareEnvironmentVariable(get) failed".into(),
         ));
@@ -174,6 +175,6 @@ fn read_handover_variable(var_name: &str, var_guid: [u8; 16]) -> VckResult<Vec<u
         ExFreePool(buf.cast());
         v
     };
-    crate::vck_log!("read_handover: variable read ok ({} bytes)", out.len());
+    info!("read_handover: variable read ok ({} bytes)", out.len());
     Ok(out)
 }

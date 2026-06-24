@@ -15,6 +15,7 @@
 extern crate alloc;
 
 use core::panic::PanicInfo;
+use log::info;
 
 use wdk_alloc::WdkAllocator;
 use wdk_sys::{DRIVER_OBJECT, NTSTATUS, PCUNICODE_STRING};
@@ -32,8 +33,9 @@ pub unsafe extern "system" fn DriverEntry(
     registry_path: PCUNICODE_STRING,
 ) -> NTSTATUS {
     let _ = (driver, registry_path);
+    vck_windrv::init_logger();
     let report = tests::run_all();
-    vck_windrv::vck_log!(
+    info!(
         "crypto-test: {} passed, {} failed",
         report.passed,
         report.failed

@@ -5,6 +5,7 @@
 //! `EncryptionEngine`: decides per-sector crypto behaviour and drives the
 //! background encrypt/decrypt sweep, persisting progress via the store.
 
+use log::info;
 use vck_common::{
     types::VolumeState, EncryptedOffset, EncryptedOffsetStore, SectorIo, VckResult, VolumeCipher,
 };
@@ -189,22 +190,22 @@ impl EncryptionEngine {
 
         let mut buf = alloc::vec![0u8; count as usize * sector_size];
         let abs = self.offset_sector + start_rel;
-        crate::vck_log!("sweep: enc read abs={} count={}", abs, count);
+        info!("sweep: enc read abs={} count={}", abs, count);
         io.read_sectors(abs, &mut buf).map_err(|e| {
-            crate::vck_log!("sweep: read err: {}", e);
+            info!("sweep: read err: {}", e);
             e
         })?;
         cipher.encrypt_area(&mut buf, sector_size, start_rel);
-        crate::vck_log!("sweep: enc write abs={}", abs);
+        info!("sweep: enc write abs={}", abs);
         io.write_sectors(abs, &buf).map_err(|e| {
-            crate::vck_log!("sweep: write err: {}", e);
+            info!("sweep: write err: {}", e);
             e
         })?;
 
         self.encrypted_offset.sector += count;
-        crate::vck_log!("sweep: stored boundary={}", self.encrypted_offset.sector);
+        info!("sweep: stored boundary={}", self.encrypted_offset.sector);
         store.store(&self.encrypted_offset).map_err(|e| {
-            crate::vck_log!("sweep: store err: {}", e);
+            info!("sweep: store err: {}", e);
             e
         })?;
         store.flush()?;

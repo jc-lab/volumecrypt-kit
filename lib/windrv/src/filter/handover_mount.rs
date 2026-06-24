@@ -28,6 +28,7 @@ use core::ffi::c_void;
 use core::ptr::null_mut;
 use core::sync::atomic::{AtomicPtr, AtomicU64};
 
+use log::info;
 use spin::Mutex;
 use vck_common::SectorIo;
 use wdk_sys::{
@@ -99,7 +100,7 @@ pub unsafe extern "C" fn on_start_device_completed(
         // any read of an encrypted sector before binding would return ciphertext.
         let wi: PIO_WORKITEM = IoAllocateWorkItem(filter_do);
         if wi.is_null() {
-            crate::vck_log!("handover_mount: IoAllocateWorkItem failed; leaving unbound");
+            info!("handover_mount: IoAllocateWorkItem failed; leaving unbound");
             return STATUS_CONTINUE_COMPLETION;
         }
         let ctx = ExAllocatePool2(
@@ -109,7 +110,7 @@ pub unsafe extern "C" fn on_start_device_completed(
         ) as *mut StartWorkCtx;
         if ctx.is_null() {
             IoFreeWorkItem(wi);
-            crate::vck_log!("handover_mount: work ctx alloc failed; leaving unbound");
+            info!("handover_mount: work ctx alloc failed; leaving unbound");
             return STATUS_CONTINUE_COMPLETION;
         }
         (*ctx).filter_do = filter_do;
@@ -173,7 +174,7 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     // OBJECT_TYPE_MISMATCH.
     let mut footer_io = LowerDeviceIo::new(lower_do, 0, 0);
     if let Err(e) = footer_io.query_geometry() {
-        crate::vck_log!("handover_mount: geometry probe failed: {}", e);
+        info!("handover_mount: geometry probe failed: {}", e);
         return;
     }
 
@@ -181,17 +182,17 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     match footer_io.read_gpt_partition_id() {
         Ok(guid) => {
             if guid != handover.partition_guid {
-                crate::vck_log!(
+                info!(
                     "handover_mount: partition {} != target {}, skipping",
                     guid,
                     handover.partition_guid
                 );
                 return;
             }
-            crate::vck_log!("handover_mount: OS volume matched ({})", guid);
+            info!("handover_mount: OS volume matched ({})", guid);
         }
         Err(e) => {
-            crate::vck_log!("handover_mount: partition id read failed: {}", e);
+            info!("handover_mount: partition id read failed: {}", e);
             return;
         }
     }
@@ -204,7 +205,7 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     let provider = match crate::provider::global_volume_provider() {
         Some(p) => p,
         None => {
-            crate::vck_log!("handover_mount: no volume provider installed");
+            info!("handover_mount: no volume provider installed");
             return;
         }
     };
@@ -218,14 +219,14 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     let io_config = match provider.on_attach(&ctx) {
         Ok(c) => c,
         Err(e) => {
-            crate::vck_log!("handover_mount: on_attach failed: {}", e);
+            info!("handover_mount: on_attach failed: {}", e);
             return;
         }
     };
     let (offset_sector, encrypted_offset, offset_store) = match io_config.geometry() {
         Some(parts) => parts,
         None => {
-            crate::vck_log!("handover_mount: on_attach returned passthrough");
+            info!("handover_mount: on_attach returned passthrough");
             return;
         }
     };
@@ -263,7 +264,7 @@ pub unsafe fn try_mount_handover_volume(filter_do: PDEVICE_OBJECT) {
     volume.encryption.lock().resume(&*volume.offset_store);
 
     crate::filter::filter_bind_volume(filter_do, volume.clone());
-    crate::vck_log!(
+    info!(
         "handover_mount: OS volume bound path={} offset_sector={} data_sectors={} boundary={}",
         volume_path,
         offset_sector,

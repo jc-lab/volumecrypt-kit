@@ -18,6 +18,7 @@ use core::ffi::c_void;
 use core::mem::size_of;
 use core::ptr::null_mut;
 
+use log::info;
 use vck_common::{SectorIo, VckError, VckResult, VolumeId};
 use wdk_sys::{
     ntddk::{
@@ -99,7 +100,7 @@ impl KernelVolumeIo {
                 0,
             )
         };
-        crate::vck_log!(
+        info!(
             "KVIO: ZwCreateFile status=0x{:08x} stack={}",
             status,
             crate::debug::remaining_stack()
@@ -166,7 +167,7 @@ impl KernelVolumeIo {
                 &mut handle,
             )
         };
-        crate::vck_log!("KVIO: from_device_object status=0x{:08x}", status);
+        info!("KVIO: from_device_object status=0x{:08x}", status);
         if !nt_success(status) {
             return Err(VckError::Io("ObOpenObjectByPointer(lower) failed".into()));
         }
@@ -235,13 +236,13 @@ impl KernelVolumeIo {
                 0,
             )
         };
-        crate::vck_log!("KVIO: allow_extended_dasd_io status=0x{:08x}", status);
+        info!("KVIO: allow_extended_dasd_io status=0x{:08x}", status);
     }
 
     fn query_geometry(&mut self) -> VckResult<()> {
         // DISK_GEOMETRY is 24 bytes; over-allocate a little for safety.
         let mut geom = [0u8; 32];
-        crate::vck_log!("KVIO: ioctl DRIVE_GEOMETRY");
+        info!("KVIO: ioctl DRIVE_GEOMETRY");
         self.device_ioctl(IOCTL_DISK_GET_DRIVE_GEOMETRY, &mut geom)?;
         let bps_off = DISK_GEOMETRY_BYTES_PER_SECTOR_OFFSET;
         let bytes_per_sector = u32::from_le_bytes(geom[bps_off..bps_off + 4].try_into().unwrap());
@@ -251,13 +252,13 @@ impl KernelVolumeIo {
 
         // GET_LENGTH_INFORMATION { LARGE_INTEGER Length } -> 8 bytes.
         let mut len = [0u8; 8];
-        crate::vck_log!("KVIO: ioctl LENGTH_INFO (bps={})", bytes_per_sector);
+        info!("KVIO: ioctl LENGTH_INFO (bps={})", bytes_per_sector);
         self.device_ioctl(IOCTL_DISK_GET_LENGTH_INFO, &mut len)?;
         let total_bytes = u64::from_le_bytes(len);
 
         self.sector_size = bytes_per_sector;
         self.total_sectors = total_bytes / bytes_per_sector as u64;
-        crate::vck_log!(
+        info!(
             "KVIO: geometry bps={} total_sectors={}",
             bytes_per_sector,
             self.total_sectors
@@ -267,7 +268,7 @@ impl KernelVolumeIo {
 
     /// Issue a synchronous METHOD_BUFFERED device IOCTL with no input buffer.
     fn device_ioctl(&self, code: u32, output: &mut [u8]) -> VckResult<()> {
-        crate::vck_log!(
+        info!(
             "KVIO: device_ioctl code=0x{:08x} outlen={} stack={}",
             code,
             output.len(),
@@ -288,7 +289,7 @@ impl KernelVolumeIo {
                 output.len() as u32,
             )
         };
-        crate::vck_log!("KVIO: device_ioctl status=0x{:08x}", status);
+        info!("KVIO: device_ioctl status=0x{:08x}", status);
         if !nt_success(status) {
             return Err(VckError::Io("volume geometry IOCTL failed".into()));
         }
@@ -300,7 +301,7 @@ impl KernelVolumeIo {
         if len == 0 {
             return Ok(());
         }
-        crate::vck_log!(
+        info!(
             "KVIO: run_sync write={} lba={} len={} stack={}",
             is_write as u32,
             lba,
@@ -345,7 +346,7 @@ impl KernelVolumeIo {
             }
         };
 
-        crate::vck_log!("KVIO: run_sync done status=0x{:08x}", status);
+        info!("KVIO: run_sync done status=0x{:08x}", status);
         if !nt_success(status) {
             return Err(VckError::Io("volume I/O failed".into()));
         }

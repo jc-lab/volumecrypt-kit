@@ -19,7 +19,8 @@ wdk-build.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+log.workspace = true
 vck-common = { path = "../../lib/common", default-features = false }
 vck-windrv = { path = "../../lib/windrv" }
 wdk-alloc.workspace = true
-wdk-sys = "0.5.1"
+wdk-sys.workspace = true

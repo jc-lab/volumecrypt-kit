@@ -8,6 +8,7 @@ use alloc::ffi::CString;
 use alloc::string::String;
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
+use log::{Level, Metadata, Record};
 use wdk_sys::ntddk::DbgPrint;
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -165,16 +166,44 @@ fn write_debugcon(bytes: &[u8]) {
 #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
 fn write_debugcon(_bytes: &[u8]) {}
 
-/// Print a timestamped, `vck-windrv:`-prefixed line to the kernel debugger
-/// (`DbgPrint`) and, with the `debugcon` feature, the 0xE9 debug console.
-///
-/// This is the driver-side counterpart of the loader's `vck_log!`
-/// (`lib/loader/src/debug.rs`): same macro name and calling convention, same
-/// `{timestamp} vck-<component>: <message>` output shape, so both components log
-/// the same way into the captured `debug.log`.
-#[macro_export]
-macro_rules! vck_log {
-    ($($arg:tt)*) => {
-        $crate::debug::debug_print(core::format_args!($($arg)*))
-    };
+struct WinDrvLogger;
+
+impl log::Log for WinDrvLogger {
+    fn enabled(&self, _metadata: &Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &Record) {
+        let (secs, millis) = get_timestamp();
+        let mut line = String::new();
+        let _ = write!(
+            &mut line,
+            "{}.{:03} vck-windrv: [{}] {}\n",
+            secs,
+            millis,
+            record.level(),
+            record.args()
+        );
+
+        let message = match CString::new(line) {
+            Ok(msg) => msg,
+            Err(_) => return,
+        };
+
+        unsafe {
+            DbgPrint(c"%s".as_ptr().cast(), message.as_ptr());
+        }
+
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        write_debugcon(message.as_bytes_with_nul());
+    }
+
+    fn flush(&self) {}
+}
+
+/// Initialize the logger for the driver.
+/// Outputs to DbgPrint and, on x86/x86_64 architectures, also to the QEMU
+/// ISA debug console (port 0xE9) when available.
+pub fn init_logger() {
+    let _ = log::set_logger(&WinDrvLogger).map(|()| log::set_max_level(log::LevelFilter::Trace));
 }

@@ -36,17 +36,15 @@ use vck_sample_common::{VckConfig, VckHandoverPayload};
 #[entry]
 fn efi_main() -> Status {
     let _ = uefi::helpers::init();
-    vck_loader::vck_log!("efi_main: entered");
+    log::info!("efi_main: entered");
 
     match run() {
         Ok(()) => {
-            vck_loader::vck_log!("chainloaded image returned unexpectedly");
-            log::warn!("vck-loader: chainloaded image returned unexpectedly");
+            log::warn!("chainloaded image returned unexpectedly");
             Status::SUCCESS
         }
         Err(err) => {
-            vck_loader::vck_log!("boot failed: {}", err);
-            log::error!("vck-loader: boot failed: {err}");
+            log::error!("boot failed: {err}");
             Status::LOAD_ERROR
         }
     }
@@ -71,12 +69,11 @@ fn run() -> VckResult<()> {
     // publish the handover + chainload. This also isolates the handover path for
     // validation independently of the crypto machinery.
     if let Err(err) = install_decrypt_hook(config.partition_guid, &config.vmk) {
-        vck_loader::vck_log!("no footer metadata yet / decrypt hook skipped: {}", err);
-        log::warn!("vck-loader: decrypt hook skipped: {err}");
+        log::warn!("decrypt hook skipped: {err}");
     }
 
     vck_loader::handover::install_handover(&payload)?;
-    vck_loader::vck_log!("handover published (EfiRuntimeServicesData + locator variable)");
+    log::info!("handover published (EfiRuntimeServicesData + locator variable)");
     vck_loader::chainload::chainload_next(&next_loader)
 }
 
@@ -127,6 +124,6 @@ fn install_decrypt_hook(partition_guid: Guid, vmk: &[u8]) -> VckResult<()> {
     // through them).
     let engine = Box::leak(Box::new(BlockIoHookEngine::new(geometry, cipher_supplier)?));
     engine.install()?;
-    vck_loader::vck_log!("block io decrypt hook installed");
+    log::info!("block io decrypt hook installed");
     Ok(())
 }

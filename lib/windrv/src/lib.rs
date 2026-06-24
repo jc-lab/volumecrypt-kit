@@ -14,6 +14,7 @@ extern crate alloc;
 
 pub mod crypto;
 pub mod debug;
+pub use debug::init_logger;
 pub mod device;
 pub mod executor;
 pub mod filter;

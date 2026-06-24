@@ -51,5 +51,6 @@ zeroize = { version = "1", default-features = false, features = ["alloc", "deriv
 wdk-alloc = "0.4.1"
 wdk-build = "0.5.1"
 wdk-sys = "0.5.1"
+log = { version = "0.4", default-features = false }
 
 vck-common = { version = "0.0.5", path = "lib/common", default-features = false }
