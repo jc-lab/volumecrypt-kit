@@ -31,7 +31,7 @@ thiserror = { workspace = true, default-features = false }
 uuid = { workspace = true, default-features = false }
 xts-mode.workspace = true
 zeroize.workspace = true
-uefi = { version = "0.37", default-features = false, optional = true }
+uefi = { version = "0.38", default-features = false, optional = true }
 
 [dev-dependencies]
 rusty-hook = { workspace = true }

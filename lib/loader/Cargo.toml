@@ -14,9 +14,9 @@ description = "UEFI pre-boot loader framework for VolumeCrypt-Kit"
 vck-common = { workspace = true, default-features = false, features = ["uefi"] }
 
 log = { workspace = true, default-features = false }
-uefi = { version = "0.37", default-features = false, features = ["alloc"] }
+uefi = { version = "0.38", default-features = false, features = ["alloc"] }
 # Raw protocol structs (BlockIoProtocol) for vtable patching in the read hook.
-uefi-raw = "0.14"
+uefi-raw = "0.15"
 
 # AES-XTS volume decryption for the transparent Block IO read hook.
 aes.workspace = true
